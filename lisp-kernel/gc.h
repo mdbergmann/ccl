@@ -109,7 +109,11 @@ typedef unsigned char qnode;
 #ifdef ARM
 #define forward_marker (0xe7fffff0|uuo_format_unary)
 #else
+#ifdef ARM64
+#define forward_marker tag_nil
+#else
 #define forward_marker fulltag_nil
+#endif
 #endif
 #endif
 

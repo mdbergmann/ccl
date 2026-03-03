@@ -18,12 +18,14 @@ Partial scaffolding exists from an earlier incomplete effort, with
 | `lisp-kernel/arm64-macros.s` | 608 | Partial |
 | `lisp-kernel/arm64-constants.s` | 442 | Partial |
 | `lisp-kernel/arm64-constants.h` | 511 | **COMPLETE** — registers, TBI tags, uvector subtags, markers, offsets, NIL/T, structs, TCR, UUO, FPCR/FPSR |
-| `lisp-kernel/arm64-exceptions.h` | 15 | Empty stub |
+| `lisp-kernel/arm64-exceptions.h` | 139 | **COMPLETE** — opcode/pc types, HLT UUO detection, alloc sequence macros, function declarations |
+| `lisp-kernel/platform-linuxarm64.h` | 51 | **COMPLETE** — PLATFORM_CPU_ARM64, ucontext accessors, page fault detection |
+| `lisp-kernel/platform-darwinarm64.h` | 66 | **COMPLETE** — PLATFORM_CPU_ARM64, Darwin mcontext accessors, Mach includes |
 | `lisp-kernel/arm64-uuo.s` | 67 | Minimal stub |
 | `compiler/ARM64/arm64-asm.lisp` | 1,170 | Assembler partially started |
 | `lisp-kernel/linuxarm64/Makefile` | exists | References missing `platform-linuxarm64.h` |
 
-**Missing entirely:** arm64-exceptions.c, arm64-gc.c, platform headers,
+**Missing entirely:** arm64-exceptions.c, arm64-gc.c,
 compiler code generator, vinsn definitions, level-0 Lisp files, FFI, backtrace,
 disassembler.
 
@@ -541,7 +543,7 @@ This must happen:
 
 | Component | Estimated Lines | Difficulty | Status |
 |-----------|----------------|------------|--------|
-| Kernel C (exceptions, GC, platform headers, print) | ~5,000 | Very High | constants.h done (511) |
+| Kernel C (exceptions, GC, platform headers, print) | ~5,000 | Very High | constants.h (511), exceptions.h (139), platform headers (117) |
 | Kernel assembly (complete spentry, asmutils, UUO) | ~2,000 | High | Partial (~4,500 existing) |
 | Compiler backend (arch, vinsns, codegen, backend, LAP, disasm, asm) | ~19,000 | Very High | arch.lisp done (1,803) |
 | Level-0 Lisp (12 files) | ~3,800 | Medium | Not started |
@@ -555,7 +557,9 @@ This must happen:
 1. ~~Finalize register mapping (Section: Register Mapping)~~ **DONE**
 2. ~~Complete `arm64-arch.lisp` -- all constants and definitions~~ **DONE** (1,803 lines)
 3. ~~Complete `arm64-constants.h` -- C-side mirror of arch constants~~ **DONE** (511 lines)
-4. Write `platform-linuxarm64.h` (and/or `platform-darwinarm64.h`)
+4. ~~Write `platform-linuxarm64.h` and `platform-darwinarm64.h`~~ **DONE** (51 + 66 lines)
+   - Also: `arm64-exceptions.h` populated (139 lines), `PLATFORM_CPU_ARM64` added to `lisp.h`,
+     ARM64 blocks added to `lisp_globals.h` and `gc.h`
 
 ### Phase 2: Kernel Runtime
 5. Implement `arm64-exceptions.c` -- trap handling

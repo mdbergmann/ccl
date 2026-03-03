@@ -130,7 +130,12 @@ extern LispObj lisp_nil;
 
 #ifdef ARM
 #define lisp_global(g) (((LispObj *) (nil_value-fulltag_nil-dnode_size))[(g)])
-#define nrs_symbol(s) (((lispsymbol *) (nil_value-fulltag_nil+dnode_size))[(s)]) 
+#define nrs_symbol(s) (((lispsymbol *) (nil_value-fulltag_nil+dnode_size))[(s)])
+#endif
+
+#ifdef ARM64
+#define lisp_global(g) (((LispObj *) (0x13000+(LOWMEM_BIAS)))[(g)])
+#define nrs_symbol(s) (((lispsymbol *) (0x13010+(LOWMEM_BIAS)))[(s)])
 #endif
 
 #define nrs_T 				(nrs_symbol(0))		/* t */
