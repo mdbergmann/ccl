@@ -24,8 +24,9 @@ Branch: `arm64-arch-foundation`
 
 13. **TCR Layout** — tcr-bias=0, define-storage-layout tcr (41 fields, 328 bytes): prev, next, single-float-convert, lisp-fpscr, db-link, catch-top, save-vsp, save-tsp, cs-area, vs-area, ts-area, cs-limit, total-bytes-allocated, log2-allocation-quantum, interrupt-pending, xframe, errno-loc, ffi-exception, osid, valence, foreign-exception-status, native-thread-info, native-thread-id, last-allocptr, save-allocptr, save-allocbase, reset-completion, activate, suspend-count, suspend-context, pending-exception-context, suspend, resume, flags, gc-context, termination-semaphore, unwinding, tlb-limit, tlb-pointer, shutdown-count, safe-ref-address. Sub-word constants for split _word pairs: tcr.single-float-convert.value, tcr.lisp-fpscr-low, tcr.flags-value. interrupt-level-binding-index=1. lockptr (7 fields) and rwlock (8 fields) layouts.
 
+14. **Kernel Imports** — %kernel-global function and macro (offset = -(pos+2)×node-size, relative to rnil effective address), kernel-import defenum (65 entries, step=node-size=8, fd-setsize-bytes through lisp-realpath, matching x86-64), nrs-offset macro (byte offset from NIL symbol to requested symbol, formula: (1-pos)×symbol.size).
+
 ## Remaining Sections
-14. Kernel Imports
 15. Target Uvector Subtags Alist
 16. Array Type Helper
 17. Misc Byte Count Helper

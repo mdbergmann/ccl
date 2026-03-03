@@ -1142,4 +1142,112 @@
   malloced-ptr)
 
 
+;;; Kernel global access.
+;;;
+;;; Kernel globals are at negative offsets from rnil (x6).  TBI makes
+;;; the hardware treat rnil's effective address as nil-base + node-size.
+;;; The first global (get-tcr) is at nil-base - node-size, giving
+;;; an rnil-relative offset of -2*node-size.  In general:
+;;;   global at position pos → offset = -(pos + 2) × node-size
+;;;
+;;; Note: offsets beyond ±256 exceed LDUR's immediate range; the code
+;;; generator handles this via SUB+LDR or similar sequences.
+
+(defun %kernel-global (sym)
+  ;; Returns byte offset relative to rnil's effective address
+  ;; (= nil-base + node-size).
+  (let* ((pos (position sym arm64::*arm64-kernel-globals* :test #'string=)))
+    (if pos
+      (- (* (+ 2 pos) node-size))
+      (error "Unknown kernel global : ~s ." sym))))
+
+(defmacro kernel-global (sym)
+  (let* ((pos (position sym arm64::*arm64-kernel-globals* :test #'string=)))
+    (if pos
+      (- (* (+ 2 pos) node-size))
+      (error "Unknown kernel global : ~s ." sym))))
+
+
+;;; The kernel imports things that are defined in various other
+;;; libraries for us.  The objects in question are generally
+;;; fixnum-tagged; the entries in the "kernel-imports" vector are
+;;; node-size (8) bytes apart.
+(ccl::defenum (:prefix "KERNEL-IMPORT-" :start 0 :step node-size)
+  fd-setsize-bytes
+  do-fd-set
+  do-fd-clr
+  do-fd-is-set
+  do-fd-zero
+  MakeDataExecutable
+  GetSharedLibrary
+  FindSymbol
+  malloc
+  free
+  wait-for-signal
+  tcr-frame-ptr
+  register-xmacptr-dispose-function
+  open-debug-output
+  get-r-debug
+  restore-soft-stack-limit
+  egc-control
+  lisp-bug
+  NewThread
+  YieldToThread
+  DisposeThread
+  ThreadCurrentStackSpace
+  usage-exit
+  save-fp-context
+  restore-fp-context
+  put-altivec-registers
+  get-altivec-registers
+  new-semaphore
+  wait-on-semaphore
+  signal-semaphore
+  destroy-semaphore
+  new-recursive-lock
+  lock-recursive-lock
+  unlock-recursive-lock
+  destroy-recursive-lock
+  suspend-other-threads
+  resume-other-threads
+  suspend-tcr
+  resume-tcr
+  rwlock-new
+  rwlock-destroy
+  rwlock-rlock
+  rwlock-wlock
+  rwlock-unlock
+  recursive-lock-trylock
+  foreign-name-and-offset
+  lisp-read
+  lisp-write
+  lisp-open
+  lisp-fchmod
+  lisp-lseek
+  lisp-close
+  lisp-ftruncate
+  lisp-stat
+  lisp-fstat
+  lisp-futex
+  lisp-opendir
+  lisp-readdir
+  lisp-closedir
+  lisp-pipe
+  lisp-gettimeofday
+  lisp-sigexit
+  jvm-init
+  lisp-lstat
+  lisp-realpath
+)
+
+
+;;; Nil-relative symbol offset.
+;;; Returns the byte offset from the NIL symbol's effective address
+;;; to the requested symbol's effective address.  T is at position 0
+;;; (one symbol.size before NIL's symbol), NIL at position 1 (offset 0).
+(defmacro nrs-offset (name)
+  (let* ((pos (position name arm64::*arm64-nilreg-relative-symbols* :test #'eq)))
+    (if pos (* (1- pos) symbol.size))))
+
+
 (provide "ARM64-ARCH")
