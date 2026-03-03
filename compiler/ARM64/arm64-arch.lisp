@@ -1040,4 +1040,106 @@
 (define-header macptr-header macptr.element-count subtag-macptr)
 
 
+;;; TCR (Thread Context Record) layout.
+;;;
+;;; Field order and sizes must exactly match arm64-constants.s.
+;;; define-storage-layout uses 8-byte steps; fields that are two
+;;; consecutive _word (4-byte) entries in assembly are combined into
+;;; one 8-byte slot here, with sub-word constants defined separately.
+;;;
+;;; Offsets (hex):
+;;;   0x000 - 0x148 : fixed TCR fields (41 slots × 8 = 328 bytes)
+;;;   0x148 - 0x180 : reserved / padding
+;;;   0x180         : sptab (subprims dispatch table, already defined)
+;;;
+;;; The sptab (at offset 384) is embedded in the TCR memory area
+;;; and holds one 8-byte function pointer per subprimitive.
+
+(eval-when (:compile-toplevel :load-toplevel :execute)
+(defconstant tcr-bias 0)
+)
+
+(define-storage-layout tcr (- tcr-bias)
+  prev                                  ; in doubly-linked list
+  next                                  ; in doubly-linked list
+  single-float-convert                  ; float boxing/unboxing via memory
+  lisp-fpscr                            ; _word lisp_fpscr + _word lisp_fpscr_low
+  db-link                               ; special binding chain head
+  catch-top                             ; top catch frame
+  save-vsp                              ; VSP when in foreign code
+  save-tsp                              ; TSP when in foreign code
+  cs-area                               ; cstack area pointer
+  vs-area                               ; vstack area pointer
+  ts-area                               ; tstack area pointer
+  cs-limit                              ; cstack overflow limit
+  total-bytes-allocated                 ; _word bytes_consed_high + _word bytes_consed_low
+  log2-allocation-quantum               ; unboxed
+  interrupt-pending                     ; fixnum
+  xframe                                ; per-thread exception frame list
+  errno-loc                             ; per-thread errno location
+  ffi-exception                         ; fpscr exception bits from ff-call
+  osid                                  ; OS thread id
+  valence                               ; odd when in foreign code
+  foreign-exception-status
+  native-thread-info
+  native-thread-id
+  last-allocptr
+  save-allocptr
+  save-allocbase
+  reset-completion
+  activate
+  suspend-count
+  suspend-context
+  pending-exception-context
+  suspend                               ; semaphore for suspension notify
+  resume                                ; semaphore for resumption notify
+  flags                                 ; _word flags_pad + _word flags
+  gc-context
+  termination-semaphore
+  unwinding
+  tlb-limit
+  tlb-pointer
+  shutdown-count
+  safe-ref-address)
+
+;;; Sub-word offsets for fields that are pairs of _word (4-byte)
+;;; entries in the assembly TCR.  AArch64 is little-endian, so
+;;; the first _word occupies bytes 0-3 and the second bytes 4-7.
+
+;;; single-float-convert: the IEEE 754 single-float value is in the
+;;; low 32 bits (bytes 0-3) on little-endian ARM64.
+(defconstant tcr.single-float-convert.value tcr.single-float-convert)
+
+;;; lisp-fpscr: primary fpscr at slot base, secondary word at +4
+(defconstant tcr.lisp-fpscr-low (+ tcr.lisp-fpscr 4))
+
+;;; flags: pad word at slot base, actual flags word at +4
+(defconstant tcr.flags-value (+ tcr.flags 4))
+
+
+(defconstant interrupt-level-binding-index (ash 1 fixnumshift))
+
+
+;;; Kernel lock structures.
+
+(define-storage-layout lockptr 0
+  avail
+  owner
+  count
+  signal
+  waiting
+  malloced-ptr
+  spinlock)
+
+(define-storage-layout rwlock 0
+  spin
+  state
+  blocked-writers
+  blocked-readers
+  writer
+  reader-signal
+  writer-signal
+  malloced-ptr)
+
+
 (provide "ARM64-ARCH")

@@ -22,8 +22,9 @@ Branch: `arm64-arch-foundation`
 
 12. **Object Layout Definitions** — `5b650831` — cons (cdr/car), ratio, double-float (manual 32-bit element constants), complex, complex-single-float, complex-double-float (with pad), macptr, xmacptr, function (entrypoint only), symbol (7 fields, symbol.size=64), nilsym-offset=80, catch-frame (14 fields: catch-tag, save0-7, link, mvflag, db-link, xframe, last-lisp-frame), lock, vectorH, arrayH (with cell indices), value-cell, lisp-frame (0-based), binding (0-based), define-header macro + common headers. Note: arm64-constants.s has _structf sign bug (misc_bias=-8 vs expected positive); Lisp definitions are authoritative.
 
+13. **TCR Layout** — tcr-bias=0, define-storage-layout tcr (41 fields, 328 bytes): prev, next, single-float-convert, lisp-fpscr, db-link, catch-top, save-vsp, save-tsp, cs-area, vs-area, ts-area, cs-limit, total-bytes-allocated, log2-allocation-quantum, interrupt-pending, xframe, errno-loc, ffi-exception, osid, valence, foreign-exception-status, native-thread-info, native-thread-id, last-allocptr, save-allocptr, save-allocbase, reset-completion, activate, suspend-count, suspend-context, pending-exception-context, suspend, resume, flags, gc-context, termination-semaphore, unwinding, tlb-limit, tlb-pointer, shutdown-count, safe-ref-address. Sub-word constants for split _word pairs: tcr.single-float-convert.value, tcr.lisp-fpscr-low, tcr.flags-value. interrupt-level-binding-index=1. lockptr (7 fields) and rwlock (8 fields) layouts.
+
 ## Remaining Sections
-13. TCR Layout
 14. Kernel Imports
 15. Target Uvector Subtags Alist
 16. Array Type Helper
