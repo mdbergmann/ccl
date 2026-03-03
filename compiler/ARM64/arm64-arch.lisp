@@ -808,4 +808,57 @@
 (defconstant misc-complex-dfloat-offset (+ misc-data-offset node-size))  ; = 8
 
 
+;;; NIL and T Values
+;;;
+;;; In the TBI scheme, NIL occupies a fixed memory location.  The rnil
+;;; register (x6) holds canonical-nil-value at all times: tag-nil in
+;;; the top byte, effective address in the low 56 bits.
+;;;
+;;; Memory layout near NIL:
+;;;
+;;;   nil-base + 0:              [canonical-nil-value]  CDR of NIL (= NIL)
+;;;   nil-base + 8:              [canonical-nil-value]  CAR of NIL (= NIL)
+;;;   nil-base + 16:             T symbol header        first nil-relative symbol
+;;;   nil-base + 24:             T.pname
+;;;   ...
+;;;   nil-base + 16 + sym-size:  NIL symbol header      NIL's own symbol struct
+;;;   ...  (subsequent nil-relative symbols follow)
+;;;
+;;; Kernel globals are at negative offsets from nil-base.
+;;; Nil-relative symbols are at positive offsets starting at t-offset.
+;;;
+;;; Access from rnil:
+;;;   CDR(NIL): LDUR x0, [rnil, #-8]  → loads from nil-base + 0
+;;;   CAR(NIL): LDR  x0, [rnil, #0]   → loads from nil-base + 8
+;;;   T.pname:  LDR  x0, [rnil, #t-offset]  → loads from nil-base + 24
+
+(eval-when (:compile-toplevel :load-toplevel :execute)
+
+;;; Base address — arbitrary dnode-aligned address in low memory.
+;;; The kernel maps this region during initialization.
+(defconstant nil-base-address #x13000)
+
+;;; Canonical NIL value — the full tagged 64-bit representation.
+;;; Tag byte (tag-nil = #x02) in bits 56-63, effective address in
+;;; bits 0-55.  Effective address = nil-base-address + node-size.
+(defconstant canonical-nil-value
+  (logior (ash tag-nil tag-shift) (+ nil-base-address node-size)))
+
+(defconstant nil-value canonical-nil-value)
+
+;;; T is the first nil-relative symbol.  Its symbol structure starts
+;;; one dnode past nil-base (the dnode at nil-base holds CDR(NIL) and
+;;; CAR(NIL), both = NIL).
+;;;
+;;; t-offset is the memory distance from NIL's effective address to
+;;; T's effective address.  Since both effective addresses are biased
+;;; by node-size from their respective bases:
+;;;   NIL effective = nil-base + node-size
+;;;   T effective   = nil-base + dnode-size + node-size
+;;;   t-offset      = dnode-size
+(defconstant t-offset dnode-size)                  ; = 16
+
+)
+
+
 (provide "ARM64-ARCH")
