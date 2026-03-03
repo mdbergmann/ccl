@@ -104,7 +104,7 @@ check_static_cons_freelist(char *phase)
     limit = static_cons_area->ndnodes;
   natural i=0;
 
-  for (n=lisp_global(STATIC_CONSES);n!=lisp_nil;n=((cons *)untag(n))->cdr, i++) {
+  for (n=lisp_global(STATIC_CONSES);n!=lisp_nil;n=((cons *)untag_base(n))->cdr, i++) {
     if ((fulltag_of(n) != fulltag_cons) ||
         (area_dnode(n,base) >= limit)) {
       Bug(NULL, "%s: static cons freelist has invalid element 0x" LISP "\n",
@@ -124,7 +124,7 @@ reapweakv(LispObj weakv)
     cons out of the list.  N.B. : elements 0 and 1 are already marked
     (or are immediate, etc.)
   */
-  LispObj *prev = ((LispObj *) ptr_from_lispobj(untag(weakv))+(1+2)), cell = *prev;
+  LispObj *prev = ((LispObj *) ptr_from_lispobj(untag_base(weakv))+(1+2)), cell = *prev;
   LispObj termination_list = lisp_nil;
   natural weak_type = (natural) deref(weakv,2);
   Boolean alistp = ((weak_type & population_type_mask) == population_weak_alist),
@@ -152,7 +152,7 @@ reapweakv(LispObj weakv)
         LispObj alist_cell, thecar;
         unsigned cell_tag;
 
-        rawcons = (cons *) ptr_from_lispobj(untag(cell));
+        rawcons = (cons *) ptr_from_lispobj(untag_base(cell));
         alist_cell = rawcons->car;
         cell_tag = fulltag_of(alist_cell);
 
@@ -187,7 +187,7 @@ reapweakv(LispObj weakv)
         LispObj thecar;
         unsigned cartag;
 
-        rawcons = (cons *) ptr_from_lispobj(untag(cell));
+        rawcons = (cons *) ptr_from_lispobj(untag_base(cell));
         thecar = rawcons->car;
         cartag = fulltag_of(thecar);
 
@@ -213,10 +213,10 @@ reapweakv(LispObj weakv)
   }
   if (termination_list != lisp_nil) {
     deref(weakv,1) = GCweakvll;
-    GCweakvll = untag(weakv);
+    GCweakvll = untag_base(weakv);
   } else {
     deref(weakv,1) = lisp_global(WEAKVLL);
-    lisp_global(WEAKVLL) = untag(weakv);
+    lisp_global(WEAKVLL) = untag_base(weakv);
   }
 }
 
@@ -228,7 +228,7 @@ void
 reaphashv(LispObj hashv)
 {
   hash_table_vector_header
-    *hashp = (hash_table_vector_header *) ptr_from_lispobj(untag(hashv));
+    *hashp = (hash_table_vector_header *) ptr_from_lispobj(untag_base(hashv));
   natural
     dnode;
   signed_natural
@@ -295,14 +295,14 @@ reaphashv(LispObj hashv)
     --npairs;
   }
   deref(hashv, 1) = lisp_global(WEAKVLL);
-  lisp_global(WEAKVLL) = untag(hashv);
+  lisp_global(WEAKVLL) = untag_base(hashv);
 }
 
 void
 traditional_dws_mark_htabv(LispObj htabv)
 {
   /* Do nothing, just add htabv to GCweakvll */
-  LispObj *base = (LispObj *) ptr_from_lispobj(untag(htabv));
+  LispObj *base = (LispObj *) ptr_from_lispobj(untag_base(htabv));
 
   base[1] = GCweakvll;
   GCweakvll = ptr_to_lispobj(base);
@@ -320,7 +320,7 @@ void
 traditional_mark_weak_htabv(LispObj htabv)
 {
   int i, skip = hash_table_vector_header_count;;
-  LispObj *base = (LispObj *) ptr_from_lispobj(untag(htabv));
+  LispObj *base = (LispObj *) ptr_from_lispobj(untag_base(htabv));
 
   for (i = 2; i <= skip; i++) {
     rmark(base[i]);
@@ -333,7 +333,7 @@ void
 ncircle_mark_weak_htabv(LispObj htabv)
 {
   int i, skip = hash_table_vector_header_count;
-  hash_table_vector_header *hashp = (hash_table_vector_header *)(untag(htabv));
+  hash_table_vector_header *hashp = (hash_table_vector_header *)(untag_base(htabv));
   natural
     npairs = (header_element_count(hashp->header) - 
               (hash_table_vector_header_count - 1)) >> 1;
@@ -355,7 +355,7 @@ ncircle_mark_weak_htabv(LispObj htabv)
     pairp += 2;
   }
   deref(htabv,1)  = GCweakvll;
-  GCweakvll = (LispObj)untag(htabv);
+  GCweakvll = (LispObj)untag_base(htabv);
 }
 
 
@@ -540,7 +540,7 @@ traditional_markhtabvs()
       
       if (subtag == subtag_weak) {
         natural weak_type = base[2];
-        this = ptr_to_lispobj(base) + fulltag_misc;
+        this = tag_misc_from_base(base);
         base[1] = pending;
         pending = ptr_to_lispobj(base);
         if ((weak_type & population_type_mask) == population_weak_alist) {
@@ -579,7 +579,7 @@ traditional_markhtabvs()
     pending = base[1];
     base[1] = (LispObj)NULL;
 
-    this = ptr_to_lispobj(base) + fulltag_misc;
+    this = tag_misc_from_base(base);
 
     subtag = header_subtag(base[0]);
     if (subtag == subtag_weak) {
@@ -612,7 +612,7 @@ ncircle_markhtabvs()
     GCweakvll = base[1];
     base[1] = (LispObj)NULL;
 
-    this = ptr_to_lispobj(base) + fulltag_misc;
+    this = tag_misc_from_base(base);
 
     header = base[0];
     subtag = header_subtag(header);
@@ -639,7 +639,7 @@ ncircle_markhtabvs()
     pending = base[1];
     base[1] = (LispObj)NULL;
 
-    this = ptr_to_lispobj(base) + fulltag_misc;
+    this = tag_misc_from_base(base);
 
     subtag = header_subtag(base[0]);
     if (subtag == subtag_weak) {
@@ -801,7 +801,7 @@ reap_gcable_ptrs()
 
   while((next = *prev) != (LispObj)NULL) {
     dnode = gc_area_dnode(next);
-    x = (xmacptr *) ptr_from_lispobj(untag(next));
+    x = (xmacptr *) ptr_from_lispobj(untag_base(next));
 
     if ((dnode >= GCndnodes_in_area) ||
         (ref_bit(GCmarkbits,dnode))) {
@@ -1006,10 +1006,10 @@ forward_weakvll_links()
   LispObj *ptr = &(lisp_global(WEAKVLL)), this, new, old;
 
   while ((this = *ptr)) {
-    old = this + fulltag_misc;
+    old = tag_misc_from_base(this);
     new = node_forwarding_address(old);
     if (old != new) {
-      *ptr = untag(new);
+      *ptr = untag_base(new);
     }
     ptr = &(deref(new,1));
   }
@@ -1075,7 +1075,7 @@ forward_gcable_ptrs()
     if (new != next) {
       *prev = new;
     }
-    prev = &(((xmacptr *)ptr_from_lispobj(untag(next)))->link);
+    prev = &(((xmacptr *)ptr_from_lispobj(untag_base(next)))->link);
   }
   xprev = &user_postGC_macptrs;
   while ((xnext = *xprev)) {
@@ -1232,6 +1232,16 @@ forward_memoized_area(area *a, natural num_memo_dnodes, bitvector refbits, bitve
             }
           }
 #endif
+#ifdef ARM64
+          /* ARM64: function entrypoint is in slot 1 (fixnum-tagged locative).
+             If p[-2] is a function header and p[-1] is the entrypoint,
+             forward the entrypoint as a locative. */
+          if (p != p0) {
+            if (header_subtag(p[-2]) == subtag_function) {
+              update_locref(&p[-1]);
+            }
+          }
+#endif
         }
       }
       p++;
@@ -1290,7 +1300,7 @@ reclaim_static_dnodes()
       d->cdr = head;
       d->car = unbound;
       nfree++;
-      head = ((LispObj) d)+fulltag_cons;
+      head = tag_cons_from_base(d);
     }
   }
   lisp_global(STATIC_CONSES) = head;
@@ -1682,9 +1692,9 @@ gc(TCR *tcr, signed_natural param)
              no_thread_local_binding_marker)) {
           pkg = nrs_PACKAGE.vcell;
         }
-        if ((fulltag_of(pkg) == fulltag_misc) &&
+        if (is_uvector_fulltag(fulltag_of(pkg)) &&
             (header_subtag(header_of(pkg)) == subtag_package)) {
-          itab = ((package *)ptr_from_lispobj(untag(pkg)))->itab;
+          itab = ((package *)ptr_from_lispobj(untag_base(pkg)))->itab;
           itabvec = car(itab);
           dnode = gc_area_dnode(itabvec);
           if (dnode < GCndnodes_in_area) {
@@ -1761,12 +1771,12 @@ gc(TCR *tcr, signed_natural param)
         n = header_element_count(header_of(itabvec));
       LispObj
         sym,
-        *raw = 1+((LispObj *)ptr_from_lispobj(untag(itabvec)));
+        *raw = 1+((LispObj *)ptr_from_lispobj(untag_base(itabvec)));
 
       for (i = 0; i < n; i++) {
         sym = *raw++;
         if (is_symbol_fulltag(sym)) {
-          lispsymbol *rawsym = (lispsymbol *)ptr_from_lispobj(untag(sym));
+          lispsymbol *rawsym = (lispsymbol *)ptr_from_lispobj(untag_base(sym));
           natural dnode = gc_area_dnode(sym);
           
           if ((dnode < GCndnodes_in_area) &&
@@ -1797,7 +1807,7 @@ gc(TCR *tcr, signed_natural param)
         n = header_element_count(header_of(itabvec));
       LispObj
         sym,
-        *raw = 1+((LispObj *)ptr_from_lispobj(untag(itabvec)));
+        *raw = 1+((LispObj *)ptr_from_lispobj(untag_base(itabvec)));
 
       for (i = 0; i < n; i++, raw++) {
         sym = *raw;
@@ -1936,19 +1946,19 @@ gc(TCR *tcr, signed_natural param)
     struct timeval *timeinfo, elapsed = {0, 0};
 
     val = total_gc_microseconds->vcell;
-    if ((fulltag_of(val) == fulltag_misc) &&
+    if (is_uvector_fulltag(fulltag_of(val)) &&
         (header_subtag(header_of(val)) == subtag_macptr)) {
       timersub(&stop, &start, &elapsed);
-      timeinfo = (struct timeval *) ptr_from_lispobj(((macptr *) ptr_from_lispobj(untag(val)))->address);
+      timeinfo = (struct timeval *) ptr_from_lispobj(((macptr *) ptr_from_lispobj(untag_base(val)))->address);
       timeradd(timeinfo,  &elapsed, timeinfo);
       timeradd(timeinfo+timeidx,  &elapsed, timeinfo+timeidx);
     }
 
     val = total_bytes_freed->vcell;
-    if ((fulltag_of(val) == fulltag_misc) &&
+    if (is_uvector_fulltag(fulltag_of(val)) &&
         (header_subtag(header_of(val)) == subtag_macptr)) {
       long long justfreed = oldfree - a->active;
-      *( (long long *) ptr_from_lispobj(((macptr *) ptr_from_lispobj(untag(val)))->address)) += justfreed;
+      *( (long long *) ptr_from_lispobj(((macptr *) ptr_from_lispobj(untag_base(val)))->address)) += justfreed;
 
 #ifdef USE_DTRACE
       if (note == tenured_area) {

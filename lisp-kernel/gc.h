@@ -99,13 +99,20 @@ typedef unsigned char qnode;
 #endif
 
 
-#ifdef fulltag_symbol
+#ifdef ARM64
+#define is_symbol_fulltag(x) (fulltag_of(x) == tag_symbol)
+#elif defined(fulltag_symbol)
 #define is_symbol_fulltag(x) (fulltag_of(x) == fulltag_symbol)
 #else
 #define is_symbol_fulltag(x) (fulltag_of(x) == fulltag_misc)
 #endif
 
 #define area_dnode(w,low) ((natural)(((ptr_to_lispobj(w)) - ptr_to_lispobj(low))>>dnode_shift))
+#ifdef ARM64
+/* ARM64 TBI: strip tag byte before computing dnode index */
+#undef area_dnode
+#define area_dnode(w,low) ((natural)((untag((LispObj)(w)) - ptr_to_lispobj(low))>>dnode_shift))
+#endif
 #define gc_area_dnode(w)  area_dnode(w,GCarealow)
 #define gc_dynamic_area_dnode(w) area_dnode(w,GCareadynamiclow)
 
@@ -261,5 +268,29 @@ extern Boolean
 did_gc_notification_since_last_full_gc;
 
 extern BytePtr heap_dirty_limit;
+
+/*
+ * Portability macros for ARM64 TBI tagging.
+ *
+ * On ARM64 with TBI:
+ *   untag(o) = o & 0x00FFFFFFFFFFFFFF = base + node_size (not base)
+ *   fulltag_misc (0x40) only matches bignums, not gvectors generally
+ *   ptr_to_lispobj(base) + fulltag_misc doesn't produce a valid tagged pointer
+ *
+ * These macros abstract the differences so gc-common.c works on all archs.
+ */
+#ifdef ARM64
+#define untag_base(o) (untag(o) - node_size)
+#define is_uvector_fulltag(t) ((t) & uvector_ref)
+#define tag_misc_from_base(base) \
+  (((LispObj)((LispObj*)(base) + 1)) | ((LispObj)uvector_ref << tag_shift))
+#define tag_cons_from_base(base) \
+  (((LispObj)((LispObj*)(base) + 1)) | ((LispObj)tag_cons << tag_shift))
+#else
+#define untag_base(o) untag(o)
+#define is_uvector_fulltag(t) ((t) == fulltag_misc)
+#define tag_misc_from_base(base) (ptr_to_lispobj(base) + fulltag_misc)
+#define tag_cons_from_base(base) (ptr_to_lispobj(base) + fulltag_cons)
+#endif
 
 #endif                          /* __GC_H__ */
