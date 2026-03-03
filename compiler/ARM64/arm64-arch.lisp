@@ -621,6 +621,136 @@
 )
 
 
+;;; Uvector Subtags
+;;;
+;;; Each define-ivector/define-cl-ivector/define-gvector call creates
+;;; SUBTAG-name (header byte, bit 7 set) and TAG-name (reference tag, bit 6 set).
+;;; The order and numbering must exactly match arm64-constants.s and
+;;; arm64-constants.h.
+;;;
+;;; Encoding recap (6 type bits within the tag/subtag byte):
+;;;   ivector:    value << 1              (bit 0 = 0)
+;;;   cl-ivector: (value << 1) | 1        (bit 0 = 1)
+;;;   gvector:    value | #x20            (bit 5 = 1)
+;;;
+;;; Element-size grouping for ivectors (by value parameter):
+;;;   0-4:  32-bit elements
+;;;   5-6:  64-bit elements (non-CL only at these values)
+;;;   5-9:  64-bit elements (CL ivectors at values 5-9)
+;;;   10-11: 8-bit elements
+;;;   12-13: 16-bit elements
+;;;   14:   128-bit elements (complex-double-float)
+;;;   15:   sub-byte (bit-vector)
+
+(eval-when (:compile-toplevel :load-toplevel :execute)
+
+;;; ---------------------------------------------------------------
+;;; Ivectors — non-CL internal types (32-bit element group)
+;;; ---------------------------------------------------------------
+(define-ivector bignum 0)
+(define-ivector double-float 1)
+(define-ivector complex-single-float 2)
+(define-ivector complex-double-float 3)
+(define-ivector xcode-vector 4)
+
+;;; CL ivectors — 32-bit element group
+(define-cl-ivector s32-vector 0)
+(define-cl-ivector u32-vector 1)
+(define-cl-ivector single-float-vector 2)
+(define-cl-ivector simple-base-string 3)        ; simple_string in assembly
+
+;;; 32-bit element boundary constants
+(defconstant min-32-bit-ivector-subtag subtag-bignum)
+(defconstant max-32-bit-ivector-subtag subtag-xcode-vector)
+
+;;; ---------------------------------------------------------------
+;;; Ivectors — non-CL internal types (64-bit element group)
+;;; ---------------------------------------------------------------
+(define-ivector macptr 5)
+(define-ivector dead-macptr 6)
+
+;;; CL ivectors — 64-bit element group
+(define-cl-ivector s64-vector 5)
+(define-cl-ivector u64-vector 6)
+(define-cl-ivector fixnum-vector 7)
+(define-cl-ivector double-float-vector 8)
+(define-cl-ivector complex-single-float-vector 9)
+
+;;; 64-bit element boundary constants
+(defconstant min-64-bit-ivector-subtag subtag-macptr)
+(defconstant max-64-bit-ivector-subtag subtag-complex-single-float-vector)
+
+;;; ---------------------------------------------------------------
+;;; CL ivectors — 8-bit element group
+;;; ---------------------------------------------------------------
+(define-cl-ivector s8-vector 10)
+(define-cl-ivector u8-vector 11)
+
+(defconstant min-8-bit-ivector-subtag subtag-s8-vector)
+(defconstant max-8-bit-ivector-subtag subtag-u8-vector)
+
+;;; ---------------------------------------------------------------
+;;; CL ivectors — 16-bit element group
+;;; ---------------------------------------------------------------
+(define-cl-ivector s16-vector 12)
+(define-cl-ivector u16-vector 13)
+
+(defconstant min-16-bit-ivector-subtag subtag-s16-vector)
+(defconstant max-16-bit-ivector-subtag subtag-u16-vector)
+
+;;; ---------------------------------------------------------------
+;;; CL ivectors — other element sizes
+;;; ---------------------------------------------------------------
+(define-cl-ivector complex-double-float-vector 14)  ; 128-bit elements
+(define-cl-ivector bit-vector 15)                   ; 1-bit elements
+
+;;; The smallest CL ivector subtag (all CL ivectors have bit 0 set).
+(defconstant min-cl-ivector-subtag subtag-s32-vector)
+
+;;; ---------------------------------------------------------------
+;;; Gvectors — node-containing heap objects (bit 5 set in type bits)
+;;; ---------------------------------------------------------------
+
+;;; Numeric gvectors
+(define-gvector ratio 0)
+(define-gvector complex 1)
+
+;;; Non-numeric gvectors
+(define-gvector function 2)
+(define-gvector symbol 3)
+(define-gvector catch-frame 4)
+(define-gvector basic-stream 5)
+(define-gvector lock 6)
+(define-gvector hash-vector 7)
+(define-gvector pool 8)
+(define-gvector weak 9)
+(define-gvector package 10)
+(define-gvector slot-vector 11)
+(define-gvector instance 12)
+(define-gvector struct 13)
+(define-gvector istruct 14)
+(define-gvector value-cell 15)
+(define-gvector xfunction 16)                       ; cross-development
+
+;;; Array gvectors (must satisfy arrayH < vectorH < simple-vector)
+(define-gvector arrayH 29)
+(define-gvector vectorH 30)
+(define-gvector simple-vector 31)
+
+(assert (< subtag-arrayH subtag-vectorH subtag-simple-vector))
+
+;;; ---------------------------------------------------------------
+;;; Max constant index values (from arm64-constants.s)
+;;; ---------------------------------------------------------------
+(defconstant max-64-bit-constant-index #x400)
+(defconstant max-32-bit-constant-index #x400)
+(defconstant max-16-bit-constant-index #x400)
+(defconstant max-8-bit-constant-index #x400)
+(defconstant max-1-bit-constant-index 0)
+
+)
+
+
 ;;; Storage layout macros — 8-byte steps for 64-bit
 (defmacro define-storage-layout (name origin &rest cells)
   `(progn
