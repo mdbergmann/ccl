@@ -470,6 +470,51 @@
              )))))
 
 
+;;; Fundamental constants — 64-bit, TBI (Top Byte Ignore) tagging scheme.
+;;;
+;;; ARM64 uses TBI to place type tags in the high byte (bits 56-63) of
+;;; 64-bit pointers/values, leaving the low 56 bits for values/addresses.
+;;; This is fundamentally different from x86-64 and ARM32 low-bit tagging:
+;;;   - Fixnums are unshifted native integers (fixnumshift = 0, fixnumone = 1)
+;;;   - Tag testing examines the top byte, not low bits
+;;;   - No fulltagmask/tagmask in the low-bit sense
+;;; The tag byte layout is defined in section 8 (Tag Definitions).
+
+(eval-when (:compile-toplevel :load-toplevel :execute)
+
+(defconstant nbits-in-word 64)
+(defconstant nbits-in-byte 8)
+(defconstant tag-shift 56)                     ; tags occupy bits 56-63
+
+(defconstant num-subtag-bits 8)                ; low byte of uvector header is subtag
+
+(defconstant fixnumshift 0)                    ; fixnums are NOT shifted (tags in high byte)
+(defconstant fixnum-shift fixnumshift)
+
+(defconstant ncharcodebits 8)                  ; only low 8 bits used
+(defconstant charcode-shift 8)
+
+(defconstant word-shift 3)                     ; log2(8)
+(defconstant word-size-in-bytes 8)
+(defconstant node-size word-size-in-bytes)
+(defconstant dnode-size 16)
+(defconstant dnode-align-bits 4)               ; log2(16)
+(defconstant dnode-shift dnode-align-bits)
+(defconstant bitmap-shift 6)                   ; log2(64) — bits per word for bitmap
+
+(defconstant fixnumone (ash 1 fixnumshift))    ; = 1 (no shift in TBI scheme)
+(defconstant fixnum-one fixnumone)
+(defconstant fixnum1 fixnumone)
+
+;;; Fixnum range: signed 56-bit integers.
+;;; Positive fixnums have top byte = #x00, negative have top byte = #xFF.
+;;; Overflow by one bit gives top byte #x01 (positive) or #xFE (negative).
+(defconstant target-most-negative-fixnum (- (ash 1 (1- tag-shift))))  ; -2^55
+(defconstant target-most-positive-fixnum (1- (ash 1 (1- tag-shift)))) ; 2^55 - 1
+
+)
+
+
 ;;; Storage layout macros — 8-byte steps for 64-bit
 (defmacro define-storage-layout (name origin &rest cells)
   `(progn
