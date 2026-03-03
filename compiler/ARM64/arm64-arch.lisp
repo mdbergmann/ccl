@@ -1299,4 +1299,89 @@
     (:min-cl-ivector-subtag . ,min-cl-ivector-subtag)))
 
 
+;;; This should return NIL unless it's sure of how the indicated
+;;; type would be represented (in particular, it should return
+;;; NIL if the element type is unknown or unspecified at compile-time.
+(defun arm64-array-type-name-from-ctype (ctype)
+  (when (typep ctype 'ccl::array-ctype)
+    (let* ((element-type (ccl::array-ctype-element-type ctype)))
+      (typecase element-type
+        (ccl::class-ctype
+         (let* ((class (ccl::class-ctype-class element-type)))
+           (if (or (eq class ccl::*character-class*)
+                   (eq class ccl::*base-char-class*)
+                   (eq class ccl::*standard-char-class*))
+             :simple-string
+             :simple-vector)))
+        (ccl::numeric-ctype
+         (if (eq (ccl::numeric-ctype-complexp element-type) :complex)
+           (case (ccl::numeric-ctype-format element-type)
+             (single-float :complex-single-float-vector)
+             (double-float :complex-double-float-vector)
+             (t :simple-vector))
+           (case (ccl::numeric-ctype-class element-type)
+             (integer
+              (let* ((low (ccl::numeric-ctype-low element-type))
+                     (high (ccl::numeric-ctype-high element-type)))
+                (cond ((or (null low) (null high))
+                       :simple-vector)
+                      ((and (>= low 0) (<= high 1))
+                       :bit-vector)
+                      ((and (>= low 0) (<= high 255))
+                       :unsigned-8-bit-vector)
+                      ((and (>= low 0) (<= high 65535))
+                       :unsigned-16-bit-vector)
+                      ((and (>= low 0) (<= high #xffffffff))
+                       :unsigned-32-bit-vector)
+                      ((and (>= low -128) (<= high 127))
+                       :signed-8-bit-vector)
+                      ((and (>= low -32768) (<= high 32767))
+                       :signed-16-bit-vector)
+                      ((and (>= low (ash -1 31)) (<= high (1- (ash 1 31))))
+                       :signed-32-bit-vector)
+                      ((and (>= low target-most-negative-fixnum)
+                            (<= high target-most-positive-fixnum))
+                       :fixnum-vector)
+                      ((and (>= low 0) (<= high #xffffffffffffffff))
+                       :unsigned-64-bit-vector)
+                      ((and (>= low (ash -1 63)) (<= high (1- (ash 1 63))))
+                       :signed-64-bit-vector)
+                      (t :simple-vector))))
+             (float
+              (case (ccl::numeric-ctype-format element-type)
+                ((double-float long-float) :double-float-vector)
+                ((single-float short-float) :single-float-vector)
+                (t :simple-vector)))
+             (t :simple-vector))))
+        (ccl::unknown-ctype)
+        (ccl::named-ctype
+         (if (eq element-type ccl::*universal-type*)
+           :simple-vector))
+        (t)))))
+
+
+;;; Compute the byte count of a uvector's data given its subtag and
+;;; element count.  Subtag is the full header subtag byte (bit 7 set).
+;;; In the TBI scheme, gvectors have bit 5 set; ivectors are dispatched
+;;; by their element-size group based on subtag ranges.
+(defun arm64-misc-byte-count (subtag element-count)
+  (declare (fixnum subtag))
+  (if (logtest subtag gvector-tag-mask)       ; gvector (bit 5 set)?
+    (ash element-count 3)                      ; × node-size (8)
+    ;; ivector: dispatch by element-size range
+    (cond ((<= subtag max-32-bit-ivector-subtag)
+           (ash element-count 2))              ; × 4
+          ((<= subtag max-64-bit-ivector-subtag)
+           (ash element-count 3))              ; × 8
+          ((<= subtag max-8-bit-ivector-subtag)
+           element-count)                      ; × 1
+          ((<= subtag max-16-bit-ivector-subtag)
+           (ash element-count 1))              ; × 2
+          ((= subtag subtag-complex-double-float-vector)
+           (ash element-count 4))              ; × 16
+          ((= subtag subtag-bit-vector)
+           (ash (+ element-count 7) -3))       ; ÷ 8, round up
+          (t 0))))
+
+
 (provide "ARM64-ARCH")

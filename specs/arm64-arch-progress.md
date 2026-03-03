@@ -28,9 +28,11 @@ Branch: `arm64-arch-foundation`
 
 15. **Target Uvector Subtags Alist** — *arm64-target-uvector-subtags* (42 entries): maps keyword type names to subtag values. Follows x86-64 pattern: includes s64/u64 vector types, no code-vector/pseudofunction. Entries: bignum, ratio, single-float, double-float, complex types, symbol, function, xcode-vector, macptr, catch-frame, struct, istruct, pool, population, hash-vector, package, value-cell, instance, lock, basic-stream, slot-vector, simple-string, bit-vector, s8/u8/s16/u16/s32/u32/s64/u64 vectors, fixnum-vector, single/double-float vectors, simple-vector, complex-single/double-float vectors, vectorH, arrayH, min-cl-ivector-subtag.
 
+16. **Array Type Helper** — arm64-array-type-name-from-ctype: maps compile-time array ctypes to keyword element-type names. Follows x86-64 pattern with 64-bit integer ranges (s32 before fixnum before u64/s64). Handles class-ctype (character→:simple-string), numeric-ctype (integer ranges, float formats, complex), named-ctype (T→:simple-vector).
+
+17. **Misc Byte Count Helper** — arm64-misc-byte-count: computes data byte count from subtag+element-count. TBI dispatch: gvectors via bit-5 test (×8), ivectors by subtag range (32-bit×4, 64-bit×8, 8-bit×1, 16-bit×2, complex-df×16, bit-vector÷8).
+
 ## Remaining Sections
-16. Array Type Helper
-17. Misc Byte Count Helper
 18. Target Arch Descriptor
 19. Arch Macros
 20. Condition Codes and FPSCR
