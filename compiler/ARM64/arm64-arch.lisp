@@ -768,4 +768,44 @@
        ,@(mapcar #'(lambda (cell) (ccl::form-symbol name "." cell "-CELL")) non-header-cells))
      (defconstant ,(ccl::form-symbol name ".ELEMENT-COUNT") ,(length non-header-cells))))
 
+
+;;; Memory Layout Constants
+;;;
+;;; In the TBI scheme, ALL tagged pointers (cons, uvector/misc, function)
+;;; have their low 56 bits pointing one node-size (8 bytes) past the start
+;;; of the object in memory.  This uniform bias means:
+;;;   - For misc objects: header at offset -8, first data slot at offset 0
+;;;   - For cons cells: cdr at offset -8, car at offset 0
+;;;   - For functions: header at offset -8, entrypoint at offset 0
+;;;
+;;; This optimizes for ARM64 unsigned-offset loads (LDR with 12-bit scaled
+;;; unsigned immediate) for common element/field access, while header/cdr
+;;; access uses signed-offset loads (LDUR with 9-bit signed immediate).
+;;;
+;;; Bias: the positive offset from the object's memory base address to the
+;;; low 56 bits of its tagged pointer.
+;;;   tagged_ptr_low56 = object_base_address + bias
+;;;
+;;; These constants must match arm64-constants.s.
+
+(defconstant misc-bias node-size)                  ; = 8
+(defconstant cons-bias misc-bias)
+(defconstant function-bias misc-bias)
+
+;;; Offsets from tagged pointer (low 56 bits) to object components.
+;;; These are used in load/store instructions: LDR x0, [tagged_ptr, #offset]
+;;; TBI causes the hardware to ignore the tag byte in the top 8 bits.
+
+(defconstant misc-header-offset (- node-size))     ; = -8; header word
+(defconstant misc-subtag-offset misc-header-offset) ; subtag = low byte of header
+(defconstant misc-data-offset 0)                   ; first data element
+(defconstant misc-dfloat-offset misc-data-offset)  ; double-float value (8-byte aligned)
+
+;;; Complex-double-float elements require 16-byte alignment.  Objects are
+;;; dnode-aligned, so the header is at a 16-byte-aligned address.  The first
+;;; data slot (at header + 8) is only 8-byte aligned, so a pad word is
+;;; needed before the complex-double-float data to restore 16-byte alignment.
+(defconstant misc-complex-dfloat-offset (+ misc-data-offset node-size))  ; = 8
+
+
 (provide "ARM64-ARCH")
