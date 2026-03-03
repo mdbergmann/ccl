@@ -861,4 +861,183 @@
 )
 
 
+;;; Object Layout Definitions
+;;;
+;;; These structures must match arm64-constants.s exactly.
+;;; define-fixedsized-object places header at offset -8 (= -node-size)
+;;; and data fields at offsets 0, 8, 16, ... from the effective address.
+;;; define-lisp-object is used for variable-size objects (cons, arrayH)
+;;; where the origin is determined by the object's bias.
+
+;;; Cons cells.  CDR at offset -8 (signed/LDUR), CAR at offset 0 (unsigned/LDR).
+(define-lisp-object cons cons-bias
+  cdr
+  car)
+
+;;; Numeric types.
+(define-fixedsized-object ratio
+  numer
+  denom)
+
+;;; Double-float: viewed as a uvector with 2 32-bit elements for
+;;; bootstrapping (the header element-count is 2).  The 8-byte IEEE 754
+;;; value starts at misc-data-offset.  Little-endian: low word first.
+(defconstant double-float.value misc-data-offset)
+(defconstant double-float.value-cell 0)
+(defconstant double-float.val-low double-float.value)
+(defconstant double-float.val-low-cell 0)
+(defconstant double-float.val-high (+ double-float.value 4))
+(defconstant double-float.val-high-cell 1)
+(defconstant double-float.element-count 2)
+(defconstant double-float.size 16)                 ; header(8) + value(8)
+
+(define-fixedsized-object complex
+  realpart
+  imagpart)
+
+;;; Complex-single-float: two 32-bit floats packed in one 8-byte slot.
+(define-fixedsized-object complex-single-float
+  value)
+
+(defconstant complex-single-float.realpart complex-single-float.value)
+(defconstant complex-single-float.imagpart (+ complex-single-float.value 4))
+
+;;; Complex-double-float: pad word for 16-byte alignment of the
+;;; double-float elements.
+(define-fixedsized-object complex-double-float
+  pad
+  realpart
+  imagpart)
+
+
+;;; Pointer types.
+
+;;; There are two kinds of macptr; use the length field of the header
+;;; to distinguish between them.
+(define-fixedsized-object macptr
+  address
+  domain
+  type)
+
+(define-fixedsized-object xmacptr
+  address
+  domain
+  type
+  flags
+  link)
+
+
+;;; Functions are of conceptually unlimited size.  Only the entrypoint
+;;; field is defined here; closure variables and constants follow.
+(define-fixedsized-object function
+  entrypoint)
+
+
+;;; Symbol.  Field order must match arm64-constants.s.
+(define-fixedsized-object symbol
+  pname
+  vcell
+  fcell
+  package-predicate
+  flags
+  plist
+  binding-index)
+
+;;; nilsym-offset: distance from NIL's effective address to the effective
+;;; address of NIL's own symbol structure.  NIL's symbol is the second
+;;; nil-relative symbol (position 1 in *arm64-nil-relative-symbols*).
+(defconstant nilsym-offset (+ t-offset symbol.size))
+
+
+;;; Catch frames are gvectors allocated on the temp stack.
+;;; Save0-save7 hold the callee-saved Lisp registers (x16-x23).
+;;; Field order must match arm64-constants.s.
+(define-fixedsized-object catch-frame
+  catch-tag                             ; #<unbound> -> unwind-protect, else catch
+  save0                                 ; callee-saved registers
+  save1
+  save2
+  save3
+  save4
+  save5
+  save6
+  save7
+  link                                  ; backpointer to previous catch frame
+  mvflag                                ; 0 if single-value, fixnum 1 otherwise
+  db-link                               ; head of special-binding chain
+  xframe                                ; exception frame chain
+  last-lisp-frame)                      ; from TCR
+
+(define-fixedsized-object lock
+  _value                                ; finalizable pointer to kernel object
+  kind                                  ; '0 = recursive-lock, '1 = rwlock
+  writer                                ; tcr of owning thread or 0
+  name
+  whostate
+  whostate-2)
+
+
+;;; Vector and array headers.
+
+(define-fixedsized-object vectorH
+  logsize                               ; fillpointer if it has one, physsize otherwise
+  physsize                              ; total size of (possibly displaced) data vector
+  data-vector                           ; object this header describes
+  displacement                          ; true displacement or 0
+  flags)                                ; has-fill-pointer,displaced-to,adjustable bits
+
+(define-lisp-object arrayH misc-bias
+  header                                ; subtag = subtag-arrayH
+  rank                                  ; NEVER 1
+  physsize                              ; total size of (possibly displaced) data vector
+  data-vector                           ; object this header describes
+  displacement                          ; true displacement or 0
+  flags                                 ; has-fill-pointer,displaced-to,adjustable bits
+  ;; Dimensions follow
+  )
+
+(defconstant arrayH.rank-cell 0)
+(defconstant arrayH.physsize-cell 1)
+(defconstant arrayH.data-vector-cell 2)
+(defconstant arrayH.displacement-cell 3)
+(defconstant arrayH.flags-cell 4)
+(defconstant arrayH.dim0-cell 5)
+
+(defconstant arrayH.flags-cell-bits-byte (byte 8 0))
+(defconstant arrayH.flags-cell-subtag-byte (byte 8 8))
+
+
+;;; Value cell.
+(define-fixedsized-object value-cell
+  value)
+
+
+;;; Lisp stack frame.  0-based (no header or tag bias).
+(define-storage-layout lisp-frame 0
+  savevsp
+  savelr)
+
+;;; Special-variable binding record.  0-based, on the value stack.
+(define-storage-layout binding 0
+  link
+  sym
+  val)
+
+
+;;; Header construction macro and common headers.
+
+(defmacro define-header (name element-count subtag)
+  `(defconstant ,name (logior (ash ,element-count num-subtag-bits) ,subtag)))
+
+(define-header double-float-header double-float.element-count subtag-double-float)
+(define-header one-digit-bignum-header 1 subtag-bignum)
+(define-header two-digit-bignum-header 2 subtag-bignum)
+(define-header three-digit-bignum-header 3 subtag-bignum)
+(define-header four-digit-bignum-header 4 subtag-bignum)
+(define-header five-digit-bignum-header 5 subtag-bignum)
+(define-header symbol-header symbol.element-count subtag-symbol)
+(define-header value-cell-header value-cell.element-count subtag-value-cell)
+(define-header macptr-header macptr.element-count subtag-macptr)
+
+
 (provide "ARM64-ARCH")

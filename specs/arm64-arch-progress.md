@@ -20,8 +20,9 @@ Branch: `arm64-arch-foundation`
 
 11. **NIL and T Values** — `1983833e` — nil-base-address=#x13000, canonical-nil-value=(tag-nil<<56|#x13008), nil-value alias, t-offset=dnode-size=16; memory layout: dnode at nil-base holds CDR/CAR(NIL)=NIL, T symbol at nil-base+16, nilsym-offset deferred to section 12
 
+12. **Object Layout Definitions** — `5b650831` — cons (cdr/car), ratio, double-float (manual 32-bit element constants), complex, complex-single-float, complex-double-float (with pad), macptr, xmacptr, function (entrypoint only), symbol (7 fields, symbol.size=64), nilsym-offset=80, catch-frame (14 fields: catch-tag, save0-7, link, mvflag, db-link, xframe, last-lisp-frame), lock, vectorH, arrayH (with cell indices), value-cell, lisp-frame (0-based), binding (0-based), define-header macro + common headers. Note: arm64-constants.s has _structf sign bug (misc_bias=-8 vs expected positive); Lisp definitions are authoritative.
+
 ## Remaining Sections
-12. Object Layout Definitions (cons, ratio, symbol, catch-frame, etc.)
 13. TCR Layout
 14. Kernel Imports
 15. Target Uvector Subtags Alist
