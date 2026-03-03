@@ -515,6 +515,112 @@
 )
 
 
+;;; Tag Definitions — high-byte TBI tags
+;;;
+;;; In the TBI scheme, the top byte (bits 56-63) of a 64-bit value
+;;; encodes its type.  The tag byte space is partitioned as:
+;;;
+;;;   #x00       : non-negative fixnum (sign extension of bit 55)
+;;;   #x01       : overflowed positive fixnum (arithmetic overflow by 1 bit)
+;;;   #x02       : NIL
+;;;   #x03       : cons
+;;;   #x10-#x1F  : immediates (single-float, character, markers)
+;;;   #x40-#x5F  : ivector references (bit 6 set, bit 5 clear)
+;;;   #x60-#x7F  : gvector references (bit 6 set, bit 5 set)
+;;;   #x80-#x9F  : ivector headers  (bit 7 set, bit 5 clear)
+;;;   #xA0-#xBF  : gvector headers  (bit 7 set, bit 5 set)
+;;;   #xFE       : overflowed negative fixnum
+;;;   #xFF       : negative fixnum (sign extension of bit 55)
+;;;
+;;; Each uvector type gets a unique reference tag (top byte of pointer)
+;;; AND a unique header subtag (low byte of header word).  This differs
+;;; from ARM32/x86-64 where all misc objects share one pointer tag.
+
+(eval-when (:compile-toplevel :load-toplevel :execute)
+
+;;; Fixnum tags — top byte is sign extension of the 56-bit value.
+(defconstant tag-positive-fixnum 0)
+(defconstant tag-negative-fixnum #xFF)
+(defconstant tag-overflowed-positive-fixnum 1)
+(defconstant tag-overflowed-negative-fixnum #xFE)
+
+;;; List tags — bits 58-63 clear, bit 57 set.
+(defconstant list-leading-zero-bits 6)
+(defconstant tag-nil 2)
+(defconstant tag-cons 3)
+
+;;; Immediate tags — bits 61-63 clear, bit 60 set (base = #x10).
+(defconstant imm-tag-mask #x10)
+(defconstant tag-single-float (logior imm-tag-mask 0))     ; #x10
+(defconstant tag-character (logior imm-tag-mask 1))         ; #x11
+(defconstant tag-unbound (logior imm-tag-mask 2))           ; #x12
+(defconstant tag-slot-unbound (logior imm-tag-mask 3))      ; #x13
+(defconstant tag-no-thread-local-binding (logior imm-tag-mask 4))  ; #x14
+(defconstant tag-illegal (logior imm-tag-mask 5))           ; #x15
+(defconstant tag-stack-alloc (logior imm-tag-mask 6))       ; #x16
+
+;;; Subtag aliases for immediates — other parts of the codebase
+;;; reference these under the subtag- naming convention.
+(defconstant subtag-single-float tag-single-float)
+(defconstant subtag-character tag-character)
+(defconstant subtag-unbound tag-unbound)
+(defconstant subtag-slot-unbound tag-slot-unbound)
+(defconstant subtag-no-thread-local-binding tag-no-thread-local-binding)
+(defconstant subtag-illegal tag-illegal)
+(defconstant subtag-stack-alloc-marker tag-stack-alloc)
+
+;;; Full marker values — tag byte shifted into the top-byte position.
+;;; These are the actual 64-bit bit patterns for marker objects.
+(defconstant unbound-marker (ash tag-unbound tag-shift))
+(defconstant slot-unbound-marker (ash tag-slot-unbound tag-shift))
+(defconstant no-thread-local-binding-marker (ash tag-no-thread-local-binding tag-shift))
+(defconstant illegal-marker (ash tag-illegal tag-shift))
+(defconstant stack-alloc-marker (ash tag-stack-alloc tag-shift))
+(defconstant undefined unbound-marker)
+
+;;; Uvector tag infrastructure
+;;;
+;;; Uvector references have bit 6 set in the tag byte.
+;;; Uvector headers have bit 7 set in the LOW byte of the header word
+;;; (not the TBI top byte — headers are data, not tagged pointers).
+;;; Gvectors (node-containing) additionally have bit 5 set.
+;;; CL-defined ivectors have bit 0 set.
+;;; Bits 1-4 encode the specific type within each category.
+
+(defconstant gvector-tag-bit 5)
+(defconstant gvector-tag-mask (ash 1 gvector-tag-bit))     ; #x20
+
+(defconstant uvector-ref #x40)
+(defconstant uvector-header #x80)
+(defconstant uvector-mask (logior uvector-header uvector-ref))  ; #xC0
+
+(defconstant cl-ivector-tag-bit 0)
+(defconstant cl-ivector-mask (ash 1 cl-ivector-tag-bit))    ; #x01
+(defconstant cl-ivector-ref (logior uvector-ref cl-ivector-mask))  ; #x41
+(defconstant cl-ivector-ref-mask (logior uvector-mask gvector-tag-mask cl-ivector-mask))  ; #xE1
+
+;;; Macros for defining uvector subtags (used in section 9).
+;;; Each creates two constants:
+;;;   SUBTAG-name = header byte value   (uvector-header | type-bits)
+;;;   TAG-name    = reference tag value  (uvector-ref | type-bits)
+
+(defmacro define-uvector (name type-bits)
+  `(progn
+     (defconstant ,(ccl::form-symbol "SUBTAG-" name) (logior uvector-header ,type-bits))
+     (defconstant ,(ccl::form-symbol "TAG-" name) (logior uvector-ref ,type-bits))))
+
+(defmacro define-ivector (name n)
+  `(define-uvector ,name (ash ,n 1)))
+
+(defmacro define-cl-ivector (name n)
+  `(define-uvector ,name (logior (ash ,n 1) cl-ivector-mask)))
+
+(defmacro define-gvector (name n)
+  `(define-uvector ,name (logior ,n gvector-tag-mask)))
+
+)
+
+
 ;;; Storage layout macros — 8-byte steps for 64-bit
 (defmacro define-storage-layout (name origin &rest cells)
   `(progn
