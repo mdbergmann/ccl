@@ -1476,4 +1476,328 @@
                           ))
 
 
+;;; ============================================================
+;;; Memory region descriptors (area, protected-area).
+;;;
+;;; The kernel uses structures of this type to keep track of various
+;;; memory regions.  The gc-area record definition in
+;;; "ccl:interfaces;mcl-records.lisp" matches this.
+;;; ============================================================
+
+(define-storage-layout area 0
+  pred                                  ; pointer to preceding area in DLL
+  succ                                  ; pointer to next area in DLL
+  low                                   ; low bound on area addresses
+  high                                  ; high bound on area addresses
+  active                                ; low limit on stacks, high limit on heaps
+  softlimit                             ; overflow bound
+  hardlimit                             ; another one
+  code                                  ; an area-code; see below
+  markbits                              ; bit vector for GC
+  ndnodes                               ; "active" size of dynamic area or stack
+  older                                 ; in EGC sense
+  younger                               ; also for EGC
+  h                                     ; Handle or null pointer
+  softprot                              ; protected_area structure pointer
+  hardprot                              ; another one.
+  owner                                 ; fragment (library) which "owns" the area
+  refbits                               ; bitvector for intergenerational references
+  threshold                             ; for egc
+  gc-count                              ; generational gc count.
+  static-dnodes                         ; for honsing, etc.
+  static-used)                          ; bitvector
+
+(define-storage-layout protected-area 0
+  next
+  start                                 ; first byte (page-aligned) that might be protected
+  end                                   ; last byte (page-aligned) that could be protected
+  nprot                                 ; Might be 0
+  protsize                              ; number of bytes to protect
+  why)
+
+
+;;; ============================================================
+;;; Section 19: Arch Macros
+;;;
+;;; Architecture-specific macro expansions registered via
+;;; arch::defarchmacro.  These provide target-specific inline
+;;; expansions for cross-cutting Lisp operations.
+;;; ============================================================
+
+(defmacro defarm64archmacro (name lambda-list &body body)
+  `(arch::defarchmacro :arm64 ,name ,lambda-list ,@body))
+
+;;; Float allocation.
+;;; ARM64 TBI: single-floats are immediate (tagged in top byte),
+;;; so %make-sfloat is not needed.  Double-floats are heap-allocated.
+(defarm64archmacro ccl::%make-sfloat ()
+  (error "~s shouldn't be used in code targeting :ARM64" 'ccl::%make-sfloat))
+
+(defarm64archmacro ccl::%make-dfloat ()
+  `(ccl::%alloc-misc arm64::double-float.element-count arm64::subtag-double-float))
+
+;;; Ratio component accessors.
+(defarm64archmacro ccl::%numerator (x)
+  `(ccl::%svref ,x arm64::ratio.numer-cell))
+
+(defarm64archmacro ccl::%denominator (x)
+  `(ccl::%svref ,x arm64::ratio.denom-cell))
+
+;;; Complex number component accessors.
+(defarm64archmacro ccl::%realpart (x)
+  (let* ((thing (gensym)))
+    `(let* ((,thing ,x))
+      (case (ccl::typecode ,thing)
+        (#.arm64::subtag-complex-single-float (ccl::%complex-single-float-realpart ,thing))
+        (#.arm64::subtag-complex-double-float (ccl::%complex-double-float-realpart ,thing))
+        (t (ccl::%svref ,thing arm64::complex.realpart-cell))))))
+
+(defarm64archmacro ccl::%imagpart (x)
+  (let* ((thing (gensym)))
+    `(let* ((,thing ,x))
+      (case (ccl::typecode ,thing)
+        (#.arm64::subtag-complex-single-float (ccl::%complex-single-float-imagpart ,thing))
+        (#.arm64::subtag-complex-double-float (ccl::%complex-double-float-imagpart ,thing))
+        (t (ccl::%svref ,thing arm64::complex.imagpart-cell))))))
+
+;;; Single-float from double pointer.
+(defarm64archmacro ccl::%get-single-float-from-double-ptr (ptr offset)
+ `(ccl::%double-float->short-float (ccl::%get-double-float ,ptr ,offset)))
+
+;;; Code vector header predicate — ARM64 has no separate code-vector
+;;; type (code is in xcode-vector or function objects).
+(defarm64archmacro ccl::codevec-header-p (word)
+  (declare (ignore word))
+  (error "~s makes no sense on :ARM64" 'ccl::codevec-header-p))
+
+;;; Immediate-p: true for fixnums and immediate-tagged values.
+;;; TBI: tag byte is 0x00 (positive fixnum), 0xFF (negative fixnum),
+;;; or has imm-tag-mask (#x10) set (character, single-float, markers).
+(defarm64archmacro ccl::immediate-p-macro (thing)
+  (let* ((tag (gensym)))
+    `(let* ((,tag (ccl::lisptag ,thing)))
+      (declare (fixnum ,tag))
+      (or (= ,tag arm64::tag-positive-fixnum)
+       (= ,tag arm64::tag-negative-fixnum)
+       (logtest ,tag arm64::imm-tag-mask)))))
+
+;;; Hashed-by-identity: true for types compared by EQ in hash tables.
+;;; Includes fixnums, immediates, symbols, and instances.
+(defarm64archmacro ccl::hashed-by-identity (thing)
+  (let* ((typecode (gensym)))
+    `(let* ((,typecode (ccl::typecode ,thing)))
+      (declare (fixnum ,typecode))
+      (or
+       (= ,typecode arm64::tag-positive-fixnum)
+       (= ,typecode arm64::tag-negative-fixnum)
+       (logtest ,typecode arm64::imm-tag-mask)
+       (= ,typecode arm64::subtag-symbol)
+       (= ,typecode arm64::subtag-instance)))))
+
+;;; Kernel global access.
+;;; Kernel globals are at negative offsets from the nil effective address
+;;; (nil-base + node-size).  With fixnumshift=0, the byte address IS
+;;; the fixnum value, so no shifting is needed.
+(defarm64archmacro ccl::%get-kernel-global (name)
+  `(ccl::%fixnum-ref (+ ,(+ nil-base-address node-size)
+                        ,(%kernel-global
+                          (if (ccl::quoted-form-p name)
+                            (cadr name)
+                            name)))))
+
+(defarm64archmacro ccl::%get-kernel-global-ptr (name dest)
+  `(ccl::%setf-macptr
+    ,dest
+    (ccl::%fixnum-ref-macptr (+ ,(+ nil-base-address node-size)
+                                ,(%kernel-global
+                                  (if (ccl::quoted-form-p name)
+                                    (cadr name)
+                                    name))))))
+
+(defarm64archmacro ccl::%target-kernel-global (name)
+  `(arm64::%kernel-global ,name))
+
+;;; Function vector access.
+;;; ARM64 TBI: functions are not split into code-vector + immediates;
+;;; the entrypoint is at slot 0, so these are identity operations.
+(defarm64archmacro ccl::lfun-vector (fun)
+  fun)
+
+(defarm64archmacro ccl::lfun-vector-lfun (lfv)
+  lfv)
+
+;;; Area field accessors.
+(defarm64archmacro ccl::area-code ()
+  area.code)
+
+(defarm64archmacro ccl::area-succ ()
+  area.succ)
+
+;;; Nth-immediate: access the Nth constant/immediate in a function.
+;;; Slot 0 is the entrypoint, so immediates start at slot 1.
+(defarm64archmacro ccl::nth-immediate (f i)
+  `(ccl::%svref ,f (the fixnum (+ (the fixnum ,i) 1))))
+
+(defarm64archmacro ccl::set-nth-immediate (f i new)
+  `(setf (ccl::%svref ,f (the fixnum (+ (the fixnum ,i) 1))) ,new))
+
+;;; Symbol pointer/vector conversions.
+;;; ARM64 TBI: symbols are not split into pointer + vector;
+;;; these are identity operations.
+(defarm64archmacro ccl::symptr->symvector (s)
+  s)
+
+(defarm64archmacro ccl::symvector->symptr (s)
+  s)
+
+;;; Function/function-vector conversions — identity on ARM64.
+(defarm64archmacro ccl::function-to-function-vector (f)
+  f)
+
+(defarm64archmacro ccl::function-vector-to-function (v)
+  v)
+
+;;; FF-call result buffer.
+;;; AAPCS64: x0-x7 (8 GPRs × 8 bytes) + d0-d7 (8 FPRs × 8 bytes).
+(defarm64archmacro ccl::with-ffcall-results ((buf) &body body)
+  (let* ((size (+ (* 8 8) (* 8 8))))   ; 128 bytes total
+    `(ccl::%stack-block ((,buf ,size :clear t))
+      ,@body)))
+
+
+;;; For backtrace: the relative PC of an argument-check trap
+;;; must be less than or equal to this value.
+;;; ARM64: CMP + HLT = 2 × 4 = 8 bytes.
+(defconstant arg-check-trap-pc-limit 8)
+
+
+;;; ============================================================
+;;; Section 20: Condition Codes and FPSCR
+;;; ============================================================
+
+;;; AArch64 condition field values (4-bit condition codes).
+;;; These encode the NZCV flag tests for conditional branches
+;;; and conditional select/compare instructions.
+(ccl::defenum (:prefix "ARM64-COND-")
+  eq                                    ; 0000 — equal (Z=1)
+  ne                                    ; 0001 — not equal (Z=0)
+  hs                                    ; 0010 — unsigned higher or same (C=1)
+  lo                                    ; 0011 — unsigned lower (C=0)
+  mi                                    ; 0100 — minus/negative (N=1)
+  pl                                    ; 0101 — plus/positive (N=0)
+  vs                                    ; 0110 — overflow (V=1)
+  vc                                    ; 0111 — no overflow (V=0)
+  hi                                    ; 1000 — unsigned higher (C=1 & Z=0)
+  ls                                    ; 1001 — unsigned lower or same (C=0 | Z=1)
+  ge                                    ; 1010 — signed >= (N=V)
+  lt                                    ; 1011 — signed < (N≠V)
+  gt                                    ; 1100 — signed > (Z=0 & N=V)
+  le                                    ; 1101 — signed <= (Z=1 | N≠V)
+  al)                                   ; 1110 — always
+
+;;; Synonyms for carry-set/carry-clear
+(defconstant arm64-cond-cs arm64-cond-hs)
+(defconstant arm64-cond-cc arm64-cond-lo)
+
+;;; FPCR/FPSR exception bits.
+;;; AArch64 splits the ARM32 FPSCR into two registers:
+;;;   FPSR — status (cumulative exception flags, NZCV)
+;;;   FPCR — control (exception enables, rounding mode)
+;;; The bit positions for exception flags (FPSR) and
+;;; exception enables (FPCR) are compatible with ARM32.
+
+;;; FPSR cumulative exception flags (bits 0-4)
+(defconstant ioc 0)                     ; invalid operation
+(defconstant dzc 1)                     ; division by zero
+(defconstant ofc 2)                     ; overflow
+(defconstant ufc 3)                     ; underflow
+(defconstant ixc 4)                     ; inexact
+
+;;; FPCR exception enable bits (bits 8-12)
+(defconstant ioe 8)                     ; invalid operation enable
+(defconstant dze 9)                     ; division by zero enable
+(defconstant ofe 10)                    ; overflow enable
+(defconstant ufe 11)                    ; underflow enable
+(defconstant ixe 12)                    ; inexact enable
+
+
+;;; ============================================================
+;;; Section 21: UUO Encoding
+;;;
+;;; ARM64 uses HLT instructions for traps (UUOs).  The 16-bit
+;;; immediate operand is partitioned:
+;;;   bits 2:0  — format code (3 bits)
+;;;   bits 7:3  — register operand (5 bits, for unary/binary)
+;;;   bits 15:8 — type info or second register (8 bits)
+;;;
+;;; Must match arm64-uuo.s encoding.
+;;; ============================================================
+
+;;; HLT format codes (low 3 bits of HLT immediate)
+(defconstant hlt-code-nullary 0)                  ; 13 bits of info
+(defconstant hlt-code-unary-reg-not-lisptag 1)    ; 5-bit reg, 8-bit tag info
+(defconstant hlt-code-unary-reg-not-fulltag 2)    ; 5-bit reg, 8-bit tag info
+(defconstant hlt-code-unary-reg-not-subtag 3)     ; 5-bit reg, 8-bit subtag
+(defconstant hlt-code-unary-reg-not-xtype 4)      ; 5-bit reg, 8-bit xtype
+(defconstant hlt-code-unary-misc 5)               ; 5-bit reg, 8-bit misc code
+(defconstant hlt-code-binary 6)                   ; 5-bit reg0, 5-bit reg1, 3-bit code
+
+;;; Misc UUO sub-codes (info field for hlt-code-unary-misc)
+(defconstant uuo-misc-not-callable 0)
+(defconstant uuo-misc-no-throw-tag 1)
+(defconstant uuo-misc-tlb-too-small 2)
+(defconstant uuo-misc-unbound 3)
+
+;;; Binary UUO sub-codes (high 3 bits for hlt-code-binary)
+(defconstant uuo-binary-vector-bounds 0)
+
+;;; xtypes: 8-bit integers used to report type errors for types that
+;;; can't be represented via tags alone.
+(defconstant xtype-unsigned-byte-24  252)
+(defconstant xtype-array2d  248)
+(defconstant xtype-array3d  244)
+(defconstant xtype-integer  4)
+(defconstant xtype-s64  8)
+(defconstant xtype-u64  12)
+(defconstant xtype-s32  16)
+(defconstant xtype-u32  20)
+(defconstant xtype-s16  24)
+(defconstant xtype-u16  28)
+(defconstant xtype-s8  32)
+(defconstant xtype-u8  36)
+(defconstant xtype-bit  40)
+(defconstant xtype-rational 44)
+(defconstant xtype-real 48)
+(defconstant xtype-number 52)
+(defconstant xtype-char-code 56)
+
+
+;;; ============================================================
+;;; Section 22: Stack Frame Layout, FASL Version, Provide
+;;; ============================================================
+
+;;; Fake stack frames: allocated on the stack "near" where a missing
+;;; lisp frame would be, used for foreign-to-lisp transitions, etc.
+
+(define-storage-layout fake-stack-frame 0
+  header
+  type                                  ; 'arm64::fake-stack-frame
+  sp
+  next-sp
+  fn
+  lr
+  vsp
+  xp)
+
+#+arm64-target
+(ccl::make-istruct-class 'fake-stack-frame ccl::*istruct-class*)
+
+
+;;; FASL (FASt Loader) file format version for ARM64.
+;;; Each architecture has its own FASL version number.
+(defconstant fasl-version #x68)
+(defconstant fasl-max-version #x68)
+(defconstant fasl-min-version #x68)
+(defparameter *image-abi-version* 1046)
+
 (provide "ARM64-ARCH")
