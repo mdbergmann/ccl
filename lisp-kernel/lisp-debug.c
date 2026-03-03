@@ -365,6 +365,9 @@ show_lisp_register(ExceptionInformation *xp, char *label, int r)
 #ifdef ARM
   fprintf(dbgout, "r%02d (%s) = %s\n", r, label, print_lisp_object(val));
 #endif
+#ifdef ARM64
+  fprintf(dbgout, "x%02d (%s) = %s\n", r, label, print_lisp_object(val));
+#endif
 }
 
 void
@@ -823,6 +826,15 @@ debug_lisp_registers(ExceptionInformation *xp, siginfo_t *info, int arg)
       show_lisp_register(xp, "temp0", temp0);
       show_lisp_register(xp, "temp1/fname/next_method_context", temp1);
       show_lisp_register(xp, "temp2/nfn", temp2);
+    }
+#endif
+#ifdef ARM64
+    {
+      extern void print_lisp_context(ExceptionInformation *);
+
+      fprintf(dbgout, "nargs = %lld\n",
+              (long long)(xpGPR(xp, nargs) >> fixnumshift));
+      print_lisp_context(xp);
     }
 #endif
   }

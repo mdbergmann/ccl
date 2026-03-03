@@ -21,6 +21,68 @@
 #ifndef __macros__
 #define __macros__
 
+#ifdef ARM64
+/* ================================================================
+ * ARM64 TBI Tagging Overrides
+ * ================================================================
+ * ARM64 uses Top Byte Ignore: type tags occupy bits 56-63 of a
+ * 64-bit pointer.  The standard low-bit extraction macros used by
+ * all other architectures are WRONG for ARM64 and must be overridden.
+ *
+ * Header layout (in memory):
+ *   bits 56-63: subtag byte (object type)
+ *   bits  0-55: element count
+ *
+ * Tagged pointer layout:
+ *   bits 56-63: tag byte (encodes type)
+ *   bits  0-55: effective address (= object base + node_size)
+ * ================================================================ */
+
+#define ptr_to_lispobj(p) ((LispObj)(p))
+#define ptr_from_lispobj(o) ((LispObj*)(o))
+
+/* Lisp-tagged registers: x6 (rnil) through x23 (save7) */
+#define lisp_reg_p(reg) ((reg) >= rnil && (reg) <= save7)
+
+/* Tag extraction: high byte */
+#undef tag_of  /* arm64-constants.h may have defined this */
+#define fulltag_of(o)  (((natural)(o)) >> 56)
+#define tag_of(o)      fulltag_of(o)
+
+/* Clear tag: mask to low 56 bits */
+#define untag(o)       ((natural)(o) & 0x00FFFFFFFFFFFFFFLL)
+#define node_aligned(o) untag(o)
+#define indirect_node(o) (*(LispObj *)(node_aligned(o)))
+
+/* Tagged pointers point to base + node_size (past header).
+   deref(o,0) returns the header at the object base. */
+#define deref(o,n) ((((LispObj*)(untag((LispObj)(o)) - node_size)))[(n)])
+#define header_of(o) deref(o,0)
+
+/* Headers: subtag in high byte, element count in low 56 bits */
+#define header_subtag(h) ((natural)(h) >> 56)
+#define header_element_count(h) ((h) & 0x00FFFFFFFFFFFFFFLL)
+#define make_header(subtag,element_count) (((LispObj)(subtag) << 56) | (element_count))
+
+/* fixnumshift = 0 on ARM64, so unbox/box are trivial casts */
+#define unbox_fixnum(x) ((signed_natural)(x))
+#define box_fixnum(x)   ((LispObj)(signed_natural)(x))
+
+/* Cons access: untag gives base+node_size, subtract to get struct base */
+#define car(x) (((cons *)ptr_from_lispobj(untag(x) - node_size))->car)
+#define cdr(x) (((cons *)ptr_from_lispobj(untag(x) - node_size))->cdr)
+
+/* "sym" is an untagged pointer to a symbol (= base + node_size) */
+#define BOUNDP(sym)  ((((lispsymbol *)((char*)(sym) - node_size))->vcell) != undefined)
+#define FBOUNDP(sym) ((((lispsymbol *)((char*)(sym) - node_size))->fcell) != nrs_UDF.vcell)
+
+/* Node headers: bits 7 AND 5 set (gvector headers: 0xA0-0xBF) */
+#define nodeheader_tag_p(tag) (((tag) & 0xA0) == 0xA0)
+/* Imm headers: bit 7 set, bit 5 clear (ivector headers: 0x80-0x9F) */
+#define immheader_tag_p(tag)  (((tag) & 0xA0) == 0x80)
+
+#else /* !ARM64 — all other architectures */
+
 #define ptr_to_lispobj(p) ((LispObj)(p))
 #define ptr_from_lispobj(o) ((LispObj*)(o))
 #define lisp_reg_p(reg)  ((reg) >= fn)
@@ -82,6 +144,8 @@
 #define immheader_tag_p(tag) (tag == fulltag_immheader)
 #endif
 
+#endif /* !ARM64 */
+
 #ifdef VC
 #define inline
 #define __attribute__(x)
@@ -103,7 +167,7 @@
 
 /* We can't easily and unconditionally use format strings like "0x%lx"
    to print lisp objects: the "l" might not match the word size, and
-   neither would (necessarily) something like "0x%llx".  We can at 
+   neither would (necessarily) something like "0x%llx".  We can at
    least exploit the fact that on all current platforms, "ll" ("long long")
    is the size of a 64-bit lisp object and "l" ("long") is the size of
    a 32-bit lisp object. */
@@ -123,4 +187,4 @@
 #else
 #define TCR_AUX(tcr) tcr
 #endif
-#endif /* __macros __ */
+#endif /* __macros__ */

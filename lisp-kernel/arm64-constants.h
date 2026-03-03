@@ -240,6 +240,98 @@ define_gvector(simple_vector,31)
 #define subtag_illegal       tag_illegal
 #define subtag_stack_alloc_marker tag_stack_alloc
 
+/* Subtag aliases for uvector headers.
+   On ARM64, header_subtag() returns the high byte of the header word,
+   which matches the *_header enum values.  These aliases allow shared
+   code (gc-common.c, image.c, etc.) to use the subtag_* naming. */
+
+/* Ivector (immutable) header subtags */
+#define subtag_bignum                       bignum_header
+#define subtag_double_float                 double_float_header
+#define subtag_complex_single_float         complex_single_float_header
+#define subtag_complex_double_float         complex_double_float_header
+#define subtag_xcode_vector                 xcode_vector_header
+#define subtag_code_vector                  xcode_vector_header  /* compat alias */
+#define subtag_macptr                       macptr_header
+#define subtag_dead_macptr                  dead_macptr_header
+#define subtag_s32_vector                   s32_vector_header
+#define subtag_u32_vector                   u32_vector_header
+#define subtag_single_float_vector          single_float_vector_header
+#define subtag_simple_base_string           simple_string_header /* ARM64 uses simple_string */
+#define subtag_fixnum_vector                fixnum_vector_header
+#define subtag_s64_vector                   s64_vector_header
+#define subtag_u64_vector                   u64_vector_header
+#define subtag_double_float_vector          double_float_vector_header
+#define subtag_complex_single_float_vector  complex_single_float_vector_header
+#define subtag_complex_double_float_vector  complex_double_float_vector_header
+#define subtag_s8_vector                    s8_vector_header
+#define subtag_u8_vector                    u8_vector_header
+#define subtag_s16_vector                   s16_vector_header
+#define subtag_u16_vector                   u16_vector_header
+#define subtag_bit_vector                   bit_vector_header
+
+/* Gvector (node) header subtags */
+#define subtag_ratio           ratio_header
+#define subtag_complex         complex_header
+#define subtag_function        function_header
+#define subtag_symbol          symbol_header
+#define subtag_catch_frame     catch_frame_header  /* enum val, before #define shadow */
+#define subtag_basic_stream    basic_stream_header
+#define subtag_lock            lock_header
+#define subtag_hash_vector     hash_vector_header
+#define subtag_pool            pool_header
+#define subtag_weak            weak_header
+#define subtag_package         package_header
+#define subtag_slot_vector     slot_vector_header
+#define subtag_instance        instance_header
+#define subtag_struct          struct_header
+#define subtag_istruct         istruct_header
+#define subtag_value_cell      value_cell_header
+#define subtag_xfunction       xfunction_header
+#define subtag_pseudofunction  xfunction_header    /* ARM64 has no pseudofunction */
+#define subtag_arrayH          arrayH_header
+#define subtag_vectorH         vectorH_header
+#define subtag_simple_vector   simple_vector_header
+#define subtag_forward_marker  tag_nil
+
+/* Min/max subtag range aliases for ivector size dispatch */
+#define min_32_bit_ivector_subtag  min_32_bit_ivector_header
+#define max_32_bit_ivector_subtag  max_32_bit_ivector_header
+#define min_64_bit_ivector_subtag  min_64_bit_ivector_header
+#define max_64_bit_ivector_subtag  max_64_bit_ivector_header
+#define min_8_bit_ivector_subtag   min_8_bit_ivector_header
+#define max_8_bit_ivector_subtag   max_8_bit_ivector_header
+#define min_16_bit_ivector_subtag  min_16_bit_ivector_header
+#define max_16_bit_ivector_subtag  max_16_bit_ivector_header
+#define min_cl_ivector_subtag      s32_vector_header
+
+/* ================================================================
+   Section 5b: Compatibility defines
+   ================================================================ */
+
+/* tagmask: same as fulltagmask on ARM64 (8-bit tags) */
+#define tagmask fulltagmask
+
+/* fulltag_nil: alias for tag_nil, used by some shared code */
+#define fulltag_nil   tag_nil
+#define fulltag_cons  tag_cons
+
+/* fulltag_misc: on ARM64, gvector refs serve as the "misc" tag.
+   Use the lowest gvector ref tag (0x60) as the canonical value. */
+#define fulltag_misc  uvector_ref
+
+/* Rsp: sentinel register number for hardware SP.
+   SP is NOT in x0-x30; access via xpSP() in exception contexts. */
+#define Rsp  31
+
+/* fixnumshift: alias for fixnum_shift (some code uses this name) */
+#ifndef fixnumshift
+#define fixnumshift  fixnum_shift
+#endif
+
+/* dnode alignment */
+#define dnode_align_bits 4
+
 /* ================================================================
    Section 6: Marker values
    Full 64-bit marker values — tag byte shifted into bits 56-63.
