@@ -275,4 +275,45 @@
     weakvll                               ; all populations as of last GC
     ))
 
+;;; The order here matches "ccl:lisp-kernel;lisp_globals.h" and the nrs record
+;;; in "ccl:lisp-kernel;lisp_globals.s".
+(defparameter *arm64-nil-relative-symbols*
+  '(t
+    nil
+    ccl::%err-disp
+    ccl::cmain
+    eval
+    ccl::apply-evaluated-function
+    error
+    ccl::%defun
+    ccl::%defvar
+    ccl::%defconstant
+    ccl::%macro
+    ccl::%kernel-restart
+    *package*
+    ccl::*total-bytes-freed*
+    :allow-other-keys
+    ccl::%toplevel-catch%
+    ccl::%toplevel-function%
+    ccl::%pascal-functions%
+    ccl::restore-lisp-pointers
+    ccl::*total-gc-microseconds*
+    ccl::%builtin-functions%
+    ccl::%unbound-function%
+    ccl::%init-misc
+    ccl::%macro-code%
+    ccl::%closure-code%
+    ccl::%new-gcable-ptr
+    ccl::*gc-event-status-bits*
+    ccl::*post-gc-hook*
+    ccl::%handlers%
+    ccl::%all-packages%
+    ccl::*keyword-package*
+    ccl::%os-init-function%
+    ccl::%foreign-thread-control
+    ))
+
+;;; Old (and slightly confusing) name; NIL used to be in a register.
+(defparameter *arm64-nilreg-relative-symbols* *arm64-nil-relative-symbols*)
+
 (provide "ARM64-ARCH")
