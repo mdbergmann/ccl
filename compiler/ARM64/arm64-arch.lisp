@@ -216,4 +216,63 @@
 
 (defparameter *standard-arm64-register-names* *arm64-register-names*)
 
+
+;;; Kernel globals are allocated "below" nil.  This list (used to map
+;;; symbolic names to rnil-relative offsets) must exactly match the
+;;; kernel's notion of where things are.
+;;; The order here matches "ccl:lisp-kernel;lisp_globals.h" & the
+;;; lisp_globals record in "ccl:lisp-kernel;*constants*.s"
+(defparameter *arm64-kernel-globals*
+  '(get-tcr                              ; callback to obtain (real) tcr
+    tcr-count
+    interrupt-signal                      ; used by PROCESS-INTERRUPT
+    kernel-imports                        ; some things we need to have imported for us.
+    objc-2-personality
+    savetoc                               ; used to save TOC on some platforms
+    saver13                               ; used to save r13 on some platforms
+    subprims-base                         ; start of dynamic subprims jump table
+    ret1valaddr                           ; magic multiple-values return address.
+    tcr-key                               ; tsd key for thread's tcr
+    area-lock                             ; serialize access to gc
+    exception-lock                        ; serialize exception handling
+    static-conses                         ; when FREEZE is in effect
+    default-allocation-quantum            ; log2_heap_segment_size, as a fixnum.
+    intflag                               ; interrupt-pending flag
+    gc-inhibit-count                      ; for gc locking
+    refbits                               ; oldspace refbits
+    oldspace-dnode-count                  ; number of dnodes in dynamic space that are older than
+                                          ; youngest generation
+    float-abi                             ; non-zero if using hard float abi
+    fwdnum                                ; fixnum: GC "forwarder" call count.
+    gc-count                              ; fixnum: GC call count.
+    gcable-pointers                       ; linked-list of weak macptrs.
+    heap-start                            ; start of lisp heap
+    heap-end                              ; end of lisp heap
+    statically-linked                     ; true if the lisp kernel is statically linked
+    stack-size                            ; value of --stack-size arg
+    objc-2-begin-catch                    ; objc_begin_catch
+    kernel-path
+    all-areas                             ; doubly-linked area list
+    lexpr-return                          ; multiple-value lexpr return address
+    lexpr-return1v                        ; single-value lexpr return address
+    in-gc                                 ; non-zero when GC-ish thing active
+    free-static-conses                    ; fixnum
+    objc-2-end-catch                      ; _objc_end_catch
+    short-float-zero                      ; low half of 1.0d0
+    double-float-one                      ; high half of 1.0d0
+    static-cons-area                      ;
+    exception-saved-registers             ; saved registers from exception frame
+    oldest-ephemeral                      ; doublenode address of oldest ephemeral object or 0
+    tenured-area                          ; the tenured_area.
+    errno                                 ; address of C lib errno
+    argv                                  ; address of C lib argv
+    host-platform                         ; 0 on MacOS, 1 on ARM Linux, 2 on VxWorks ...
+    batch-flag                            ; non-zero if --batch specified
+    unwind-resume                         ; _Unwind_Resume
+    weak-gc-method                        ; weak gc algorithm.
+    image-name                            ; current image name
+    initial-tcr                           ; initial thread's context record
+    weakvll                               ; all populations as of last GC
+    ))
+
 (provide "ARM64-ARCH")
