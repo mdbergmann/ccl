@@ -26,8 +26,9 @@ Branch: `arm64-arch-foundation`
 
 14. **Kernel Imports** — %kernel-global function and macro (offset = -(pos+2)×node-size, relative to rnil effective address), kernel-import defenum (65 entries, step=node-size=8, fd-setsize-bytes through lisp-realpath, matching x86-64), nrs-offset macro (byte offset from NIL symbol to requested symbol, formula: (1-pos)×symbol.size).
 
+15. **Target Uvector Subtags Alist** — *arm64-target-uvector-subtags* (42 entries): maps keyword type names to subtag values. Follows x86-64 pattern: includes s64/u64 vector types, no code-vector/pseudofunction. Entries: bignum, ratio, single-float, double-float, complex types, symbol, function, xcode-vector, macptr, catch-frame, struct, istruct, pool, population, hash-vector, package, value-cell, instance, lock, basic-stream, slot-vector, simple-string, bit-vector, s8/u8/s16/u16/s32/u32/s64/u64 vectors, fixnum-vector, single/double-float vectors, simple-vector, complex-single/double-float vectors, vectorH, arrayH, min-cl-ivector-subtag.
+
 ## Remaining Sections
-15. Target Uvector Subtags Alist
 16. Array Type Helper
 17. Misc Byte Count Helper
 18. Target Arch Descriptor

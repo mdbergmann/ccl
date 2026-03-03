@@ -1250,4 +1250,53 @@
     (if pos (* (1- pos) symbol.size))))
 
 
+;;; Target uvector subtags alist.
+;;; Maps keyword type names to subtag values for the compiler and
+;;; cross-compilation infrastructure.  Follows x86-64 pattern
+;;; (includes 64-bit vector types, no code-vector/pseudofunction).
+(defparameter *arm64-target-uvector-subtags*
+  `((:bignum . ,subtag-bignum)
+    (:ratio . ,subtag-ratio)
+    (:single-float . ,subtag-single-float)
+    (:double-float . ,subtag-double-float)
+    (:complex . ,subtag-complex)
+    (:complex-single-float . ,subtag-complex-single-float)
+    (:complex-double-float . ,subtag-complex-double-float)
+    (:symbol . ,subtag-symbol)
+    (:function . ,subtag-function)
+    (:xcode-vector . ,subtag-xcode-vector)
+    (:macptr . ,subtag-macptr)
+    (:catch-frame . ,subtag-catch-frame)
+    (:struct . ,subtag-struct)
+    (:istruct . ,subtag-istruct)
+    (:pool . ,subtag-pool)
+    (:population . ,subtag-weak)
+    (:hash-vector . ,subtag-hash-vector)
+    (:package . ,subtag-package)
+    (:value-cell . ,subtag-value-cell)
+    (:instance . ,subtag-instance)
+    (:lock . ,subtag-lock)
+    (:basic-stream . ,subtag-basic-stream)
+    (:slot-vector . ,subtag-slot-vector)
+    (:simple-string . ,subtag-simple-base-string)
+    (:bit-vector . ,subtag-bit-vector)
+    (:signed-8-bit-vector . ,subtag-s8-vector)
+    (:unsigned-8-bit-vector . ,subtag-u8-vector)
+    (:signed-16-bit-vector . ,subtag-s16-vector)
+    (:unsigned-16-bit-vector . ,subtag-u16-vector)
+    (:signed-32-bit-vector . ,subtag-s32-vector)
+    (:unsigned-32-bit-vector . ,subtag-u32-vector)
+    (:signed-64-bit-vector . ,subtag-s64-vector)
+    (:fixnum-vector . ,subtag-fixnum-vector)
+    (:unsigned-64-bit-vector . ,subtag-u64-vector)
+    (:single-float-vector . ,subtag-single-float-vector)
+    (:double-float-vector . ,subtag-double-float-vector)
+    (:simple-vector . ,subtag-simple-vector)
+    (:complex-single-float-vector . ,subtag-complex-single-float-vector)
+    (:complex-double-float-vector . ,subtag-complex-double-float-vector)
+    (:vector-header . ,subtag-vectorH)
+    (:array-header . ,subtag-arrayH)
+    (:min-cl-ivector-subtag . ,min-cl-ivector-subtag)))
+
+
 (provide "ARM64-ARCH")
