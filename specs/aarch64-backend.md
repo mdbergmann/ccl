@@ -17,7 +17,7 @@ Partial scaffolding exists from an earlier incomplete effort, with
 | `lisp-kernel/arm64-spentry.s` | 3,825 | ~70% of ARM32 equivalent |
 | `lisp-kernel/arm64-macros.s` | 608 | Partial |
 | `lisp-kernel/arm64-constants.s` | 442 | Partial |
-| `lisp-kernel/arm64-constants.h` | 82 | Minimal stub |
+| `lisp-kernel/arm64-constants.h` | 511 | **COMPLETE** — registers, TBI tags, uvector subtags, markers, offsets, NIL/T, structs, TCR, UUO, FPCR/FPSR |
 | `lisp-kernel/arm64-exceptions.h` | 15 | Empty stub |
 | `lisp-kernel/arm64-uuo.s` | 67 | Minimal stub |
 | `compiler/ARM64/arm64-asm.lisp` | 1,170 | Assembler partially started |
@@ -180,15 +180,24 @@ typedef ucontext_t ExceptionInformation;
 #define xpSP(x)          ((x)->uc_mcontext->__ss.__sp)
 ```
 
-#### 1.5 `lisp-kernel/arm64-constants.h` (expand from 82 to ~400 lines)
+#### 1.5 `lisp-kernel/arm64-constants.h` — **COMPLETE** (511 lines)
 
-Needs to be fleshed out with:
+C-side mirror of architecture constants from `arm64-arch.lisp` and
+`arm64-constants.s`.  Organized in 15 sections:
 
-- Full TCR field offsets for AArch64
-- Register number constants matching the register mapping
-- UUO format definitions for AArch64 (BRK-based traps)
-- Allocation trap instruction patterns
-- Node/immediate tag definitions (may reference shared 64-bit constants)
+- Register index definitions (imm0-imm5, nargs, rnil, temps, args, saves, etc.)
+- Fundamental constants (tag_shift=56, fixnumshift=0, node_size=8, etc.)
+- TBI tag definitions (fixnum, nil, cons, immediates, uvector infrastructure)
+- Tag extraction macros (tag_of, is_fixnum, is_uvector_ref, etc.)
+- Uvector subtag enum (32 types with boundary constants)
+- Full 64-bit marker values (unbound, slot_unbound, illegal, stack_alloc)
+- Offset/bias constants (uniform -node_size bias for TBI)
+- NIL/T values (nil_base_address=0x13000, TBI-tagged nil_value/t_value)
+- Type structures (double_float, lisp_frame, catch_frame, xframe_list)
+- TCR struct (41 fields, 328 bytes, matching assembly exactly)
+- Heap/memory, NZCV condition flags, FPCR/FPSR exception bits
+- HLT-based UUO encoding (7 format codes, extraction macros, xtypes)
+- ABI version 1046
 
 ### 2. Kernel Assembly
 
@@ -532,20 +541,20 @@ This must happen:
 
 | Component | Estimated Lines | Difficulty | Status |
 |-----------|----------------|------------|--------|
-| Kernel C (exceptions, GC, platform headers, print) | ~5,000 | Very High | Not started |
+| Kernel C (exceptions, GC, platform headers, print) | ~5,000 | Very High | constants.h done (511) |
 | Kernel assembly (complete spentry, asmutils, UUO) | ~2,000 | High | Partial (~4,500 existing) |
 | Compiler backend (arch, vinsns, codegen, backend, LAP, disasm, asm) | ~19,000 | Very High | arch.lisp done (1,803) |
 | Level-0 Lisp (12 files) | ~3,800 | Medium | Not started |
 | Library (FFI, backtrace, env) | ~1,900 | Medium-High | Not started |
 | Build system (Makefiles, linker scripts) | ~300 | Medium | Partial |
-| **Total new/modified code** | **~32,000** | | **~6% complete** |
+| **Total new/modified code** | **~32,000** | | **~8% complete** |
 
 ## Suggested Implementation Order
 
 ### Phase 1: Foundation
 1. ~~Finalize register mapping (Section: Register Mapping)~~ **DONE**
 2. ~~Complete `arm64-arch.lisp` -- all constants and definitions~~ **DONE** (1,803 lines)
-3. Complete `arm64-constants.h` -- C-side mirror of arch constants
+3. ~~Complete `arm64-constants.h` -- C-side mirror of arch constants~~ **DONE** (511 lines)
 4. Write `platform-linuxarm64.h` (and/or `platform-darwinarm64.h`)
 
 ### Phase 2: Kernel Runtime
