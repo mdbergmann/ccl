@@ -469,4 +469,22 @@
              (defarm64subprim .SPaapcs64-ff-callhf)
              )))))
 
+
+;;; Storage layout macros — 8-byte steps for 64-bit
+(defmacro define-storage-layout (name origin &rest cells)
+  `(progn
+     (ccl::defenum (:start ,origin :step 8)
+       ,@(mapcar #'(lambda (cell) (ccl::form-symbol name "." cell)) cells))
+     (defconstant ,(ccl::form-symbol name ".SIZE") ,(* (length cells) 8))))
+
+(defmacro define-lisp-object (name tagname &rest cells)
+  `(define-storage-layout ,name ,(- (symbol-value tagname)) ,@cells))
+
+(defmacro define-fixedsized-object (name &rest non-header-cells)
+  `(progn
+     (define-storage-layout ,name (- node-size) header ,@non-header-cells)
+     (ccl::defenum ()
+       ,@(mapcar #'(lambda (cell) (ccl::form-symbol name "." cell "-CELL")) non-header-cells))
+     (defconstant ,(ccl::form-symbol name ".ELEMENT-COUNT") ,(length non-header-cells))))
+
 (provide "ARM64-ARCH")
