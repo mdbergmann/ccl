@@ -134,6 +134,9 @@ current_stack_pointer(void)
 #ifdef ARM
   register natural _sp __asm__("sp");
 #endif
+#ifdef ARM64
+  register natural _sp __asm__("sp");
+#endif
   return _sp;
 }
 #else

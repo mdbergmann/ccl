@@ -64,4 +64,26 @@ define(`uuo_error_reg_not_xtype',`
 define(`uuo_error_vector_bounds',`
         __(hlt #(hlt_code_binary|(gprval($1)<<3)|(gprval($2)<<8)|(0<<13)))
         ')
-        
+
+/* Nullary UUOs for kernel services */
+define(`uuo_gc_trap',`
+        __(hlt #(hlt_code_nullary|(2<<3)))
+        ')
+
+define(`uuo_debug_trap',`
+        __(hlt #(hlt_code_nullary|(3<<3)))
+        ')
+
+define(`uuo_interrupt_now',`
+        __(hlt #(hlt_code_nullary|(4<<3)))
+        ')
+
+define(`uuo_suspend_now',`
+        __(hlt #(hlt_code_nullary|(5<<3)))
+        ')
+
+/* Used by Mach exception return */
+define(`uuo_pseudo_sigreturn',`
+        __(hlt #(hlt_code_nullary|(6<<3)))
+        ')
+
