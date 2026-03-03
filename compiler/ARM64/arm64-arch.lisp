@@ -1384,4 +1384,96 @@
           (t 0))))
 
 
+;;; FPR mask function for register allocation.
+;;; On AArch64, each SIMD/FP register (v0-v31) is a single 128-bit register
+;;; that holds all float widths, so one bit per register regardless of mode.
+(defun arm64-fpr-mask (value mode)
+  (declare (ignore mode))
+  (ash 1 value))
+
+
+;;; Target architecture descriptor.
+;;; Registers this architecture with the compiler infrastructure.
+;;;
+;;; In the TBI scheme, tags occupy the full top byte (8 bits).  The
+;;; ntagbits and nlisptagbits fields reflect this; fulltagmask is #xFF
+;;; (the tag byte mask) and fulltag-misc is uvector-ref (#x40).  These
+;;; differ from low-bit-tagging architectures but the compiler backend
+;;; (vinsns, code generator) will handle TBI-specific tag extraction.
+(defparameter *arm64-target-arch*
+  (arch::make-target-arch :name :arm64
+                          :lisp-node-size node-size
+                          :nil-value canonical-nil-value
+                          :fixnum-shift fixnumshift
+                          :most-positive-fixnum target-most-positive-fixnum
+                          :most-negative-fixnum target-most-negative-fixnum
+                          :misc-data-offset misc-data-offset
+                          :misc-dfloat-offset misc-dfloat-offset
+                          :nbits-in-word nbits-in-word
+                          :ntagbits 8
+                          :nlisptagbits 8
+                          :uvector-subtags *arm64-target-uvector-subtags*
+                          :max-64-bit-constant-index max-64-bit-constant-index
+                          :max-32-bit-constant-index max-32-bit-constant-index
+                          :max-16-bit-constant-index max-16-bit-constant-index
+                          :max-8-bit-constant-index max-8-bit-constant-index
+                          :max-1-bit-constant-index max-1-bit-constant-index
+                          :word-shift word-shift
+                          :code-vector-prefix nil
+                          :gvector-types '(:ratio :complex :symbol :function
+                                           :catch-frame :struct :istruct
+                                           :pool :population :hash-vector
+                                           :package :value-cell :instance
+                                           :lock :slot-vector
+                                           :simple-vector)
+                          :1-bit-ivector-types '(:bit-vector)
+                          :8-bit-ivector-types '(:signed-8-bit-vector
+                                                 :unsigned-8-bit-vector)
+                          :16-bit-ivector-types '(:signed-16-bit-vector
+                                                  :unsigned-16-bit-vector)
+                          :32-bit-ivector-types '(:signed-32-bit-vector
+                                                  :unsigned-32-bit-vector
+                                                  :single-float-vector
+                                                  :double-float
+                                                  :bignum
+                                                  :simple-string)
+                          :64-bit-ivector-types '(:double-float-vector
+                                                  :complex-single-float-vector
+                                                  :unsigned-64-bit-vector
+                                                  :signed-64-bit-vector
+                                                  :fixnum-vector)
+                          :array-type-name-from-ctype-function
+                          #'arm64-array-type-name-from-ctype
+                          :package-name "ARM64"
+                          :t-offset t-offset
+                          :array-data-size-function #'arm64-misc-byte-count
+                          :fpr-mask-function 'arm64-fpr-mask
+                          :subprims-base arm64::*arm64-subprims-base*
+                          :subprims-shift arm64::*arm64-subprims-shift*
+                          :subprims-table arm64::*arm64-subprims*
+                          :primitive->subprims `(((0 . 23) . ,(ccl::%subprim-name->offset '.SPbuiltin-plus arm64::*arm64-subprims*)))
+                          :unbound-marker-value unbound-marker
+                          :slot-unbound-marker-value slot-unbound-marker
+                          :fixnum-tag tag-positive-fixnum
+                          :single-float-tag subtag-single-float
+                          :single-float-tag-is-subtag nil
+                          :double-float-tag subtag-double-float
+                          :cons-tag tag-cons
+                          :null-tag tag-nil
+                          :symbol-tag tag-symbol
+                          :symbol-tag-is-subtag nil
+                          :function-tag tag-function
+                          :function-tag-is-subtag nil
+                          :big-endian nil
+                          :misc-subtag-offset misc-subtag-offset
+                          :car-offset cons.car
+                          :cdr-offset cons.cdr
+                          :subtag-char subtag-character
+                          :charcode-shift charcode-shift
+                          :fulltagmask #xFF
+                          :fulltag-misc uvector-ref
+                          :char-code-limit #x110000
+                          ))
+
+
 (provide "ARM64-ARCH")

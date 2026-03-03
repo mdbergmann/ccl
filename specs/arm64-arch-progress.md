@@ -32,8 +32,9 @@ Branch: `arm64-arch-foundation`
 
 17. **Misc Byte Count Helper** — arm64-misc-byte-count: computes data byte count from subtag+element-count. TBI dispatch: gvectors via bit-5 test (×8), ivectors by subtag range (32-bit×4, 64-bit×8, 8-bit×1, 16-bit×2, complex-df×16, bit-vector÷8).
 
+18. **Target Arch Descriptor** — *arm64-target-arch* via arch::make-target-arch. Key TBI-specific settings: ntagbits=8, nlisptagbits=8, fulltagmask=#xFF, fulltag-misc=uvector-ref(#x40). Tags use TBI top-byte values: fixnum-tag=0, cons-tag=3, null-tag=2, symbol-tag=tag-symbol(#x63), function-tag=tag-function(#x62). single-float-tag-is-subtag=nil (immediate in TBI). 64-bit platform: node-size=8, word-shift=3, includes s64/u64/fixnum in 64-bit-ivector-types. arm64-fpr-mask: 1 bit per register (AArch64 v-regs handle all widths). Wires .SPbuiltin-plus for primitive→subprims dispatch.
+
 ## Remaining Sections
-18. Target Arch Descriptor
 19. Arch Macros
 20. Condition Codes and FPSCR
 21. UUO Encoding
