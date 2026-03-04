@@ -63,7 +63,14 @@ dnode_mask = (dnode_size-1)
 dnode_align_bits = 4
 dnode_shift = dnode_align_bits        
 bitmap_shift = 6
-        
+
+fixnumshift = 0
+fixnum_shift = 0
+num_subtag_bits = 8
+node_bias = -node_size
+fulltagmask = 0xff
+tagmask = 0xff
+
 fixnumone = 1
 fixnum_one = fixnumone
 fixnum1 = fixnumone
@@ -93,6 +100,9 @@ tag_overflowed_negative_fixnum = 0xfe
 list_leading_zero_bits = 6        
 tag_nil = 2
 tag_cons = 3
+
+tag_fixnum = tag_positive_fixnum
+tag_list = tag_nil
 
 /* leaf node objects (characters, single-floats, other markers) have their
    top 3 bits clear and bit 60 set. */
@@ -125,9 +135,14 @@ uvector_header = 0x80
 uvector_mask = (uvector_header | uvector_ref)
 cl_ivector_tag_bit = 0        
 cl_ivector_mask = (1<<cl_ivector_tag_bit)
-cl_ivector_ref = (uvector_ref | cl_ivector_mask)  
+cl_ivector_ref = (uvector_ref | cl_ivector_mask)
 cl_ivector_ref_mask = (uvector_mask | gvector_tag_mask | cl_ivector_mask)
-        
+
+tag_misc = uvector_ref
+fulltag_misc = uvector_ref
+fulltag_immheader = uvector_header
+fulltag_nodeheader = (uvector_header | gvector_tag_mask)
+
 define(`define_uvector',`
 tag_$1 = (uvector_ref | ($2))
 $1_header = (uvector_header | ($2))
@@ -158,7 +173,7 @@ define_cl_ivector(s8_vector,10)
 define_cl_ivector(u8_vector,11)                
 define_cl_ivector(s16_vector,12)
 define_cl_ivector(u16_vector,13)
-define_cl_ivecot(complex_double_float_vector,14)	
+define_cl_ivector(complex_double_float_vector,14)	
 define_cl_ivector(bit_vector,15)
 	
 min_8_bit_ivector_header = s8_vector_header
@@ -199,6 +214,7 @@ t_value = (0x3000+fulltag_misc)
 define(`t_offset',-symbol.size)
 	
 misc_header_offset = node_bias
+misc_subtag_offset = (node_bias + (node_size-1))
 misc_data_offset = 0
 misc_header_byte_offset = (node_bias + (node_size-1))       /* high byte of header */
 misc_dfloat_offset = 0		/* double-floats are doubleword-aligned */

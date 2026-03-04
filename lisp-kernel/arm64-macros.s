@@ -41,6 +41,57 @@ define(`extract_tag',`
         __(lsr $1,$2,#tag_shift)
         ')
 
+define(`extract_fulltag',`
+        __(lsr $1,$2,#tag_shift)
+        ')
+
+define(`extract_lisptag',`
+        __(lsr $1,$2,#tag_shift)
+        ')
+
+define(`extract_subtag',`
+        __(ldrb gpr32($1),[$2,#misc_subtag_offset])
+        ')
+
+define(`extract_lowbyte',`
+        __(and $1,$2,#0xff)
+        ')
+
+define(`extract_typecode',`
+        new_macro_labels()
+        __(lsr $1,$2,#tag_shift)
+        __(cmp $1,#uvector_ref)
+        __(blo macro_label(done))
+        __(ldrb gpr32($1),[$2,#misc_subtag_offset])
+macro_label(done):
+        ')
+
+define(`box_fixnum',`
+        ifelse($1,$2,`',`__(mov $1,$2)')
+        ')
+
+define(`unbox_fixnum',`
+        ifelse($1,$2,`',`__(mov $1,$2)')
+        ')
+
+define(`trap_unless_fulltag_equal',`
+        new_macro_labels()
+        __(extract_fulltag($3,$1))
+        __(cmp $3,#$2)
+        __(beq macro_label(ok))
+        __(uuo_error_reg_not_fulltag($1,$2))
+macro_label(ok):
+        ')
+
+define(`trap_unless_typecode_equal',`
+        new_macro_labels()
+        __(extract_typecode($3,$1))
+        __(cmp $3,#$2)
+        __(beq macro_label(ok))
+        __(uuo_error_reg_not_xtype($1,$2))
+macro_label(ok):
+        ')
+
 /* Set $1 to $2, with bit 55 sign-sextended into bits 56-63.  If
    $2 is a fixnum, $1 and $2 will be =. */        
 define(`sign_extend_value',`
@@ -51,7 +102,7 @@ define(`extract_signed_byte',`
         ')
 
 define(`extract_unsigned_byte',`
-        __(ubfx $1,$2,$0,#$3)
+        __(ubfx $1,$2,#0,#$3)
         ')        
                 
 
@@ -151,7 +202,7 @@ define(`set_nargs',`
 	
 
 define(`vref32',`
-        __(ldr gpr32($1),[$2,#$2<<2])
+        __(ldr gpr32($1),[$2,#($3)<<2])
 	')
         
 	
@@ -411,7 +462,8 @@ define(`mkcatch',`
         __(make_header(imm1,catch_frame.element_count,catch_frame_header))
         __(mov imm2,#catch_frame.element_count<<word_shift)
         __(dnode_align(imm2,imm2,node_size))
-        __(stack_allocate_zeroed_vector(imm0,imm1,imm2,#tag_catch_frame))
+        __(mov imm3,#tag_catch_frame)
+        __(stack_allocate_zeroed_vector(imm0,imm1,imm2,imm3))
         __(ldr temp1,[rcontext,#tcr.last_lisp_frame])
 	__(ldr imm1,[rcontext,#tcr.catch_top])
         /* imm2 is mvflag */
@@ -536,7 +588,7 @@ macro_label(loop):
         __(bne macro_label(loop))
         __(str $2,[sp,#0])
         __(add $1,sp,#node_size)
-        __(orr $1,$1,$4)
+        __(orr $1,$1,$4,lsl #tag_shift)
         ')
    
 
