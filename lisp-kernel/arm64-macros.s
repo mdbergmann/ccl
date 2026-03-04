@@ -24,8 +24,7 @@ define(`gpr64',``x'gprval($1)')
 ')
 
 define(`make_header',`
-        __(mov $1,#($3<<tag_shift))
-        __(add $1,$1,#$2)
+        __(mov $1,#(($2 << num_subtag_bits) | $3))
         ')
         
 /* Load a 16-bit constant into $1 */
@@ -100,10 +99,23 @@ define(`cmp_tag_to_marker',`
         __(cmp $2,#$3)
         ')
 
+/* Load a full-word marker value (tag in top byte, zero payload).
+   $1 = dest register, $2 = tag_xxx constant. */
+define(`load_marker',`
+        __(movz $1,#($2 << 8),lsl #48)
+        ')
+
+/* Compare $1 to a full-word marker by extracting the tag byte.
+   Sets flags like CMP.  $2 = temp, $3 = tag_xxx constant. */
+define(`cmp_to_marker',`
+        __(lsr $2,$1,#tag_shift)
+        __(cmp $2,#$3)
+        ')
+
 /* Set $1 to $2, with bit 55 sign-sextended into bits 56-63.  If
    $2 is a fixnum, $1 and $2 will be =. */        
 define(`sign_extend_value',`
-        __(sbfx $2,$1,#0,#56)
+        __(sbfx $1,$2,#0,#56)
         ')
 define(`extract_signed_byte',`
         __(sbfx $1,$2,#0,#$3)
@@ -115,7 +127,7 @@ define(`extract_unsigned_byte',`
                 
 
 define(`clear_tag',`
-        __(ubfx $2,$1,#0,#56)
+        __(ubfx $1,$2,#0,#56)
         ')
               
         
@@ -554,9 +566,9 @@ define(`Misc_Alloc',`
         __(cmp allocptr,allocbase)
         __(bhi macro_label(ok))
         __(uuo_alloc_trap())
-macro_label(ok):                
+macro_label(ok):
 	__(str $2,[allocptr,#misc_header_offset])
-        __(orr $1,allocptr,$4,lsl #tag_shift)
+        ifelse($4,`',`__(orr $1,allocptr,#(fulltag_misc << tag_shift))',`__(orr $1,allocptr,$4,lsl #tag_shift)')
 	__(clear_alloc_tag())
 ')
 
@@ -576,7 +588,8 @@ macro_label(ok):
 /* Stack-allocate an ivector; $1 = header_lengthder, $2 = dnode-aligned
    size in bytes. */
 define(`stack_allocate_ivector',`
-        __(str $1,[sp,-$2]!)
+        __(sub sp,sp,$2)
+        __(str $1,[sp])
         ')
 
         

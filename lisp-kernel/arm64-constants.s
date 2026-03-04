@@ -106,6 +106,9 @@ tag_cons = 3
 
 tag_fixnum = tag_positive_fixnum
 tag_list = tag_nil
+fulltag_cons = tag_cons
+fulltag_misc = uvector_ref
+fulltag_immheader_0 = uvector_header
 
 /* leaf node objects (characters, single-floats, other markers) have their
    top 3 bits clear and bit 60 set. */
@@ -117,12 +120,14 @@ tag_unbound = (imm_tag_mask | 2)
 unbound_marker = (tag_unbound << tag_shift)
 tag_slot_unbound = (imm_tag_mask | 3)
 slot_unbound_marker = (tag_slot_unbound << tag_shift)
-tag_no_thread_local_binding = (imm_tag | 4)
+tag_no_thread_local_binding = (imm_tag_mask | 4)
 no_thread_local_binding_marker = (tag_no_thread_local_binding << tag_shift)
-tag_illegal = (imm_tag | 5)
+tag_illegal = (imm_tag_mask | 5)
 illegal_marker = (tag_illegal << tag_shift)  
-tag_stack_alloc = (tag_imm | 6)
-stack_alloc_marker = (tag_stack_alloc << tag_shift)                      
+tag_stack_alloc = (imm_tag_mask | 6)
+stack_alloc_marker = (tag_stack_alloc << tag_shift)
+tag_lisp_frame = (imm_tag_mask | 7)
+lisp_frame_marker = (tag_lisp_frame << tag_shift)                      
 
 /* Everything else is either (a) the tag of a uvector header, which
    is the first word in a non-CONS allocated object or (b) a pointer
@@ -184,10 +189,14 @@ min_16_bit_ivector_header = s16_vector_header
 min_32_bit_ivector_header = s32_vector_header
 min_64_bit_ivector_header = s64_vector_header
 
-min_8_bit_ivector_tag = s8_vector
-min_16_bit_ivector_tag = s16_vector
-min_32_bit_ivector_tag = s32_vector
-min_64_bit_ivector_tag = s64_vector
+min_8_bit_ivector_tag = tag_s8_vector
+min_16_bit_ivector_tag = tag_s16_vector
+min_32_bit_ivector_tag = tag_s32_vector
+min_64_bit_ivector_tag = tag_s64_vector
+
+max_32_bit_ivector_subtag = xcode_vector_header
+max_8_bit_ivector_subtag = u8_vector_header
+max_16_bit_ivector_subtag = u16_vector_header
         
 define_gvector(ratio,0)
 define_gvector(complex,1)
@@ -369,8 +378,10 @@ max_1_bit_constant_index = 0
         _endstructf
         
 	_struct(lisp_frame,0)
-	 _node(savevsp)	
-	 _node(savelr)	
+	 _node(savevsp)
+	 _node(savelr)
+	 _node(savefn)
+	 _node(padding)
 	_ends
 
 	_struct(vector,misc_bias)
