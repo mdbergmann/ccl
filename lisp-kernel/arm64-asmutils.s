@@ -157,10 +157,13 @@ _exportfn(C(pseudo_sigreturn))
 _endfn
 	__endif
 
-/* Switch to new_sp (x0) and jump to handler (x1). */
+/* call_handler_on_main_stack(signo, info, xp, new_sp, handler)
+   x0=signo, x1=info, x2=xp stay intact for the handler.
+   x3=new_sp is used to switch the stack.
+   x4=handler is the address to jump to. */
 _exportfn(C(call_handler_on_main_stack))
-	__(mov sp, x0)
-	__(br x1)
+	__(mov sp, x3)
+	__(br x4)
 _endfn
 
 	_endfile

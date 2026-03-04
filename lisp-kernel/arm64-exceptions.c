@@ -76,6 +76,8 @@ page_size = 4096;
 int
 log2_page_size = 12;
 
+TCR *gc_tcr = NULL;
+
 
 /*
   On ARM64, the TCR stores bytes_consed as a split 32+32 field
@@ -1090,5 +1092,847 @@ handle_exception(int signum, ExceptionInformation *xp, TCR *tcr,
 }
 
 
-/* Chunk 5-6: pc_luser_xp, normalize_tcr, gc_like_from_xp, signal handlers */
-/* TODO: to be added in subsequent chunks */
+/*
+  ================================================================
+  Chunk 5: pc_luser_xp, normalize_tcr, gc_like_from_xp and
+           GC entry-point wrappers.
+  ================================================================
+*/
+
+/* ----------------------------------------------------------------
+   Write-barrier and swap-lr labels from arm64-spentry.s.
+   ---------------------------------------------------------------- */
+extern opcode
+  egc_write_barrier_start,
+  egc_write_barrier_end,
+  egc_store_node_conditional,
+  egc_store_node_conditional_test,
+  egc_set_hash_key_conditional,
+  egc_set_hash_key_conditional_success,
+  egc_set_hash_key, egc_set_hash_key_did_store,
+  egc_gvset, egc_gvset_did_store,
+  egc_rplaca_did_store,
+  egc_rplacd, egc_rplacd_did_store;
+
+extern opcode
+  swap_lr_lisp_frame_temp0,
+  swap_lr_lisp_frame_temp0_end,
+  swap_lr_lisp_frame_arg_z,
+  swap_lr_lisp_frame_arg_z_end;
+
+
+/* ----------------------------------------------------------------
+   classify_alloc_instruction: determine where the PC is in the
+   ARM64 allocation sequence.
+   ---------------------------------------------------------------- */
+static alloc_instruction_id
+classify_alloc_instruction(ExceptionInformation *xp)
+{
+  pc program_counter = xpPC(xp);
+  opcode instr = *program_counter;
+
+  if (IS_SUB_FROM_ALLOCPTR(instr))
+    return ID_sub_allocptr_instruction;
+  if (IS_LOAD_ALLOCBASE_FROM_TCR(instr))
+    return ID_load_allocbase_instruction;
+  if (IS_COMPARE_ALLOCPTR(instr))
+    return ID_compare_allocptr_instruction;
+  if (IS_BRANCH_AROUND_ALLOC_TRAP(instr))
+    return ID_branch_around_alloc_trap_instruction;
+  if (IS_ALLOC_TRAP(instr))
+    return ID_alloc_trap_instruction;
+  if (IS_STUR_TO_ALLOCPTR(instr) ||
+      IS_STR_UOFF_TO_ALLOCPTR(instr) ||
+      IS_SET_ALLOCPTR_RESULT(instr) ||
+      IS_CLR_ALLOCPTR_TAG(instr))
+    return ID_finish_allocation;
+
+  return ID_unrecognized_alloc_instruction;
+}
+
+
+/* ----------------------------------------------------------------
+   restart_allocation: back up the PC to the SUB instruction that
+   begins the allocation sequence so it can be re-attempted.
+   ---------------------------------------------------------------- */
+static void
+restart_allocation(ExceptionInformation *xp)
+{
+  pc p = xpPC(xp);
+
+  while (1) {
+    if (IS_SUB_FROM_ALLOCPTR(*p)) {
+      xpPC(xp) = p;
+      return;
+    }
+    --p;
+  }
+}
+
+
+/* ----------------------------------------------------------------
+   update_area_active: set the active pointer of the area chain
+   rooted at *aptr to value.  Walk the ->older chain to find the
+   matching area, then mark all younger areas as empty (active=high).
+   ---------------------------------------------------------------- */
+static void
+update_area_active(area **aptr, BytePtr value)
+{
+  area *a = *aptr;
+
+  for (; a; a = a->older) {
+    if ((a->low <= value) && (a->high >= value))
+      break;
+  }
+  if (a == NULL) {
+    Bug(NULL, "Can't find active area");
+    return;
+  }
+  a->active = value;
+  *aptr = a;
+
+  for (a = a->younger; a; a = a->younger) {
+    a->active = a->high;
+  }
+}
+
+
+/* ----------------------------------------------------------------
+   pc_luser_xp: "PC-loser fixup."  If the thread was interrupted
+   in the middle of a non-atomic instruction sequence (write
+   barrier, allocation, or swap-LR), finish or restart the
+   sequence so that the GC sees consistent state.
+
+   alloc_disp:
+     NULL  → we're normalizing another thread for GC.
+     non-NULL → we're normalizing the current thread for an
+                interrupt; *alloc_disp receives the displacement
+                so the interrupt handler can restart later.
+   ---------------------------------------------------------------- */
+void
+pc_luser_xp(ExceptionInformation *xp, TCR *tcr, signed_natural *alloc_disp)
+{
+  pc program_counter = xpPC(xp);
+  LispObj cur_allocptr = xpGPR(xp, allocptr);
+  int allocptr_tag = fulltag_of(cur_allocptr);
+
+  /* ---- Section 1: Write-barrier completion ---- */
+  if ((program_counter < &egc_write_barrier_end) &&
+      (program_counter >= &egc_write_barrier_start)) {
+    LispObj *ea = 0, val = 0, root = 0;
+    bitvector refbits = (bitvector)(lisp_global(REFBITS));
+    Boolean need_check_memo = true, need_memoize_root = false;
+
+    if (program_counter >= &egc_set_hash_key_conditional) {
+      /*
+       * set_hash_key_conditional: LDXR/STXR on a hash-table slot.
+       * If we haven't reached the success point, the CAS either hasn't
+       * been attempted yet or will be retried (exclusive monitor cleared
+       * by the signal).  Just return.
+       */
+      if (program_counter < &egc_set_hash_key_conditional_success) {
+        return;
+      }
+      /* CAS succeeded.  imm2 holds the ea (= arg_x + unboxed offset)
+         from the CAS setup.  arg_x = root (preserved through the
+         set_hash_key_conditional memoization code). */
+      root = xpGPR(xp, arg_x);
+      ea = (LispObj *)xpGPR(xp, imm2);
+      val = xpGPR(xp, arg_z);
+      xpGPR(xp, arg_z) = t_value;
+      need_memoize_root = true;
+    } else if (program_counter >= &egc_store_node_conditional) {
+      if ((program_counter < &egc_store_node_conditional_test) ||
+          ((program_counter == &egc_store_node_conditional_test) &&
+           (xpGPR(xp, imm0) != 0))) {
+        /* CAS not yet attempted or STXR failed → just return. */
+        return;
+      }
+      /* imm2 holds ea (= arg_x + unboxed byte-offset) from the CAS
+         setup at the top of the loop. */
+      ea = (LispObj *)xpGPR(xp, imm2);
+      val = xpGPR(xp, arg_z);
+      xpGPR(xp, arg_z) = t_value;
+    } else if (program_counter >= &egc_set_hash_key) {
+      if (program_counter < &egc_set_hash_key_did_store) {
+        return;
+      }
+      root = xpGPR(xp, arg_x);
+      val = xpGPR(xp, arg_z);
+      ea = (LispObj *)(root + xpGPR(xp, arg_y) + misc_data_offset);
+      need_memoize_root = true;
+    } else if (program_counter >= &egc_gvset) {
+      if (program_counter < &egc_gvset_did_store) {
+        return;
+      }
+      ea = (LispObj *)(xpGPR(xp, arg_x) + xpGPR(xp, arg_y) + misc_data_offset);
+      val = xpGPR(xp, arg_z);
+    } else if (program_counter >= &egc_rplacd) {
+      if (program_counter < &egc_rplacd_did_store) {
+        return;
+      }
+      ea = (LispObj *)untag(xpGPR(xp, arg_y));
+      val = xpGPR(xp, arg_z);
+    } else {
+      /* egc_rplaca */
+      if (program_counter < &egc_rplaca_did_store) {
+        return;
+      }
+      ea = ((LispObj *)untag(xpGPR(xp, arg_y))) + 1;
+      val = xpGPR(xp, arg_z);
+    }
+
+    if (need_check_memo) {
+      natural bitnumber = area_dnode(ea, lisp_global(REF_BASE));
+      if ((bitnumber < lisp_global(OLDSPACE_DNODE_COUNT)) &&
+          ((LispObj)ea < val)) {
+        atomic_set_bit(refbits, bitnumber);
+        atomic_set_bit(global_refidx, bitnumber >> 8);
+        if (need_memoize_root) {
+          bitnumber = area_dnode(root, lisp_global(REF_BASE));
+          atomic_set_bit(refbits, bitnumber);
+          atomic_set_bit(global_refidx, bitnumber >> 8);
+        }
+      }
+    }
+    /* All write-barrier subprims return via RET, so set PC = LR. */
+    xpPC(xp) = xpLR(xp);
+    return;
+  }
+
+  /* ---- Section 2: Allocation fixup ---- */
+  if (allocptr_tag != tag_positive_fixnum) {
+    alloc_instruction_id state = classify_alloc_instruction(xp);
+
+    if (state == ID_unrecognized_alloc_instruction) {
+      Bug(xp, "Unrecognized allocation state in thread " LISP, (LispObj)tcr);
+      return;
+    }
+
+    if (state == ID_finish_allocation) {
+      /* Past the alloc trap — finish filling in the object. */
+      if (allocptr_tag == fulltag_cons) {
+        finish_allocating_cons(xp);
+      } else if (is_uvector_fulltag(allocptr_tag)) {
+        finish_allocating_uvector(xp);
+      } else {
+        Bug(xp, "What's being allocated here?");
+      }
+    } else {
+      /* At or before the alloc trap — back up to the SUB so
+         the allocation sequence restarts from scratch. */
+      restart_allocation(xp);
+    }
+    xpGPR(xp, allocptr) = VOID_ALLOCPTR;
+    xpGPR(xp, allocbase) = VOID_ALLOCPTR;
+    return;
+  }
+
+  /* ---- Section 3: swap_lr_lisp_frame fixup ---- */
+  {
+    lisp_frame *swap_frame = NULL;
+    pc base = &swap_lr_lisp_frame_temp0;
+
+    if ((program_counter > base) &&
+        (program_counter < &swap_lr_lisp_frame_temp0_end)) {
+      swap_frame = (lisp_frame *)xpGPR(xp, temp0);
+    } else {
+      base = &swap_lr_lisp_frame_arg_z;
+      if ((program_counter > base) &&
+          (program_counter < &swap_lr_lisp_frame_arg_z_end)) {
+        swap_frame = (lisp_frame *)xpGPR(xp, arg_z);
+      }
+    }
+    if (swap_frame) {
+      /* Complete the 3-instruction swap: ldr imm0,[frame,#savelr];
+         str lr,[frame,#savelr]; mov lr,imm0.
+         If we're past the first instruction, the LDR has loaded
+         the old savelr into imm0.  If we're past the second, the
+         STR has saved our LR. */
+      if (program_counter >= base + 2) {
+        /* STR already done; just finish: mov lr, imm0 */
+      } else if (program_counter == base + 1) {
+        /* LDR done, STR not yet done: do the store. */
+        swap_frame->savelr = xpGPR(xp, Rlr);
+      }
+      xpGPR(xp, Rlr) = xpGPR(xp, imm0);
+      xpPC(xp) = &swap_lr_lisp_frame_temp0_end;
+      if (base == &swap_lr_lisp_frame_arg_z)
+        xpPC(xp) = &swap_lr_lisp_frame_arg_z_end;
+      return;
+    }
+  }
+}
+
+
+/* ----------------------------------------------------------------
+   normalize_tcr: normalize a TCR's stack area pointers and
+   allocation state so the GC can safely walk the stacks.
+   ---------------------------------------------------------------- */
+void
+normalize_tcr(ExceptionInformation *xp, TCR *tcr, Boolean is_other_tcr)
+{
+  void *cur_allocptr = NULL;
+  LispObj freeptr = 0;
+
+  if (xp) {
+    if (is_other_tcr) {
+      pc_luser_xp(xp, tcr, NULL);
+      freeptr = xpGPR(xp, allocptr);
+      if (fulltag_of(freeptr) == 0) {
+        cur_allocptr = (void *)ptr_from_lispobj(freeptr);
+      }
+    }
+    /* SP is not a GPR on AArch64; use xpSP(). */
+    update_area_active((area **)&tcr->cs_area, (BytePtr)xpSP(xp));
+    update_area_active((area **)&tcr->vs_area,
+                       (BytePtr)ptr_from_lispobj(xpGPR(xp, vsp)));
+    /* ARM64 has no tsp register; use saved TCR field. */
+    update_area_active((area **)&tcr->ts_area, (BytePtr)tcr->save_tsp);
+  } else {
+    /* In ff-call.  Get area active pointers from saved TCR fields. */
+    cur_allocptr = (void *)(tcr->save_allocptr);
+    update_area_active((area **)&tcr->vs_area, (BytePtr)tcr->save_vsp);
+    update_area_active((area **)&tcr->ts_area, (BytePtr)tcr->save_tsp);
+  }
+
+  tcr->save_allocptr = tcr->save_allocbase = (void *)VOID_ALLOCPTR;
+  if (cur_allocptr) {
+    update_bytes_allocated(tcr, cur_allocptr);
+    if (freeptr) {
+      xpGPR(xp, allocptr) = VOID_ALLOCPTR;
+      xpGPR(xp, allocbase) = VOID_ALLOCPTR;
+    }
+  }
+}
+
+
+/* ----------------------------------------------------------------
+   gc_like_from_xp: suspend all other threads, normalize their
+   TCRs, invoke the GC-like function, and resume.
+   ---------------------------------------------------------------- */
+signed_natural
+gc_like_from_xp(ExceptionInformation *xp,
+                signed_natural (*fun)(TCR *, signed_natural),
+                signed_natural param)
+{
+  TCR *tcr = get_tcr(true), *other_tcr;
+  int result;
+  signed_natural inhibit;
+
+  suspend_other_threads(true);
+  inhibit = (signed_natural)(lisp_global(GC_INHIBIT_COUNT));
+  if (inhibit != 0) {
+    if (inhibit > 0) {
+      lisp_global(GC_INHIBIT_COUNT) = (LispObj)(-inhibit);
+    }
+    resume_other_threads(true);
+    gc_deferred++;
+    return 0;
+  }
+  gc_deferred = 0;
+
+  gc_tcr = tcr;
+
+  xpGPR(xp, allocptr) = VOID_ALLOCPTR;
+  xpGPR(xp, allocbase) = VOID_ALLOCPTR;
+
+  normalize_tcr(xp, tcr, false);
+
+  for (other_tcr = tcr->next; other_tcr != tcr;
+       other_tcr = other_tcr->next) {
+    if (other_tcr->pending_exception_context) {
+      other_tcr->gc_context = other_tcr->pending_exception_context;
+    } else if (other_tcr->valence == TCR_STATE_LISP) {
+      other_tcr->gc_context = other_tcr->suspend_context;
+    } else {
+      other_tcr->gc_context = NULL;
+    }
+    normalize_tcr(other_tcr->gc_context, other_tcr, true);
+  }
+
+  result = fun(tcr, param);
+
+  other_tcr = tcr;
+  do {
+    other_tcr->gc_context = NULL;
+    other_tcr = other_tcr->next;
+  } while (other_tcr != tcr);
+
+  gc_tcr = NULL;
+
+  resume_other_threads(true);
+
+  return result;
+}
+
+
+/* ----------------------------------------------------------------
+   GC entry-point wrappers.
+   ---------------------------------------------------------------- */
+
+signed_natural
+gc_from_tcr(TCR *tcr, signed_natural param)
+{
+  area *a;
+  BytePtr oldfree, newfree;
+  BytePtr oldend, newend;
+
+  a = active_dynamic_area;
+  oldend = a->high;
+  oldfree = a->active;
+  gc(tcr, param);
+  newfree = a->active;
+  newend = a->high;
+  return ((oldfree - newfree) + (newend - oldend));
+}
+
+signed_natural
+gc_from_xp(ExceptionInformation *xp, signed_natural param)
+{
+  signed_natural status = gc_like_from_xp(xp, gc_from_tcr, param);
+
+  freeGCptrs();
+  return status;
+}
+
+signed_natural
+purify_from_xp(ExceptionInformation *xp, signed_natural param)
+{
+  return gc_like_from_xp(xp, purify, param);
+}
+
+signed_natural
+impurify_from_xp(ExceptionInformation *xp, signed_natural param)
+{
+  return gc_like_from_xp(xp, impurify, param);
+}
+
+
+/* ================================================================
+   Chunk 6: Exception lock helpers, signal handlers, installation,
+   and exception_init.
+   ================================================================ */
+
+/* ----------------------------------------------------------------
+   Exception lock protocol.
+   These are per-arch because ALLOW_EXCEPTIONS uses the ucontext
+   signal mask, which varies by platform.
+   ---------------------------------------------------------------- */
+
+int
+prepare_to_wait_for_exception_lock(TCR *tcr, ExceptionInformation *context)
+{
+  int old_valence = tcr->valence;
+
+  tcr->pending_exception_context = context;
+  tcr->valence = TCR_STATE_EXCEPTION_WAIT;
+
+  ALLOW_EXCEPTIONS(context);
+  return old_valence;
+}
+
+void
+wait_for_exception_lock_in_handler(TCR *tcr,
+                                   ExceptionInformation *context,
+                                   xframe_list *xf)
+{
+  LOCK(lisp_global(EXCEPTION_LOCK), tcr);
+  xf->curr = context;
+  xf->prev = tcr->xframe;
+  tcr->xframe = xf;
+  tcr->pending_exception_context = NULL;
+  tcr->valence = TCR_STATE_FOREIGN;
+}
+
+void
+unlock_exception_lock_in_handler(TCR *tcr)
+{
+  tcr->pending_exception_context = tcr->xframe->curr;
+  tcr->xframe = tcr->xframe->prev;
+  tcr->valence = TCR_STATE_EXCEPTION_RETURN;
+  UNLOCK(lisp_global(EXCEPTION_LOCK), tcr);
+}
+
+
+/* ----------------------------------------------------------------
+   raise_pending_interrupt: if the interrupt level allows it,
+   send ourselves SIGNAL_FOR_PROCESS_INTERRUPT so the thread
+   re-enters the handler promptly.
+   ---------------------------------------------------------------- */
+void
+raise_pending_interrupt(TCR *tcr)
+{
+  if (TCR_INTERRUPT_LEVEL(tcr) > 0) {
+    pthread_kill((pthread_t)ptr_from_lispobj(tcr->osid),
+                 SIGNAL_FOR_PROCESS_INTERRUPT);
+  }
+}
+
+
+/* ----------------------------------------------------------------
+   exit_signal_handler: restore TCR state after exception handling.
+   Unmask all signals so the thread can receive them again, then
+   restore the old valence and last_lisp_frame.
+   ---------------------------------------------------------------- */
+void
+exit_signal_handler(TCR *tcr, int old_valence, natural old_last_lisp_frame)
+{
+  sigset_t mask;
+
+  sigfillset(&mask);
+  pthread_sigmask(SIG_SETMASK, &mask, NULL);
+  tcr->valence = old_valence;
+  tcr->pending_exception_context = NULL;
+  tcr->last_lisp_frame = old_last_lisp_frame;
+}
+
+
+/* ----------------------------------------------------------------
+   signal_handler: the main signal handler for SIGILL, SIGSEGV,
+   SIGBUS.  Acquires the exception lock, calls handle_exception,
+   and cleans up.
+   ---------------------------------------------------------------- */
+void
+signal_handler(int signum, siginfo_t *info, ExceptionInformation *context)
+{
+  xframe_list xframe_link;
+  TCR *tcr = (TCR *)get_interrupt_tcr(false);
+  natural old_last_lisp_frame = tcr->last_lisp_frame;
+  int old_valence;
+
+  /* On ARM64, SP is not a GPR.  Save it via xpSP(). */
+  tcr->last_lisp_frame = xpSP(context);
+  old_valence = prepare_to_wait_for_exception_lock(tcr, context);
+
+  if (tcr->flags & (1 << TCR_FLAG_BIT_PENDING_SUSPEND)) {
+    CLR_TCR_FLAG(tcr, TCR_FLAG_BIT_PENDING_SUSPEND);
+    pthread_kill(pthread_self(), thread_suspend_signal);
+  }
+
+  wait_for_exception_lock_in_handler(tcr, context, &xframe_link);
+
+  if (!handle_exception(signum, context, tcr, info, old_valence)) {
+    char msg[512];
+
+    snprintf(msg, sizeof(msg),
+             "Unhandled exception %d at 0x%lx, context->regs at #x%lx",
+             signum, (natural)xpPC(context),
+             (natural)xpGPRvector(context));
+    if (lisp_Debugger(context, info, signum,
+                      (old_valence != TCR_STATE_LISP), msg)) {
+      SET_TCR_FLAG(tcr, TCR_FLAG_BIT_PROPAGATE_EXCEPTION);
+    }
+  }
+
+  unlock_exception_lock_in_handler(tcr);
+  exit_signal_handler(tcr, old_valence, old_last_lisp_frame);
+  raise_pending_interrupt(tcr);
+}
+
+
+/* ----------------------------------------------------------------
+   interrupt_handler: handles SIGNAL_FOR_PROCESS_INTERRUPT.
+   If the thread can take an interrupt right now, grab the
+   exception lock and call handle_exception.  Otherwise, pend it.
+   ---------------------------------------------------------------- */
+void
+interrupt_handler(int signum, siginfo_t *info, ExceptionInformation *context)
+{
+  TCR *tcr = get_interrupt_tcr(false);
+
+  if (tcr) {
+    if (TCR_INTERRUPT_LEVEL(tcr) < 0) {
+      tcr->interrupt_pending = 1 << fixnumshift;
+    } else {
+      LispObj cmain = nrs_CMAIN.vcell;
+
+      if ((fulltag_of(cmain) == fulltag_misc) &&
+          (header_subtag(header_of(cmain)) == subtag_macptr)) {
+        /*
+         * This thread can allegedly take an interrupt now.
+         * If we're in foreign code or unwinding, defer it.
+         */
+        if ((tcr->valence != TCR_STATE_LISP) ||
+            (tcr->unwinding != 0)) {
+          tcr->interrupt_pending = 1 << fixnumshift;
+        } else {
+          xframe_list xframe_link;
+          int old_valence;
+          natural old_last_lisp_frame = tcr->last_lisp_frame;
+
+          tcr->last_lisp_frame = xpSP(context);
+          pc_luser_xp(context, tcr, NULL);
+          old_valence = prepare_to_wait_for_exception_lock(tcr, context);
+          wait_for_exception_lock_in_handler(tcr, context, &xframe_link);
+          handle_exception(signum, context, tcr, info, old_valence);
+          unlock_exception_lock_in_handler(tcr);
+          exit_signal_handler(tcr, old_valence, old_last_lisp_frame);
+        }
+      }
+    }
+  }
+#ifdef DARWIN
+  DarwinSigReturn(context);
+#endif
+}
+
+
+/* ----------------------------------------------------------------
+   Alternate-signal-stack support (Linux only).
+   On Darwin, USE_SIGALTSTACK is not defined; signals are delivered
+   on the thread's main stack (and Mach exceptions may be used).
+   ---------------------------------------------------------------- */
+
+#ifdef USE_SIGALTSTACK
+
+extern void
+call_handler_on_main_stack(int, siginfo_t *, ExceptionInformation *,
+                           void *, void *);
+
+void
+invoke_handler_on_main_stack(int signo, siginfo_t *info,
+                             ExceptionInformation *xp,
+                             void *return_address, void *handler)
+{
+  ExceptionInformation *xp_copy;
+  siginfo_t *info_copy;
+  BytePtr target_sp;
+
+  /* Allocate copies of xp and info on the thread's main (C) stack,
+     below the current SP saved in xp.  The altstack handler received
+     the signal, so xpSP(xp) still points to the main stack. */
+  target_sp = (BytePtr)xpSP(xp);
+
+  target_sp -= sizeof(ucontext_t);
+  target_sp = (BytePtr)((natural)target_sp & ~15);  /* 16-byte align */
+  xp_copy = (ExceptionInformation *)target_sp;
+  memmove(target_sp, xp, sizeof(*xp));
+  xp_copy->uc_stack.ss_sp = 0;
+  xp_copy->uc_stack.ss_size = 0;
+  xp_copy->uc_stack.ss_flags = 0;
+  xp_copy->uc_link = NULL;
+
+  target_sp -= sizeof(siginfo_t);
+  target_sp = (BytePtr)((natural)target_sp & ~15);
+  info_copy = (siginfo_t *)target_sp;
+  memmove(target_sp, info, sizeof(*info));
+
+  /* call_handler_on_main_stack(signo, info, xp, new_sp, handler):
+     sets SP = new_sp, then branches to handler with x0-x2 intact. */
+  call_handler_on_main_stack(signo, info_copy, xp_copy,
+                             target_sp, handler);
+}
+
+
+void
+altstack_signal_handler(int signo, siginfo_t *info, ExceptionInformation *xp)
+{
+  TCR *tcr = get_tcr(true);
+
+  if (signo == SIGBUS) {
+    BytePtr addr = (BytePtr)xpFaultAddress(xp);
+    area *a = tcr->cs_area;
+
+    if (((BytePtr)truncate_to_power_of_2(addr, log2_page_size))
+        == a->softlimit) {
+      if (mmap(a->softlimit, page_size,
+               PROT_READ | PROT_WRITE | PROT_EXEC,
+               MAP_PRIVATE | MAP_ANON | MAP_FIXED,
+               -1, 0) == a->softlimit) {
+        return;
+      }
+    }
+  } else if (signo == SIGSEGV) {
+    BytePtr addr = (BytePtr)xpFaultAddress(xp);
+    area *a = tcr->cs_area;
+
+    if ((addr >= a->low) && (addr < a->softlimit)) {
+      if (addr < a->hardlimit) {
+        Bug(xp, "hard stack overflow");
+      } else {
+        UnProtectMemory(a->hardlimit, a->softlimit - a->hardlimit);
+      }
+    }
+  }
+
+  invoke_handler_on_main_stack(signo, info, xp,
+                               __builtin_return_address(0),
+                               signal_handler);
+}
+
+
+void
+altstack_interrupt_handler(int signum, siginfo_t *info,
+                           ExceptionInformation *context)
+{
+  invoke_handler_on_main_stack(signum, info, context,
+                               __builtin_return_address(0),
+                               interrupt_handler);
+}
+
+#endif /* USE_SIGALTSTACK */
+
+
+/* ----------------------------------------------------------------
+   install_signal_handler: register a signal handler via sigaction.
+   Flags control SA_RESTART, SA_ONSTACK, and reservation.
+   ---------------------------------------------------------------- */
+void
+install_signal_handler(int signo, void *handler, unsigned flags)
+{
+  struct sigaction sa;
+  int err;
+
+  sa.sa_sigaction = (void *)handler;
+  sigfillset(&sa.sa_mask);
+  sa.sa_flags = SA_SIGINFO;
+
+#ifdef USE_SIGALTSTACK
+  if (flags & ON_ALTSTACK)
+    sa.sa_flags |= SA_ONSTACK;
+#endif
+  if (flags & RESTART_SYSCALLS)
+    sa.sa_flags |= SA_RESTART;
+  if (flags & RESERVE_FOR_LISP) {
+    extern sigset_t user_signals_reserved;
+    sigaddset(&user_signals_reserved, signo);
+  }
+
+  err = sigaction(signo, &sa, NULL);
+  if (err) {
+    perror("sigaction");
+    exit(1);
+  }
+}
+
+
+/* ----------------------------------------------------------------
+   install_pmcl_exception_handlers: install all CCL signal handlers.
+
+   ARM64 uses HLT for UUOs, which is undefined at EL0 on Linux,
+   generating SIGILL.  No condition-code wrapper is needed (unlike
+   ARM32) because AArch64 instructions are unconditional.
+   ---------------------------------------------------------------- */
+void
+install_pmcl_exception_handlers()
+{
+  install_signal_handler(SIGILL, (void *)signal_handler,
+                         RESERVE_FOR_LISP);
+  install_signal_handler(SIGSEGV, (void *)ALTSTACK(signal_handler),
+                         RESERVE_FOR_LISP | ON_ALTSTACK);
+  install_signal_handler(SIGBUS, (void *)ALTSTACK(signal_handler),
+                         RESERVE_FOR_LISP | ON_ALTSTACK);
+  install_signal_handler(SIGNAL_FOR_PROCESS_INTERRUPT,
+                         (void *)interrupt_handler,
+                         RESERVE_FOR_LISP);
+  signal(SIGPIPE, SIG_IGN);
+}
+
+
+/* ----------------------------------------------------------------
+   setup_sigaltstack: allocate and install an alternate signal stack
+   for this thread (Linux only).
+   ---------------------------------------------------------------- */
+#ifdef USE_SIGALTSTACK
+void
+setup_sigaltstack(area *a)
+{
+  stack_t stack;
+
+  stack.ss_size = SIGSTKSZ * 8;
+  stack.ss_flags = 0;
+  stack.ss_sp = mmap(NULL, stack.ss_size,
+                     PROT_READ | PROT_WRITE,
+                     MAP_ANON | MAP_PRIVATE, -1, 0);
+  if (sigaltstack(&stack, NULL) != 0) {
+    perror("sigaltstack");
+    exit(-1);
+  }
+}
+#endif
+
+
+/* ----------------------------------------------------------------
+   thread_kill_handler: handle SIG_KILL_THREAD by marking the
+   TCR's stack areas as empty and calling pthread_exit.
+   ---------------------------------------------------------------- */
+void
+thread_kill_handler(int signum, siginfo_t *info, ExceptionInformation *xp)
+{
+  TCR *tcr = get_tcr(false);
+  area *a;
+  sigset_t mask;
+
+  sigemptyset(&mask);
+
+  if (tcr) {
+    tcr->valence = TCR_STATE_FOREIGN;
+    a = tcr->vs_area;
+    if (a) {
+      a->active = a->high;
+    }
+    a = tcr->cs_area;
+    if (a) {
+      a->active = a->high;
+    }
+  }
+
+  pthread_sigmask(SIG_SETMASK, &mask, NULL);
+  pthread_exit(NULL);
+}
+
+#ifdef USE_SIGALTSTACK
+void
+altstack_thread_kill_handler(int signo, siginfo_t *info,
+                             ExceptionInformation *xp)
+{
+  invoke_handler_on_main_stack(signo, info, xp,
+                               __builtin_return_address(0),
+                               thread_kill_handler);
+}
+#endif
+
+
+/* ----------------------------------------------------------------
+   thread_signal_setup: install per-thread signal handlers for
+   suspend/resume and thread kill.
+   ---------------------------------------------------------------- */
+void
+thread_signal_setup()
+{
+  thread_suspend_signal = SIG_SUSPEND_THREAD;
+  thread_kill_signal = SIG_KILL_THREAD;
+
+  install_signal_handler(thread_suspend_signal,
+                         (void *)suspend_resume_handler,
+                         RESERVE_FOR_LISP | RESTART_SYSCALLS);
+  install_signal_handler(thread_kill_signal,
+                         (void *)thread_kill_handler,
+                         RESERVE_FOR_LISP);
+}
+
+
+/* ----------------------------------------------------------------
+   unprotect_all_areas: walk the protected-area list and remove
+   all memory protections.  Used before GC.
+   ---------------------------------------------------------------- */
+void
+unprotect_all_areas()
+{
+  protected_area_ptr p;
+
+  for (p = AllProtectedAreas, AllProtectedAreas = NULL; p; p = p->next) {
+    unprotect_area(p);
+  }
+}
+
+
+/* ----------------------------------------------------------------
+   exception_init: top-level initialization of exception handling.
+   ---------------------------------------------------------------- */
+void
+exception_init()
+{
+  install_pmcl_exception_handlers();
+}

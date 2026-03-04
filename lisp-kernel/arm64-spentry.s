@@ -1006,6 +1006,8 @@ C(egc_set_hash_key_conditional):
         __(stxr gpr32(imm0),arg_z,[imm2])
         __(cmp imm0,#0)
         __(bne 0b)
+        .globl C(egc_set_hash_key_conditional_success)
+C(egc_set_hash_key_conditional_success):
         __(cmp arg_z,arg_x)
         __(blo 4f)
         __(ref_global(temp0,ref_base))
