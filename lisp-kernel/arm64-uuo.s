@@ -87,3 +87,8 @@ define(`uuo_pseudo_sigreturn',`
         __(hlt #(hlt_code_nullary|(6<<3)))
         ')
 
+/* Kernel service request: service code in imm0, target in arg_z */
+define(`uuo_kernel_service',`
+        __(hlt #(hlt_code_nullary|(7<<3)))
+        ')
+

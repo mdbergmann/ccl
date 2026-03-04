@@ -42,17 +42,27 @@ typedef u_int32_t opcode, *pc;
 /* Allocation trap: hlt_code_nullary with info=0. */
 #define IS_ALLOC_TRAP(i) (IS_HLT(i) && HLT_IMM16(i) == hlt_code_nullary)
 
-/* GC trap: hlt_code_nullary with info=1. */
-#define IS_GC_TRAP(i)    (IS_HLT(i) && HLT_IMM16(i) == (hlt_code_nullary | (1 << 3)))
+/* GC trap: hlt_code_nullary with info=2 (matches arm64-uuo.s). */
+#define IS_GC_TRAP(i)    (IS_HLT(i) && HLT_IMM16(i) == (hlt_code_nullary | (2 << 3)))
 
-/* Debug trap: hlt_code_nullary with info=2. */
-#define IS_DEBUG_TRAP(i) (IS_HLT(i) && HLT_IMM16(i) == (hlt_code_nullary | (2 << 3)))
+/* Debug trap: hlt_code_nullary with info=3. */
+#define IS_DEBUG_TRAP(i) (IS_HLT(i) && HLT_IMM16(i) == (hlt_code_nullary | (3 << 3)))
 
-/* Deferred interrupt: hlt_code_nullary with info=3. */
-#define IS_DEFERRED_INTERRUPT(i) (IS_HLT(i) && HLT_IMM16(i) == (hlt_code_nullary | (3 << 3)))
+/* Deferred interrupt: hlt_code_nullary with info=4. */
+#define IS_DEFERRED_INTERRUPT(i) (IS_HLT(i) && HLT_IMM16(i) == (hlt_code_nullary | (4 << 3)))
 
-/* Deferred suspend: hlt_code_nullary with info=4. */
-#define IS_DEFERRED_SUSPEND(i)   (IS_HLT(i) && HLT_IMM16(i) == (hlt_code_nullary | (4 << 3)))
+/* Deferred suspend: hlt_code_nullary with info=5. */
+#define IS_DEFERRED_SUSPEND(i)   (IS_HLT(i) && HLT_IMM16(i) == (hlt_code_nullary | (5 << 3)))
+
+/* Pseudo-sigreturn (Mach exception return): hlt_code_nullary with info=6. */
+#define IS_PSEUDO_SIGRETURN(i)   (IS_HLT(i) && HLT_IMM16(i) == (hlt_code_nullary | (6 << 3)))
+
+/* Kernel service request: hlt_code_nullary with info=7.
+   Service code in imm0, argument in arg_z. */
+#define IS_KERNEL_SERVICE(i)     (IS_HLT(i) && HLT_IMM16(i) == (hlt_code_nullary | (7 << 3)))
+
+/* Extract nullary info (13-bit sub-code, bits 15:3 of imm16). */
+#define HLT_NULLARY_INFO(i) ((HLT_IMM16(i) >> 3) & 0x1FFF)
 
 /* ================================================================
    Allocation sequence detection.
@@ -100,6 +110,61 @@ typedef enum {
   ID_set_header_instruction,
   ID_finish_allocation
 } alloc_instruction_id;
+
+/* ================================================================
+   Post-allocation instruction detection.
+
+   After the alloc trap succeeds, the allocation sequence completes
+   with stores, tagging, and clearing the allocptr low bits:
+
+   Cons:
+     stur cdr_reg, [allocptr, #cons.cdr]      ; cons.cdr = -node_size
+     str  car_reg, [allocptr, #cons.car]       ; cons.car = 0
+     orr  result, allocptr, tag_reg, lsl #56   ; tag result
+     bic  allocptr, allocptr, #dnode_mask      ; clear low bits (AND #~0xF)
+
+   Uvector:
+     stur header_reg, [allocptr, #misc_header_offset]  ; = -node_size
+     orr  result, allocptr, tag_reg, lsl #56
+     bic  allocptr, allocptr, #dnode_mask
+   ================================================================ */
+
+/* B.HI (branch if higher, unsigned) — branch around alloc trap.
+   B.cond encoding: 0x54000000 | (imm19 << 5) | cond; HI = 8 */
+#define IS_BRANCH_AROUND_ALLOC_TRAP(i) \
+  (((i) & 0xFF00001F) == 0x54000008)
+
+/* STUR Xt, [Xn, #simm9] with Xn=allocptr — stores with negative offsets.
+   Encoding: 0xF8000000 | (simm9 << 12) | (Rn << 5) | Rt
+   Mask checks: size=11, V=0, opc=00, type=00, Rn=allocptr */
+#define IS_STUR_TO_ALLOCPTR(i) \
+  (((i) & 0xFFE00C00) == 0xF8000000 && \
+   (((i) >> 5) & 0x1F) == allocptr)
+
+/* STR Xt, [Xn, #pimm] with Xn=allocptr — stores with unsigned offsets.
+   Encoding: 0xF9000000 | (imm12 << 10) | (Rn << 5) | Rt */
+#define IS_STR_UOFF_TO_ALLOCPTR(i) \
+  (((i) & 0xFFC003E0) == (0xF9000000 | (allocptr << 5)))
+
+/* ORR Rd, allocptr, Rm, LSL #56 — tag the result register.
+   ORR shifted register 64-bit: 0xAA000000 | (shift<<22) | (Rm<<16) |
+   (imm6<<10) | (Rn<<5) | Rd.  shift=LSL(00), imm6=56, Rn=allocptr. */
+#define IS_SET_ALLOCPTR_RESULT(i) \
+  (((i) & 0xFFE0FC20) == (0xAA000000 | (56 << 10) | (allocptr << 5)))
+
+/* AND Xd, Xn, #~dnode_mask with Xd=Xn=allocptr — clear allocptr tag.
+   This is the assembled form of "bic allocptr, allocptr, #dnode_mask".
+   AND immediate 64-bit: top bits = 0x92.
+   We check Rd=Rn=allocptr for any logical immediate encoding. */
+#define IS_CLR_ALLOCPTR_TAG(i) \
+  (((i) & 0xFF8003FF) == (0x92000000 | (allocptr << 5) | allocptr))
+
+/* Extract fields from post-alloc instructions */
+#define STUR_OFFSET(i)  ((int)(((int)((i) >> 12) << 23) >> 23))
+#define STR_UOFF(i)     ((((i) >> 10) & 0xFFF) << 3)
+#define STR_RT(i)       ((i) & 0x1F)
+#define ORR_RD(i)       ((i) & 0x1F)
+#define ORR_RM(i)       (((i) >> 16) & 0x1F)
 
 /* ================================================================
    Function declarations.

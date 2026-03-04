@@ -776,10 +776,12 @@ _spentry(bind_self_boundp_check)
 /* We can unconditionally set the suspended thread's PC to its LR. */
 
         .globl C(egc_write_barrier_start)
+        .globl C(egc_rplaca_did_store)
 _spentry(rplaca)
-C(egc_write_barrier_start):     
+C(egc_write_barrier_start):
         __(cmp arg_z,arg_y)
         __(_rplaca(arg_y,arg_z))
+C(egc_rplaca_did_store):
         __(blo 9f)
         __(ref_global(temp0,ref_base))
         __(sub imm0,arg_y,temp0)
@@ -805,10 +807,12 @@ C(egc_write_barrier_start):
 
 
         .globl C(egc_rplacd)
+        .globl C(egc_rplacd_did_store)
 _spentry(rplacd)
 C(egc_rplacd):
         __(cmp arg_z,arg_y)
         __(_rplacd(arg_y,arg_z))
+C(egc_rplacd_did_store):
         __(blo 9f)
         __(ref_global(temp0,ref_base))
         __(sub imm0,arg_y,temp0)
@@ -836,11 +840,13 @@ C(egc_rplacd):
 /* Storing into a gvector can be handled the same way as storing into a CONS. */
 
 	.globl C(egc_gvset)
+        .globl C(egc_gvset_did_store)
 _spentry(gvset)
 C(egc_gvset):
         __(cmp arg_z,arg_x)
 	__(add imm0,arg_y,#misc_data_offset)
 	__(str arg_z,[arg_x,imm0])
+C(egc_gvset_did_store):
         __(b.lo 9f)               
         __(add imm0,imm0,arg_x)
         __(ref_global(temp0,ref_base))
@@ -870,12 +876,14 @@ C(egc_gvset):
 /* the store, record the address of the hash-table vector in the refmap,  */
 /* as well. */
         
-        .globl C(egc_set_hash_key)        
+        .globl C(egc_set_hash_key)
+        .globl C(egc_set_hash_key_did_store)
 _spentry(set_hash_key)
 C(egc_set_hash_key):
         __(cmp arg_z,arg_x)
 	__(add imm0,arg_y,#misc_data_offset)
 	__(str arg_z,[arg_x,imm0])
+C(egc_set_hash_key_did_store):
         __(blo 9f)
         __(add imm0,imm0,arg_x)
         __(ref_global(temp0,ref_base))
