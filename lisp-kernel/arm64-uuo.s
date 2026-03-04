@@ -92,3 +92,9 @@ define(`uuo_kernel_service',`
         __(hlt #(hlt_code_nullary|(7<<3)))
         ')
 
+/* Array axis bounds error: $1=index reg, $2=limit reg, $3=axis (immediate).
+   Encoded as binary UUO with axis in the extra bits. */
+define(`uuo_error_array_axis_bounds',`
+        __(hlt #(hlt_code_binary|(gprval($1)<<3)|(gprval($2)<<8)|($3<<13)))
+        ')
+

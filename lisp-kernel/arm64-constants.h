@@ -499,6 +499,7 @@ typedef struct tcr {
   LispObj *tlb_pointer;                 /* 0x130 */
   natural shutdown_count;               /* 0x138 */
   void *safe_ref_address;               /* 0x140 */
+  LispObj last_lisp_frame;              /* 0x148 when in foreign code */
 } TCR;
 
 /* ================================================================

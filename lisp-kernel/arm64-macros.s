@@ -92,6 +92,14 @@ define(`trap_unless_typecode_equal',`
 macro_label(ok):
         ')
 
+/* Compare $1 to a marker value (like unbound_marker) by comparing
+   the tag byte.  $2 = temp, $3 = tag_xxx constant.
+   This works because marker tags are unique leaf-node tags. */
+define(`cmp_tag_to_marker',`
+        __(lsr $2,$1,#tag_shift)
+        __(cmp $2,#$3)
+        ')
+
 /* Set $1 to $2, with bit 55 sign-sextended into bits 56-63.  If
    $2 is a fixnum, $1 and $2 will be =. */        
 define(`sign_extend_value',`
@@ -235,7 +243,7 @@ define(`vector_length',`
 
 	
 define(`ref_global',`
-        __(mov $1,#lisp_globals.$2)
+	__(mov $1,#lisp_globals.$2)
 	__(ldr $1,[rnil,$1])
 ')
 
@@ -249,7 +257,7 @@ define(`ref_nrs_function',`
 ')
         
 define(`ref_nrs_symbol',`
-        __(add $1,rnil,#$2)
+        __(add $1,rnil,#nrs.$2)
         ')
 	
 
@@ -475,10 +483,11 @@ define(`mkcatch',`
         __(str imm2,[imm0,#catch_frame.mvflag])
         __(str arg_x,[imm0,#catch_frame.db_link])
         __(str temp0,[imm0,#catch_frame.xframe])
-        __(stp save0,save1,[imm0,#catch_frame.save0])
-        __(stp save2,save3,[sp,#catch_frame.save2])
-        __(stp save4,save5,[sp,#catch_frame.save4])
-        __(stp save6,save7,[sp,#catch_frame/save6])
+        __(stp save0,save1,[imm0,#catch_frame._save0])
+        __(stp save2,save3,[imm0,#catch_frame._save2])
+        __(stp save4,save5,[imm0,#catch_frame._save4])
+        __(stp save6,save7,[imm0,#catch_frame._save6])
+        __(str temp1,[imm0,#catch_frame.last_lisp_frame])
         __(str imm0,[rcontext,#tcr.catch_top])
         __(add lr,lr,#4)
 ')	
@@ -574,15 +583,26 @@ define(`stack_allocate_ivector',`
 
                         
                         
+/* Stack-allocate a zeroed ivector.  $1 = header, $2 = dnode-aligned size.
+   Both are modified.  Result is raw pointer in sp (caller handles tagging). */
+define(`stack_allocate_zeroed_ivector',`
+       new_macro_labels()
+macro_label(loop):
+        __(subs $2,$2,#dnode_size)
+        __(str vzero,[sp,#-dnode_size]!)
+        __(bne macro_label(loop))
+        __(str $1,[sp,#0])
+        ')
+
 /* Stack-allocate a uvector (other than a smallish ivector) and return
    a tagged pointer to it in $1.
-   $2 = header, $3 = dnode-aligned size in bytes, $4 = tag).  
-   Both $2 and $3 are modified here. 
+   $2 = header, $3 = dnode-aligned size in bytes, $4 = tag register).
+   Both $2 and $3 are modified here.
    We need to make sure that the right thing happens if we're
    interrupted in the middle of the zeroing loop. */
 define(`stack_allocate_zeroed_vector',`
        new_macro_labels()
-macro_label(loop):              
+macro_label(loop):
         __(subs $3,$3,#dnode_size)
         __(str vzero,[sp,#-dnode_size]!)
         __(bne macro_label(loop))
@@ -602,7 +622,7 @@ define(`check_enabled_pending_interrupt',`
 define(`check_pending_interrupt',`
 	new_macro_labels()
         __(ldr $1,[rcontext,#tcr.tlb_pointer])
-	__(ldr $1,[$1,$INTERRUPT_LEVEL_BINDING_INDEX])
+	__(ldr $1,[$1,#INTERRUPT_LEVEL_BINDING_INDEX])
         __(cmp $1,#0)
         __(blt macro_label(done))
         __(check_enabled_pending_interrupt($1,macro_label(done)))

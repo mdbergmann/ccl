@@ -49,6 +49,7 @@ define(`rcontext',`x28')
 define(`lr',`x30')        
 define(`fname',`temp3')
 define(`nfn',`temp2')
+define(`fn',`nfn')
 
 define(`vzero',`q31')
         
@@ -67,9 +68,11 @@ bitmap_shift = 6
 fixnumshift = 0
 fixnum_shift = 0
 num_subtag_bits = 8
+node_shift = word_shift
 node_bias = -node_size
 fulltagmask = 0xff
 tagmask = 0xff
+nargregs = 3
 
 fixnumone = 1
 fixnum_one = fixnumone
@@ -206,7 +209,62 @@ define_gvector(xfunction,16)
 define_gvector(arrayH,29)        
 define_gvector(vectorH,30)
 define_gvector(simple_vector,31)
-			
+
+/* subtag_* aliases — assembly equivalent of the C #defines in arm64-constants.h.
+   For uvectors, subtag_X = X_header (the header tag byte). */
+subtag_bignum = bignum_header
+subtag_double_float = double_float_header
+subtag_complex_single_float = complex_single_float_header
+subtag_complex_double_float = complex_double_float_header
+subtag_xcode_vector = xcode_vector_header
+subtag_macptr = macptr_header
+subtag_dead_macptr = dead_macptr_header
+subtag_s32_vector = s32_vector_header
+subtag_u32_vector = u32_vector_header
+subtag_single_float_vector = single_float_vector_header
+subtag_simple_base_string = simple_string_header
+subtag_fixnum_vector = fixnum_vector_header
+subtag_s64_vector = s64_vector_header
+subtag_u64_vector = u64_vector_header
+subtag_double_float_vector = double_float_vector_header
+subtag_complex_single_float_vector = complex_single_float_vector_header
+subtag_complex_double_float_vector = complex_double_float_vector_header
+subtag_s8_vector = s8_vector_header
+subtag_u8_vector = u8_vector_header
+subtag_s16_vector = s16_vector_header
+subtag_u16_vector = u16_vector_header
+subtag_bit_vector = bit_vector_header
+subtag_ratio = ratio_header
+subtag_complex = complex_header
+subtag_function = function_header
+subtag_symbol = symbol_header
+subtag_catch_frame = catch_frame_header
+subtag_basic_stream = basic_stream_header
+subtag_lock = lock_header
+subtag_hash_vector = hash_vector_header
+subtag_pool = pool_header
+subtag_weak = weak_header
+subtag_package = package_header
+subtag_slot_vector = slot_vector_header
+subtag_instance = instance_header
+subtag_struct = struct_header
+subtag_istruct = istruct_header
+subtag_value_cell = value_cell_header
+subtag_xfunction = xfunction_header
+subtag_arrayH = arrayH_header
+subtag_vectorH = vectorH_header
+subtag_simple_vector = simple_vector_header
+subtag_forward_marker = tag_nil
+
+subtag_single_float = tag_single_float
+subtag_character = tag_character
+subtag_unbound = tag_unbound
+subtag_slot_unbound = tag_slot_unbound
+subtag_no_thread_local_binding = tag_no_thread_local_binding
+subtag_illegal = tag_illegal
+
+subtag_mask = 0xff
+
 misc_bias = -node_size
 cons_bias = misc_bias
 function_bias = misc_bias
@@ -429,6 +487,7 @@ TCR_BIAS = 0
          _node(tlb_pointer)     /* Consider using tcr+N as tlb_pointer */
 	 _node(shutdown_count)
          _node(safe_ref_address)
+	 _node(last_lisp_frame)	/* when in foreign code */
 	_ends
 
 TCR_FLAG_BIT_FOREIGN = 0
@@ -455,4 +514,29 @@ INTERRUPT_LEVEL_BINDING_INDEX = fixnumone
 nzvc_n = 8
 nzvc_z = 4
 nzvc_v = 2
-nzvc_c = 1                                                
+nzvc_c = 1
+
+/* On ARM64 with 56-bit fixnums, "unsigned_byte_24" fits if bits outside
+   the low 24 value bits (plus any tag bits) are clear.  With fixnumshift=0,
+   bits 55:24 must be zero.  This mask checks bits that should be clear
+   in a boxed unsigned-byte-24 value. */
+unsigned_byte_24_mask = 0x00ffffff00000000
+
+/* Extended type codes — used in UUO traps for type errors.
+   These are NOT subtag bytes; they are synthetic codes > 255
+   that the error-dispatch code interprets. */
+xtype_integer = 4
+xtype_s64 = 8
+xtype_u64 = 12
+xtype_s32 = 16
+xtype_u32 = 20
+xtype_s16 = 24
+xtype_u16 = 28
+xtype_s8 = 32
+xtype_u8 = 36
+xtype_bit = 40
+xtype_unsigned_byte_24 = 252
+xtype_unsigned_byte_56 = 253
+xtype_uvector = 254
+xtype_array2d = 248
+xtype_array3d = 244
