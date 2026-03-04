@@ -2277,6 +2277,44 @@ _spentry(gets64)
 1:      __(ret)
 2:      __(uuo_error_reg_not_xtype(arg_z,xtype_s64))
 
+
+/* arg_z should be of type (SIGNED-BYTE 32);  */
+/*    return unboxed value in imm0.  */
+/* On ARM64, every s32 fits in a fixnum; this is a stub like x86-64.  */
+
+_spentry(gets32)
+        __(hlt #0)
+_endsubp(gets32)
+
+/* arg_z should be of type (UNSIGNED-BYTE 32);  */
+/*    return unboxed value in imm0.  */
+/* On ARM64, every u32 fits in a fixnum; this is a stub like x86-64.  */
+
+_spentry(getu32)
+        __(hlt #0)
+_endsubp(getu32)
+
+
+/* Unsigned 64-bit by 64-bit division.  */
+/* On entry: imm0 = 64-bit dividend, imm2 = 64-bit divisor.  */
+/* On exit:  imm0 = quotient, imm1 = remainder.  */
+
+_spentry(udiv64by32)
+        __(cbz imm2,0f)
+        __(mov imm1,imm0)
+        __(udiv imm0,imm1,imm2)
+        __(msub imm1,imm0,imm2,imm1)
+        __(ret)
+0:
+        __(build_lisp_frame())
+        __(bl _SPmakeu64)
+        __(mov arg_y,#XDIVZRO)
+        __(set_nargs(2))
+        __(restore_lisp_frame())
+        __(b _SPksignalerr)
+_endsubp(udiv64by32)
+
+
 /* on entry: arg_z = symbol.  On exit, arg_z = value (possibly */
 /* unbound_marker), arg_y = symbol, imm1 = symbol.binding-index  */
 _spentry(specref)
@@ -2822,6 +2860,40 @@ local_label(odd_keywords):
         __(mov nargs,key_value_count)
         __(b local_label(error_exit))
 
+
+/* Unsigned 32-bit division.  */
+/* On entry: imm0 = unsigned 32-bit dividend, imm1 = unsigned 32-bit divisor.  */
+/* On exit:  imm0 = quotient, imm1 = remainder.  */
+
+_spentry(udiv32)
+        __(cbz gpr32(imm1),0f)
+        __(mov imm2,imm0)
+        __(udiv gpr32(imm0),gpr32(imm2),gpr32(imm1))
+        __(msub gpr32(imm1),gpr32(imm0),gpr32(imm1),gpr32(imm2))
+        __(ret)
+0:
+        __(mov arg_z,imm0)
+        __(mov arg_y,#XDIVZRO)
+        __(set_nargs(2))
+        __(b _SPksignalerr)
+_endsubp(udiv32)
+
+/* Signed 32-bit division.  */
+/* On entry: imm0 = signed 32-bit dividend, imm1 = signed 32-bit divisor.  */
+/* On exit:  imm0 = quotient, imm1 = remainder.  */
+
+_spentry(sdiv32)
+        __(cbz gpr32(imm1),0f)
+        __(mov imm2,imm0)
+        __(sdiv gpr32(imm0),gpr32(imm2),gpr32(imm1))
+        __(msub gpr32(imm1),gpr32(imm0),gpr32(imm1),gpr32(imm2))
+        __(ret)
+0:
+        __(sxtw arg_z,gpr32(imm0))
+        __(mov arg_y,#XDIVZRO)
+        __(set_nargs(2))
+        __(b _SPksignalerr)
+_endsubp(sdiv32)
 
 _spentry(eabi_ff_callhf)
         __(add imm0,sp,#8)
