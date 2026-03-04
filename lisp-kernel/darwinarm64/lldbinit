@@ -1,0 +1,14 @@
+process handle --notify false --pass true --stop false SIGKILL SIGILL SIGSEGV SIGBUS SIGFPE SIGUSR1 SIGUSR2
+
+# this doesn't work until a target is defined
+target stop-hook add --one-liner "disassemble --pc"
+
+# ARM64 CCL register aliases:
+#   x13=arg_x  x14=arg_y  x15=arg_z
+#   x10=nfn(fn) x25=vsp  x26=allocptr  x28=rcontext
+command alias arg_x expr print_lisp_object($x13)
+command alias arg_y expr print_lisp_object($x14)
+command alias arg_z expr print_lisp_object($x15)
+command alias fn expr print_lisp_object($x10)
+
+command alias lbt expr plbt_sp($x25)

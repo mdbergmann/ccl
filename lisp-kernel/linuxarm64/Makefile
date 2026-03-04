@@ -56,7 +56,7 @@ ASMOBJ = arm64-asmutils.o imports.o
 COBJ  = pmcl-kernel.o gc-common.o arm64-gc.o bits.o  arm64-exceptions.o \
 	image.o thread_manager.o lisp-debug.o memory.o unix-calls.o
 
-DEBUGOBJ = lispdcmd.o plprint.o plsym.o albt.o arm_print.o
+DEBUGOBJ = lispdcmd.o plprint.o plsym.o albt.o arm64_print.o
 KERNELOBJ= $(COBJ) arm64-asmutils.o  imports.o
 
 SPINC =	lisp.s m4macros.m4 arm64-constants.s arm64-macros.s errors.s arm64-uuo.s \
@@ -82,7 +82,9 @@ OSLIBS = -ldl -lm -lpthread -lrt
 
 
 ../../armcl64:	$(KSPOBJ) $(KERNELOBJ) $(DEBUGOBJ)
-	$(CC)  $(CDEBUG)  -Wl,--export-dynamic $(HASH_STYLE) -mfloat-abi=$(FLOAT_ABI) -o $@ -T ./armlinux.x $(KSPOBJ) $(KERNELOBJ) $(DEBUGOBJ) -Wl,--no-as-needed $(OSLIBS)
+	$(CC)  $(CDEBUG)  -Wl,--export-dynamic $(HASH_STYLE) -o $@ $(KSPOBJ) $(KERNELOBJ) $(DEBUGOBJ) -Wl,--no-as-needed \
+	  -Wl,-z,noexecstack \
+	  $(OSLIBS)
 
 
 $(SPOBJ): $(SPINC)
@@ -92,10 +94,10 @@ $(DEBUGOBJ): $(CHEADERS) lispdcmd.h
 
 
 cclean:
-	$(RM) -f $(KERNELOBJ) $(DEBUGOBJ) ../../armcl
+	$(RM) -f $(KERNELOBJ) $(DEBUGOBJ) ../../armcl64
 
 clean:	cclean
 	$(RM) -f $(SPOBJ)
 
-strip:	../../armcl
-	strip -g ../../armcl
+strip:	../../armcl64
+	strip -g ../../armcl64
