@@ -112,6 +112,12 @@ define(`cmp_to_marker',`
         __(cmp $2,#$3)
         ')
 
+/* Load VOID_ALLOCPTR (-dnode_size = 0xFFF...F0) into $1.
+   Uses MOVN to load bitwise NOT of 15. */
+define(`load_voidptr',`
+        __(movn $1,#(dnode_size-1))
+        ')
+
 /* Set $1 to $2, with bit 55 sign-sextended into bits 56-63.  If
    $2 is a fixnum, $1 and $2 will be =. */        
 define(`sign_extend_value',`
@@ -289,8 +295,13 @@ macro_label(done):
 define(`vpop_argregs',`
         new_macro_labels()
         __(cbz nargs,macro_label(done))
-        __(vpop_argregs_nz())
-macro_label(done):      
+        __(cmp nargs,#2)
+        __(vpop1(arg_z))
+        __(blo macro_label(done))
+        __(vpop1(arg_y))
+        __(beq macro_label(done))
+        __(vpop1(arg_x))
+macro_label(done):
         ')
         
 define(`vpush_argregs_nz',`
@@ -367,15 +378,16 @@ define(`trap_unless_list',`
         new_macro_labels()
         __(clz $2,$1)
         __(cmp $2,#list_leading_zero_bits)
-        __(beq local_label(ok))
+        __(beq macro_label(ok))
         __(uuo_error_reg_not_lisptag($1,tag_list))
+macro_label(ok):
 ')
 
 define(`trap_unless_fixnum',`
         __(new_macro_labels())
-        __(branch_if_fixnum($1,macro_label(ok),$2))
+        __(branch_if_fixnum($1,macro_label(ok),ifelse($2,,imm0,$2)))
         __(uuo_error_reg_not_lisptag($1,tag_fixnum))
-macro_label(ok):        
+macro_label(ok):
         ')
                 
         
@@ -406,7 +418,7 @@ define(`funcall_nfn',`
         new_macro_labels()
         __(extract_tag(imm0,nfn))
         __(cmp imm0,#tag_function)
-        __(beq local_label(go))
+        __(beq macro_label(go))
         __(cmp imm0,#tag_symbol)
         __(beq macro_label(symbol))
         __(uuo_error_not_callable(nfn))
@@ -422,11 +434,11 @@ macro_label(go):
 */        
    
 define(`push_foreign_fprs',`
-        __(make_header($1,9,double_float_vector_header))
-        __(stp $1,xzr,[sp,#-10<<3]!)
+        __(make_header(ifelse($1,,imm0,$1),9,double_float_vector_header))
+        __(stp ifelse($1,,imm0,$1),xzr,[sp,#-10<<3]!)
         __(stp d8,d9,[sp,#16])
         __(stp d10,d11,[sp,#32])
-        __(stp d12,d14,[sp,#48])
+        __(stp d12,d13,[sp,#48])
         __(stp d14,d15,[sp,#64])
 ')
 
@@ -437,7 +449,7 @@ define(`push_lisp_fprs',`
         __(stp $1,xzr,[sp,#-10<<3]!)
         __(stp d8,d9,[sp,#16])
         __(stp d10,d11,[sp,#32])
-        __(stp d12,d14,[sp,#48])
+        __(stp d12,d13,[sp,#48])
         __(stp d14,d15,[sp,#64])
 ')
         
@@ -446,16 +458,16 @@ define(`push_lisp_fprs',`
 define(`pop_foreign_fprs',`
         __(ldp d8,d9,[sp,#16])
         __(ldp d10,d11,[sp,#32])
-        __(ldp d12,d14,[sp,#48])
+        __(ldp d12,d13,[sp,#48])
         __(ldp d14,d15,[sp,#64])
         __(add sp,sp,#10<<3)
 ')
 
-/* Pop the lisp non-volatile FPRs */        
+/* Pop the lisp non-volatile FPRs */
 define(`pop_lisp_fprs',`
         __(ldp d8,d9,[sp,#16])
         __(ldp d10,d11,[sp,#32])
-        __(ldp d12,d14,[sp,#48])
+        __(ldp d12,d13,[sp,#48])
         __(ldp d14,d15,[sp,#64])
         __(add sp,sp,#10<<3)
 ')
@@ -465,7 +477,7 @@ define(`pop_lisp_fprs',`
 define(`restore_lisp_fprs',`
         __(ldp d8,d9,[sp,#16])
         __(ldp d10,d11,[sp,#32])
-        __(ldp d12,d14,[sp,#48])
+        __(ldp d12,d13,[sp,#48])
         __(ldp d14,d15,[sp,#64])
 ')                
 
@@ -627,7 +639,7 @@ macro_label(loop):
 
 define(`check_enabled_pending_interrupt',`
         __(ldr $1,[rcontext,#tcr.interrupt_pending])
-        __(cmp $1,0)
+        __(cmp $1,#0)
         __(ble $2)
         __(uuo_interrupt_now())
         ')
@@ -673,9 +685,9 @@ local_label(bits32):
         __(lsl $1,$1,#1)
 local_label(bits16):    
         __(lsl $1,$1,#1)        
-macro_label(bytes):
+local_label(bytes):
         __(dnode_align($1,$1,node_size))
-        __(add $1,$1,$3)
+        __(add $1,$3,$1)
         ')
 
 /* This may need to be inlined.  $1=link, $2=saved sym idx, $3 = tlb, $4 = value */

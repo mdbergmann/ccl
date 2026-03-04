@@ -517,7 +517,10 @@ define(`RESERVATION_DISCHARGE',(0x2008+(LOWMEM_BIAS)))
 
 
         
-INTERRUPT_LEVEL_BINDING_INDEX = fixnumone
+/* On ARM32, fixnumone == node_size so binding indices could serve as both
+   fixnum values and byte offsets.  On ARM64 with fixnumshift=0, we must
+   use the byte offset explicitly.  Entry 1 is at byte offset node_size. */
+INTERRUPT_LEVEL_BINDING_INDEX = node_size
         
 /* Condition bits, not to be confused with condition codes (which
    depend on them.) */
@@ -551,3 +554,14 @@ xtype_unsigned_byte_56 = 253
 xtype_uvector = 254
 xtype_array2d = 248
 xtype_array3d = 244
+
+/* VOID_ALLOCPTR: -dnode_size, used to mark allocptr as invalid.
+   On ARM64 this is 0xFFFFFFFFFFFFFFF0 which doesn't fit in a MOV immediate.
+   Use load_voidptr() macro instead. */
+VOID_ALLOCPTR = -dnode_size
+
+TCR_STATE_LISP = 0
+TCR_STATE_FOREIGN = 1
+
+/* ARM64 FPR aliases */
+define(`double_float_zero',`d15')
