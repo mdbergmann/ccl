@@ -45,7 +45,16 @@ define(`jump_builtin',`
 
 
 
-        
+
+/* On ARM64 with TBI tagging, functions embed code directly — the
+   function pointer IS the entrypoint (no separate codevector).
+   This stub exists to satisfy the sptab requirement that
+   fix_nfn_entrypoint be the first entry. */
+_spentry(fix_nfn_entrypoint)
+        __(ret)
+_endsubp(fix_nfn_entrypoint)
+
+
 _spentry(builtin_plus)
         __(add imm0,arg_y,arg_z)
         __(sbfx imm1,imm0,#0,#56)
@@ -1389,6 +1398,74 @@ _spentry(heap_cons_rest_arg)
         __(vpush1(arg_z))
         __(ret)
 
+
+
+/* Check for pending FPU exceptions.
+   Read FPSR, mask with enabled exceptions from TCR,
+   signal error if any are set. */
+_spentry(check_fpu_exception)
+        __(mrs imm0,fpsr)
+        __(mov imm2,imm0)
+        __(ldr gpr32(imm1),[rcontext,#tcr.lisp_fpscr])
+        __(and imm0,imm0,imm1,lsr #8)
+        __(cbz imm0,0f)
+        /* Clear exception flags in FPSR */
+        __(bic imm2,imm2,#0xff)
+        __(msr fpsr,imm2)
+        __(build_lisp_frame())
+        /* Allocate u64_vector[33] on stack: header(8) + 33*8 = 272 bytes */
+        __(make_header(imm1,33,subtag_u64_vector))
+        __(mov imm2,#272)
+        __(stack_allocate_ivector(imm1,imm2))
+        /* Tag stack pointer as misc object */
+        __(add arg_z,sp,#node_size)
+        __(orr arg_z,arg_z,#(fulltag_misc << tag_shift))
+        /* Store exception flags at data[0] */
+        __(str imm0,[arg_z,#misc_data_offset])
+        /* Save all 32 double-precision FPU registers at data[1..32] */
+        __(stp d0,d1,[sp,#16])
+        __(stp d2,d3,[sp,#32])
+        __(stp d4,d5,[sp,#48])
+        __(stp d6,d7,[sp,#64])
+        __(stp d8,d9,[sp,#80])
+        __(stp d10,d11,[sp,#96])
+        __(stp d12,d13,[sp,#112])
+        __(stp d14,d15,[sp,#128])
+        __(stp d16,d17,[sp,#144])
+        __(stp d18,d19,[sp,#160])
+        __(stp d20,d21,[sp,#176])
+        __(stp d22,d23,[sp,#192])
+        __(stp d24,d25,[sp,#208])
+        __(stp d26,d27,[sp,#224])
+        __(stp d28,d29,[sp,#240])
+        __(stp d30,d31,[sp,#256])
+        /* Load calling instruction for diagnostics */
+        __(ldr gpr32(imm1),[lr,#-12])
+        /* Signal FPU exception error */
+        __(uuo_error_fpu_exception(arg_z,imm1))
+        /* Continuation: restore FPU state */
+        __(ldp d0,d1,[sp,#16])
+        __(ldp d2,d3,[sp,#32])
+        __(ldp d4,d5,[sp,#48])
+        __(ldp d6,d7,[sp,#64])
+        __(ldp d8,d9,[sp,#80])
+        __(ldp d10,d11,[sp,#96])
+        __(ldp d12,d13,[sp,#112])
+        __(ldp d14,d15,[sp,#128])
+        __(ldp d16,d17,[sp,#144])
+        __(ldp d18,d19,[sp,#160])
+        __(ldp d20,d21,[sp,#176])
+        __(ldp d22,d23,[sp,#192])
+        __(ldp d24,d25,[sp,#208])
+        __(ldp d26,d27,[sp,#224])
+        __(ldp d28,d29,[sp,#240])
+        __(ldp d30,d31,[sp,#256])
+        /* Deallocate vector and return */
+        __(add sp,sp,#272)
+        __(return_lisp_frame())
+0:
+        __(ret)
+_endsubp(check_fpu_exception)
 
 
 _spentry(discard_stack_object)

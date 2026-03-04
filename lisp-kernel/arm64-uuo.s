@@ -98,3 +98,9 @@ define(`uuo_error_array_axis_bounds',`
         __(hlt #(hlt_code_binary|(gprval($1)<<3)|(gprval($2)<<8)|($3<<13)))
         ')
 
+/* FPU exception: $1=state vector reg, $2=calling instruction reg.
+   Encoded as binary UUO with extra=1 (distinct from vector_bounds=0). */
+define(`uuo_error_fpu_exception',`
+        __(hlt #(hlt_code_binary|(gprval($1)<<3)|(gprval($2)<<8)|(1<<13)))
+        ')
+
