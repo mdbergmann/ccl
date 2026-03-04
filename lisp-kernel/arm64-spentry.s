@@ -39,7 +39,7 @@ define(`_endsubp',`
 define(`jump_builtin',`
         __(ref_nrs_value(fname,builtin_functions))
 	__(set_nargs($2))
-	__(ldr fname,[fname,#$1<<3])
+	__(ldr fname,[fname,#$1*8])
 	__(jump_fname())
 ')
 

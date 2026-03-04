@@ -29,7 +29,11 @@ extern Boolean lisp_frame_p(lisp_frame *);
 void
 print_lisp_frame(lisp_frame *frame)
 {
+#ifdef ARM64
+  LispObj fun = 0, rpc = frame->savelr;
+#else
   LispObj fun = frame->savefn, rpc = frame->savelr;
+#endif
   int delta = 0;
   Dl_info info;
   char *spname;

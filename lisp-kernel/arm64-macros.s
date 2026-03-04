@@ -319,7 +319,14 @@ macro_label(justz):
 define(`vpush_argregs',`
 	new_macro_labels()
         __(cbz nargs,macro_label(done))
-        __(vpush_argregs_nz())
+        __(cmp nargs,#2)
+        __(bls macro_label(notx))
+        __(vpush1(arg_x))
+macro_label(notx):
+        __(bne macro_label(justz))
+        __(vpush1(arg_y))
+macro_label(justz):
+        __(vpush1(arg_z))
 macro_label(done):
 ')
 

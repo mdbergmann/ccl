@@ -43,8 +43,6 @@ extern void pseudo_sigreturn(ExceptionInformation *);
 
 #include "threads.h"
 
-#ifdef LINUX
-
 void
 enable_fp_exceptions()
 {
@@ -54,7 +52,6 @@ void
 disable_fp_exceptions()
 {
 }
-#endif
 
 /*
   Handle exceptions.
@@ -79,18 +76,10 @@ log2_page_size = 12;
 TCR *gc_tcr = NULL;
 
 
-/*
-  On ARM64, the TCR stores bytes_consed as a split 32+32 field
-  (bytes_consed_high, bytes_consed_low) rather than a single 64-bit
-  bytes_allocated.  This helper updates the split counter.
-*/
 static inline void
 add_bytes_consed(TCR *tcr, natural bytes)
 {
-  natural total = ((natural)tcr->bytes_consed_high << 32) | tcr->bytes_consed_low;
-  total += bytes;
-  tcr->bytes_consed_high = (unsigned int)(total >> 32);
-  tcr->bytes_consed_low = (unsigned int)total;
+  tcr->bytes_allocated += bytes;
 }
 
 
@@ -230,12 +219,12 @@ finish_allocating_cons(ExceptionInformation *xp)
 
     if (IS_STUR_TO_ALLOCPTR(instr)) {
       int offset = STUR_OFFSET(instr);
-      unsigned rt = STR_RT(instr);
-      *(LispObj *)((char *)cur_allocptr + offset) = xpGPR(xp, rt);
+      unsigned dest_reg = STR_RT(instr);
+      *(LispObj *)((char *)cur_allocptr + offset) = xpGPR(xp, dest_reg);
     } else if (IS_STR_UOFF_TO_ALLOCPTR(instr)) {
       natural offset = STR_UOFF(instr);
-      unsigned rt = STR_RT(instr);
-      *(LispObj *)((char *)cur_allocptr + offset) = xpGPR(xp, rt);
+      unsigned dest_reg = STR_RT(instr);
+      *(LispObj *)((char *)cur_allocptr + offset) = xpGPR(xp, dest_reg);
     } else if (IS_SET_ALLOCPTR_RESULT(instr)) {
       unsigned rd = ORR_RD(instr);
       unsigned rm = ORR_RM(instr);
@@ -277,8 +266,8 @@ finish_allocating_uvector(ExceptionInformation *xp)
 
     if (IS_STUR_TO_ALLOCPTR(instr)) {
       int offset = STUR_OFFSET(instr);
-      unsigned rt = STR_RT(instr);
-      *(LispObj *)((char *)cur_allocptr + offset) = xpGPR(xp, rt);
+      unsigned dest_reg = STR_RT(instr);
+      *(LispObj *)((char *)cur_allocptr + offset) = xpGPR(xp, dest_reg);
     } else if (IS_SET_ALLOCPTR_RESULT(instr)) {
       unsigned rd = ORR_RD(instr);
       unsigned rm = ORR_RM(instr);
@@ -650,6 +639,113 @@ do_soft_stack_overflow(ExceptionInformation *xp, protected_area_ptr prot_area, B
   unprotect_area(prot_area);
   signal_stack_soft_overflow(xp, Rsp);
   return 0;
+}
+
+
+OSStatus
+do_spurious_wp_fault(ExceptionInformation *xp, protected_area_ptr area, BytePtr addr)
+{
+  return -1;
+}
+
+
+protection_handler
+ * protection_handlers[] = {
+   do_spurious_wp_fault,
+   do_soft_stack_overflow,
+   do_soft_stack_overflow,
+   do_soft_stack_overflow,
+   do_hard_stack_overflow,
+   do_hard_stack_overflow,
+   do_hard_stack_overflow
+   };
+
+
+/*
+  Lower (move toward 0) the "end" of the soft protected area associated
+  with a by a page, if we can.
+*/
+void
+adjust_soft_protection_limit(area *a)
+{
+  char *proposed_new_soft_limit = a->softlimit - 4096;
+  protected_area_ptr p = a->softprot;
+
+  if (proposed_new_soft_limit >= (p->start+16384)) {
+    p->end = proposed_new_soft_limit;
+    p->protsize = p->end-p->start;
+    a->softlimit = proposed_new_soft_limit;
+  }
+  protect_area(p);
+}
+
+
+void
+restore_soft_stack_limit(unsigned stkreg)
+{
+  area *a;
+  TCR *tcr = get_tcr(true);
+
+  switch (stkreg) {
+  case Rsp:
+    a = tcr->cs_area;
+    if ((a->softlimit - 4096) > (a->hardlimit + 16384)) {
+      a->softlimit -= 4096;
+    }
+    tcr->cs_limit = (LispObj)ptr_to_lispobj(a->softlimit);
+    break;
+  case vsp:
+    a = tcr->vs_area;
+    adjust_soft_protection_limit(a);
+    break;
+  }
+}
+
+
+/* Maybe this'll work someday.  We may have to do something to
+   make the thread look like it's not handling an exception */
+void
+reset_lisp_process(ExceptionInformation *xp)
+{
+}
+
+
+void
+platform_new_heap_segment(ExceptionInformation *xp, TCR *tcr, BytePtr low, BytePtr high)
+{
+  tcr->last_allocptr = (void *)high;
+  xpGPR(xp, allocptr) = (LispObj) high;
+  tcr->save_allocbase = (void *)low;
+}
+
+
+LispObj *
+tcr_frame_ptr(TCR *tcr)
+{
+  ExceptionInformation *xp;
+  LispObj *bp = NULL;
+
+  if (tcr->pending_exception_context)
+    xp = tcr->pending_exception_context;
+  else {
+    xp = tcr->suspend_context;
+  }
+  if (xp) {
+    bp = (LispObj *) xpGPR(xp, Rsp);
+  }
+  return bp;
+}
+
+
+/* On ARM64, lisp_frame has only savevsp and savelr (no marker).
+   A frame is a lisp frame if savelr looks like a tagged return address. */
+Boolean
+lisp_frame_p(lisp_frame *spPtr)
+{
+  /* For now, always return true — the frame walker is only called
+     on known cstack regions.  A more robust check would validate
+     that savelr is within a known code area. */
+  return true;
 }
 
 
@@ -1936,3 +2032,502 @@ exception_init()
 {
   install_pmcl_exception_handlers();
 }
+
+#ifdef DARWIN
+
+/* ================================================================
+   Darwin/Mach exception handling for ARM64.
+   ================================================================ */
+
+#define LISP_EXCEPTIONS_HANDLED_MASK \
+ (EXC_MASK_SOFTWARE | EXC_MASK_BAD_ACCESS | EXC_MASK_BAD_INSTRUCTION | EXC_MASK_ARITHMETIC)
+
+#define NUM_LISP_EXCEPTIONS_HANDLED 4
+
+typedef struct {
+  int foreign_exception_port_count;
+  exception_mask_t         masks[NUM_LISP_EXCEPTIONS_HANDLED];
+  mach_port_t              ports[NUM_LISP_EXCEPTIONS_HANDLED];
+  exception_behavior_t behaviors[NUM_LISP_EXCEPTIONS_HANDLED];
+  thread_state_flavor_t  flavors[NUM_LISP_EXCEPTIONS_HANDLED];
+} MACH_foreign_exception_state;
+
+#define TCR_FROM_EXCEPTION_PORT(p) find_tcr_from_exception_port(p)
+#define TCR_TO_EXCEPTION_PORT(t) (mach_port_name_t)((natural)(((TCR *)t)->io_datum))
+
+#define C_STK_ALIGN 16
+#define TRUNC_DOWN(a,b,c)  (((((natural)a)-(b))/(c)) * (c))
+
+#define DARWIN_EXCEPTION_HANDLER signal_handler
+
+void
+fatal_mach_error(char *format, ...)
+{
+  va_list args;
+  char s[512];
+
+  va_start(args, format);
+  vsnprintf(s, sizeof(s), format, args);
+  va_end(args);
+
+  Fatal("Mach error", s);
+}
+
+#define MACH_CHECK_ERROR(context,x) if (x != KERN_SUCCESS) {fatal_mach_error("Mach error while %s : %d", context, x);}
+
+
+TCR *
+find_tcr_from_exception_port(mach_port_t port)
+{
+  mach_port_context_t context = 0;
+  kern_return_t kret;
+
+  kret = mach_port_get_context(mach_task_self(), port, &context);
+  MACH_CHECK_ERROR("finding TCR from exception port", kret);
+  return (TCR *)(natural)context;
+}
+
+void
+associate_tcr_with_exception_port(mach_port_t port, TCR *tcr)
+{
+  kern_return_t kret;
+
+  kret = mach_port_set_context(mach_task_self(),
+                               port, (mach_vm_address_t)tcr);
+  MACH_CHECK_ERROR("associating TCR with exception port", kret);
+}
+
+void
+disassociate_tcr_from_exception_port(mach_port_t port)
+{
+  kern_return_t kret;
+
+  kret = mach_port_set_context(mach_task_self(), port, 0);
+  MACH_CHECK_ERROR("disassociating TCR with exception port", kret);
+}
+
+
+LispObj *
+find_foreign_rsp(LispObj rsp, area *foreign_area, TCR *tcr)
+{
+  if (((BytePtr)rsp < foreign_area->low) ||
+      ((BytePtr)rsp > foreign_area->high)) {
+    rsp = (LispObj)(foreign_area->active);
+  }
+  return (LispObj *) ((rsp & ~15));
+}
+
+
+void
+restore_mach_thread_state(mach_port_t thread, ExceptionInformation *pseudosigcontext, native_thread_state_t *ts)
+{
+  kern_return_t kret;
+  MCONTEXT_T mc = UC_MCONTEXT(pseudosigcontext);
+
+  /* Set the thread's float/NEON state from the pseudosigcontext */
+  kret = thread_set_state(thread,
+                          NATIVE_FLOAT_STATE_FLAVOR,
+                          (thread_state_t)&(mc->__ns),
+                          NATIVE_FLOAT_STATE_COUNT);
+  MACH_CHECK_ERROR("setting thread FP state", kret);
+  *ts = mc->__ss;
+}
+
+
+kern_return_t
+do_pseudo_sigreturn(mach_port_t thread, TCR *tcr, native_thread_state_t *out)
+{
+  ExceptionInformation *xp;
+
+  xp = tcr->pending_exception_context;
+  if (xp) {
+    tcr->pending_exception_context = NULL;
+    tcr->valence = TCR_STATE_LISP;
+    restore_mach_thread_state(thread, xp, out);
+    raise_pending_interrupt(tcr);
+  } else {
+    Bug(NULL, "no xp here!\n");
+  }
+  return KERN_SUCCESS;
+}
+
+
+ExceptionInformation *
+create_thread_context_frame(mach_port_t thread,
+                            natural *new_stack_top,
+                            siginfo_t **info_ptr,
+                            TCR *tcr,
+                            native_thread_state_t *ts)
+{
+  mach_msg_type_number_t thread_state_count;
+  ExceptionInformation *pseudosigcontext;
+  MCONTEXT_T mc;
+  natural stackp;
+
+  stackp = (LispObj) find_foreign_rsp(ts->__sp, tcr->cs_area, tcr);
+  stackp = TRUNC_DOWN(stackp, sizeof(siginfo_t), C_STK_ALIGN);
+  if (info_ptr) {
+    *info_ptr = (siginfo_t *)stackp;
+  }
+  stackp = TRUNC_DOWN(stackp, sizeof(*pseudosigcontext), C_STK_ALIGN);
+  pseudosigcontext = (ExceptionInformation *) ptr_from_lispobj(stackp);
+
+  stackp = TRUNC_DOWN(stackp, sizeof(*mc), C_STK_ALIGN);
+  mc = (MCONTEXT_T) ptr_from_lispobj(stackp);
+
+  memmove(&(mc->__ss), ts, sizeof(*ts));
+
+  thread_state_count = NATIVE_FLOAT_STATE_COUNT;
+  thread_get_state(thread,
+                   NATIVE_FLOAT_STATE_FLAVOR,
+                   (thread_state_t)&(mc->__ns),
+                   &thread_state_count);
+
+  thread_state_count = NATIVE_EXCEPTION_STATE_COUNT;
+  thread_get_state(thread,
+                   NATIVE_EXCEPTION_STATE_FLAVOR,
+                   (thread_state_t)&(mc->__es),
+                   &thread_state_count);
+
+  UC_MCONTEXT(pseudosigcontext) = mc;
+  if (new_stack_top) {
+    *new_stack_top = stackp;
+  }
+  return pseudosigcontext;
+}
+
+
+int
+setup_signal_frame(mach_port_t thread,
+                   void *handler_address,
+                   int signum,
+                   int code,
+                   TCR *tcr,
+                   native_thread_state_t *ts,
+                   native_thread_state_t *new_ts)
+{
+  ExceptionInformation *pseudosigcontext;
+  int old_valence = tcr->valence;
+  natural stackp;
+  siginfo_t *info;
+
+  pseudosigcontext = create_thread_context_frame(thread, &stackp, &info, tcr, ts);
+  bzero(info, sizeof(*info));
+  info->si_code = code;
+  info->si_addr = (void *)(UC_MCONTEXT(pseudosigcontext)->__es.__far);
+  info->si_signo = signum;
+  pseudosigcontext->uc_onstack = 0;
+  pseudosigcontext->uc_sigmask = (sigset_t) 0;
+  pseudosigcontext->uc_stack.ss_sp = 0;
+  pseudosigcontext->uc_stack.ss_size = 0;
+  pseudosigcontext->uc_stack.ss_flags = 0;
+  pseudosigcontext->uc_link = NULL;
+  pseudosigcontext->uc_mcsize = sizeof(*UC_MCONTEXT(pseudosigcontext));
+  tcr->pending_exception_context = pseudosigcontext;
+  tcr->valence = TCR_STATE_EXCEPTION_WAIT;
+
+  /* Set up the new thread state to call the handler.
+     ARM64 passes arguments in x0-x4, return address in lr, entry in pc. */
+  *new_ts = *ts;
+  new_ts->__pc = (natural) handler_address;
+  new_ts->__lr = (natural) pseudo_sigreturn;
+  new_ts->__x[0] = signum;
+  new_ts->__x[1] = (natural) info;
+  new_ts->__x[2] = (natural) pseudosigcontext;
+  new_ts->__x[3] = (natural) tcr;
+  new_ts->__x[4] = (natural) old_valence;
+  new_ts->__sp = stackp;
+
+  return 0;
+}
+
+
+kern_return_t
+catch_mach_exception_raise(mach_port_t exception_port,
+                           mach_port_t thread,
+                           mach_port_t task,
+                           exception_type_t exception,
+                           mach_exception_data_t code,
+                           mach_msg_type_number_t code_count)
+{
+  abort();
+  return KERN_FAILURE;
+}
+
+
+kern_return_t
+catch_mach_exception_raise_state(mach_port_t exception_port,
+                                 exception_type_t exception,
+                                 mach_exception_data_t code,
+                                 mach_msg_type_number_t code_count,
+                                 int *flavor,
+                                 thread_state_t in_state,
+                                 mach_msg_type_number_t in_state_count,
+                                 thread_state_t out_state,
+                                 mach_msg_type_number_t *out_state_count)
+{
+  int64_t code0 = code[0];
+  int signum = 0;
+  TCR *tcr = TCR_FROM_EXCEPTION_PORT(exception_port);
+  mach_port_t thread = (mach_port_t)((natural)tcr->native_thread_id);
+  kern_return_t kret;
+
+  native_thread_state_t
+    *ts = (native_thread_state_t *)in_state,
+    *out_ts = (native_thread_state_t *)out_state;
+
+  if (tcr->flags & (1<<TCR_FLAG_BIT_PENDING_EXCEPTION)) {
+    CLR_TCR_FLAG(tcr, TCR_FLAG_BIT_PENDING_EXCEPTION);
+  }
+
+  /* Check for pseudo-sigreturn: EXC_BREAKPOINT with PC at pseudo_sigreturn */
+  if ((exception == EXC_BREAKPOINT) &&
+      ((natural)(ts->__pc) == (natural)pseudo_sigreturn)) {
+    kret = do_pseudo_sigreturn(thread, tcr, out_ts);
+  } else if (tcr->flags & (1<<TCR_FLAG_BIT_PROPAGATE_EXCEPTION)) {
+    CLR_TCR_FLAG(tcr, TCR_FLAG_BIT_PROPAGATE_EXCEPTION);
+    kret = 17;
+  } else {
+    switch (exception) {
+    case EXC_BAD_ACCESS:
+      signum = SIGBUS;
+      break;
+
+    case EXC_BAD_INSTRUCTION:
+      signum = SIGILL;
+      break;
+
+    case EXC_SOFTWARE:
+      signum = SIGILL;
+      break;
+
+    case EXC_ARITHMETIC:
+      signum = SIGFPE;
+      break;
+
+    case EXC_BREAKPOINT:
+      /* HLT instructions generate EXC_BREAKPOINT on ARM64 */
+      signum = SIGTRAP;
+      break;
+
+    default:
+      break;
+    }
+    if (signum) {
+      kret = setup_signal_frame(thread,
+                                (void *)DARWIN_EXCEPTION_HANDLER,
+                                signum,
+                                code0,
+                                tcr,
+                                ts,
+                                out_ts);
+    } else {
+      kret = 17;
+    }
+  }
+
+  if (kret) {
+    *out_state_count = 0;
+    *flavor = 0;
+  } else {
+    *out_state_count = NATIVE_THREAD_STATE_COUNT;
+  }
+  return kret;
+}
+
+
+kern_return_t
+catch_mach_exception_raise_state_identity(mach_port_t exception_port,
+                                          mach_port_t thread,
+                                          mach_port_t task,
+                                          exception_type_t exception,
+                                          mach_exception_data_t code,
+                                          mach_msg_type_number_t code_count,
+                                          int *flavor,
+                                          thread_state_t old_state,
+                                          mach_msg_type_number_t old_count,
+                                          thread_state_t new_state,
+                                          mach_msg_type_number_t *new_count)
+{
+  abort();
+  return KERN_FAILURE;
+}
+
+
+static mach_port_t mach_exception_thread = (mach_port_t)0;
+
+void *
+exception_handler_proc(void *arg)
+{
+  extern boolean_t mach_exc_server();
+  mach_port_t p = (mach_port_t)((natural)arg);
+
+  mach_exception_thread = pthread_mach_thread_np(pthread_self());
+  mach_msg_server(mach_exc_server, 256, p, 0);
+  /* Should never return. */
+  abort();
+}
+
+
+void
+mach_exception_thread_shutdown()
+{
+  kern_return_t kret;
+
+  fprintf(dbgout, "terminating Mach exception thread, 'cause exit can't\n");
+  kret = thread_terminate(mach_exception_thread);
+  if (kret != KERN_SUCCESS) {
+    fprintf(dbgout, "Couldn't terminate exception thread, kret = %d\n", kret);
+  }
+}
+
+
+mach_port_t
+mach_exception_port_set()
+{
+  static mach_port_t __exception_port_set = MACH_PORT_NULL;
+  kern_return_t kret;
+  if (__exception_port_set == MACH_PORT_NULL) {
+    kret = mach_port_allocate(mach_task_self(),
+                              MACH_PORT_RIGHT_PORT_SET,
+                              &__exception_port_set);
+    MACH_CHECK_ERROR("allocating thread exception_ports", kret);
+    create_system_thread(0,
+                         NULL,
+                         exception_handler_proc,
+                         (void *)((natural)__exception_port_set));
+  }
+  return __exception_port_set;
+}
+
+
+kern_return_t
+tcr_establish_exception_port(TCR *tcr, mach_port_t thread)
+{
+  kern_return_t kret;
+  MACH_foreign_exception_state *fxs = (MACH_foreign_exception_state *)tcr->native_thread_info;
+  int i;
+  unsigned n = NUM_LISP_EXCEPTIONS_HANDLED;
+  mach_port_t lisp_port = TCR_TO_EXCEPTION_PORT(tcr), foreign_port;
+  exception_mask_t mask = 0;
+
+  kret = thread_swap_exception_ports(thread,
+                                     LISP_EXCEPTIONS_HANDLED_MASK,
+                                     lisp_port,
+                                     MACH_EXCEPTION_CODES | EXCEPTION_STATE,
+                                     ARM_THREAD_STATE64,
+                                     fxs->masks,
+                                     &n,
+                                     fxs->ports,
+                                     fxs->behaviors,
+                                     fxs->flavors);
+  if (kret == KERN_SUCCESS) {
+    fxs->foreign_exception_port_count = n;
+    for (i = 0; i < n; i++) {
+      foreign_port = fxs->ports[i];
+      if ((foreign_port != lisp_port) &&
+          (foreign_port != MACH_PORT_NULL)) {
+        mask |= fxs->masks[i];
+      }
+    }
+    tcr->foreign_exception_status = (int) mask;
+  }
+  return kret;
+}
+
+
+kern_return_t
+tcr_establish_lisp_exception_port(TCR *tcr)
+{
+  return tcr_establish_exception_port(tcr, (mach_port_t)((natural)tcr->native_thread_id));
+}
+
+
+kern_return_t
+restore_foreign_exception_ports(TCR *tcr)
+{
+  exception_mask_t m = (exception_mask_t) tcr->foreign_exception_status;
+  kern_return_t kret;
+
+  if (m) {
+    MACH_foreign_exception_state *fxs =
+      (MACH_foreign_exception_state *) tcr->native_thread_info;
+    int i, n = fxs->foreign_exception_port_count;
+    exception_mask_t tm;
+
+    for (i = 0; i < n; i++) {
+      if ((tm = fxs->masks[i]) & m) {
+        kret = thread_set_exception_ports((mach_port_t)((natural)tcr->native_thread_id),
+                                          tm,
+                                          fxs->ports[i],
+                                          fxs->behaviors[i],
+                                          fxs->flavors[i]);
+        MACH_CHECK_ERROR("restoring thread exception ports", kret);
+      }
+    }
+  }
+  return KERN_SUCCESS;
+}
+
+
+kern_return_t
+setup_mach_exception_handling(TCR *tcr)
+{
+  mach_port_t
+    thread_exception_port = TCR_TO_EXCEPTION_PORT(tcr),
+    task_self = mach_task_self();
+  kern_return_t kret;
+
+  kret = mach_port_insert_right(task_self,
+                                thread_exception_port,
+                                thread_exception_port,
+                                MACH_MSG_TYPE_MAKE_SEND);
+  MACH_CHECK_ERROR("adding send right to exception_port", kret);
+
+  kret = tcr_establish_exception_port(tcr, (mach_port_t)((natural) tcr->native_thread_id));
+  if (kret == KERN_SUCCESS) {
+    mach_port_t exception_port_set = mach_exception_port_set();
+
+    kret = mach_port_move_member(task_self,
+                                 thread_exception_port,
+                                 exception_port_set);
+  }
+  return kret;
+}
+
+
+void
+darwin_exception_init(TCR *tcr)
+{
+  kern_return_t kret;
+  MACH_foreign_exception_state *fxs =
+    calloc(1, sizeof(MACH_foreign_exception_state));
+
+  tcr->native_thread_info = (void *) fxs;
+
+  if ((kret = setup_mach_exception_handling(tcr))
+      != KERN_SUCCESS) {
+    fprintf(dbgout, "Couldn't setup exception handler - error = %d\n", kret);
+    terminate_lisp();
+  }
+}
+
+
+void
+darwin_exception_cleanup(TCR *tcr)
+{
+  mach_port_t exception_port;
+  void *fxs = tcr->native_thread_info;
+
+  if (fxs) {
+    tcr->native_thread_info = NULL;
+    free(fxs);
+  }
+
+  exception_port = TCR_TO_EXCEPTION_PORT(tcr);
+  disassociate_tcr_from_exception_port(exception_port);
+  mach_port_deallocate(mach_task_self(), exception_port);
+  mach_port_destroy(mach_task_self(), exception_port);
+}
+
+#endif

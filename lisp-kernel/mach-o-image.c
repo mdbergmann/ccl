@@ -355,6 +355,14 @@ add_lisp_function_stabs(macho_symbol_table *symbols, macho_string_table *strings
 }
 #endif
 
+#ifdef ARM64
+void
+add_lisp_function_stabs(macho_symbol_table *symbols, macho_string_table *strings, int section_ordinal)
+{
+  /* TODO: implement for ARM64 */
+}
+#endif
+
 typedef struct {
   char page[4096];
   int used;
@@ -466,6 +474,10 @@ save_native_library(int fd, Boolean egc_was_enabled)
 #ifdef ARM
                                       CPU_TYPE_ARM,
                                       CPU_SUBTYPE_ARM_ALL,
+#endif
+#ifdef ARM64
+                                      CPU_TYPE_ARM64,
+                                      CPU_SUBTYPE_ARM64_ALL,
 #endif
                                       MH_DYLIB,
                                       MH_NOUNDEFS);
@@ -733,6 +745,9 @@ load_native_library(char *path)
 #endif
 #ifdef X8664
              CPU_TYPE_X86_64
+#endif
+#ifdef ARM64
+             CPU_TYPE_ARM64
 #endif
              )) {
           struct load_command *lc;

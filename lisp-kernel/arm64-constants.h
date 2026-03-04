@@ -329,6 +329,9 @@ define_gvector(simple_vector,31)
 #define fixnumshift  fixnum_shift
 #endif
 
+/* fixnummask: mask for the tag byte — if (val & fixnummask) == 0, it's a non-negative fixnum */
+#define fixnummask  ((natural)fulltagmask << tag_shift)
+
 /* dnode alignment */
 #define dnode_align_bits 4
 
@@ -340,6 +343,7 @@ define_gvector(simple_vector,31)
 
 #define unbound_marker        ((LispObj)tag_unbound << tag_shift)
 #define slot_unbound_marker   ((LispObj)tag_slot_unbound << tag_shift)
+#define slot_unbound          slot_unbound_marker
 #define no_thread_local_binding_marker ((LispObj)tag_no_thread_local_binding << tag_shift)
 #define illegal_marker        ((LispObj)tag_illegal << tag_shift)
 #define stack_alloc_marker    ((LispObj)tag_stack_alloc << tag_shift)
@@ -382,9 +386,11 @@ define_gvector(simple_vector,31)
 
 #define nil_base_address  0x13000
 #define nil_value  (((LispObj)tag_nil << tag_shift) | (nil_base_address + node_size))
-#define lisp_nil   nil_value
+/* lisp_nil is a C global variable, not a macro — see pmcl-kernel.c */
 #define t_offset   dnode_size                   /* = 16 */
 #define t_value    (nil_value + t_offset)
+
+#define STATIC_BASE_ADDRESS 0x12000
 
 /* ================================================================
    Section 9: Type structures
@@ -464,10 +470,7 @@ typedef struct tcr {
   struct area *vs_area;                 /* 0x048 vstack area pointer */
   struct area *ts_area;                 /* 0x050 tstack area pointer */
   LispObj cs_limit;                     /* 0x058 cstack overflow limit */
-  struct {                              /* 0x060 */
-    unsigned int bytes_consed_high;
-    unsigned int bytes_consed_low;
-  };
+  unsigned long long bytes_allocated;    /* 0x060 */
   natural log2_allocation_quantum;      /* 0x068 */
   signed_natural interrupt_pending;     /* 0x070 */
   xframe_list *xframe;                  /* 0x078 exception-frame linked list */
@@ -500,6 +503,7 @@ typedef struct tcr {
   natural shutdown_count;               /* 0x138 */
   void *safe_ref_address;               /* 0x140 */
   LispObj last_lisp_frame;              /* 0x148 when in foreign code */
+  void *io_datum;                       /* 0x150 exception port datum (Darwin) */
 } TCR;
 
 /* ================================================================

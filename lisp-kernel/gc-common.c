@@ -1164,7 +1164,7 @@ void
 forward_memoized_area(area *a, natural num_memo_dnodes, bitvector refbits, bitvector refidx)
 {
   LispObj *p = (LispObj *) a->low, *pbase = p, x1, x2, new;
-#ifdef ARM
+#if defined(ARM) || defined(ARM64)
   LispObj *p0 = p;
 #endif
   natural bits, *bitsp, nextbit,  memo_dnode = 0, ref_dnode, hash_dnode_limit = 0;
