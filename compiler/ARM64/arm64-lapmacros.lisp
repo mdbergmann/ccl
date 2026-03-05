@@ -438,6 +438,37 @@
       (blr rt))))
 
 
+;;; UUO trap pseudo-instructions.
+;;; These expand to HLT instructions with specific 16-bit immediate
+;;; encodings recognized by the kernel exception handler.
+;;; Format: imm16 low 3 bits = format code; bits 3+ = info/subcode.
+;;; Nullary format (format=0): info in bits 3-15.
+
+;;; Allocation trap: triggers GC if allocptr < allocbase.
+;;; Nullary format, info=0 → imm16=0.
+(defarm64lapmacro uuo-alloc-trap ()
+  `(hlt (:$ 0)))
+
+;;; GC trap: request a garbage collection.
+;;; Nullary format, info=2 → imm16=16.
+;;; Expects gc-trap-function code in imm0.
+(defarm64lapmacro uuo-gc-trap ()
+  `(hlt (:$ 16)))
+
+;;; Debug trap: breakpoint for debugging.
+;;; Nullary format, info=3 → imm16=24.
+(defarm64lapmacro uuo-debug-trap ()
+  `(hlt (:$ 24)))
+
+;;; Kernel service request.
+;;; Nullary format, info=7 → imm16=56.
+;;; Service code passed in the immediate argument, loaded into imm0.
+(defarm64lapmacro uuo-kernel-service (imm)
+  `(progn
+     (mov imm0 ,imm)
+     (hlt (:$ 56))))
+
+
 (provide "ARM64-LAPMACROS")
 
 ;;; end of arm64-lapmacros.lisp
