@@ -3412,6 +3412,14 @@
 
 ;;; --- Interrupt control ---
 
+;;; ref-interrupt-level: load current interrupt level from TLB.
+(define-arm64-vinsn (ref-interrupt-level :predicatable)
+    (((dest :imm))
+     ()
+     ((temp :u64)))
+  (ldr temp (:@ rcontext (:$ arm64::tcr.tlb-pointer)))
+  (ldr dest (:@ temp (:$ arm64::interrupt-level-binding-index))))
+
 ;;; disable-interrupts: set interrupt-level to -1 (fixnum -1 on ARM64 with
 ;;; fixnumshift=0 is just -1), return old value.
 (define-arm64-vinsn (disable-interrupts :predicatable)
