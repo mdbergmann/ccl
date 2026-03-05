@@ -132,7 +132,7 @@
                              (find-name op)))
                          (if (eq (car op) :apply)
                            `(,(cadr op) ,@(mapcar #'simplify-operand (cddr op)))
-                           (simplify-operand (eval op)))))
+                           (simplify-operand (eval op))))))
               (labels ((simplify-constraint (guard)
                          (destructuring-bind (guardname &rest others) guard
                            (ecase guardname
