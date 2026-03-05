@@ -2017,6 +2017,88 @@
                           (sfpr dst)))
                  (t (error "Invalid FCVT operands: ~s" form)))))
 
+            ;;=== UUO pseudo-instructions ===
+            ;; These encode as HLT with structured 16-bit immediates.
+            ;; Format: imm16 = [info:8 | reg:5 | format:3]
+            ;; Nullary (format=0): (uuo-error-wrong-nargs)
+            ((string-equal name "UUO-ERROR-WRONG-NARGS")
+             ;; Nullary UUO, subcode 1 = wrong nargs
+             (logior #xd4400000 (ash (logior 0 (ash 1 3)) 5)))
+
+            ;; Unary register UUOs: (uuo-error-reg-not-lisptag reg (:$ tag))
+            ((string-equal name "UUO-ERROR-REG-NOT-LISPTAG")
+             (let ((reg (gpr (op 0)))
+                   (tag (imm-val (op 1))))
+               (logior #xd4400000
+                       (ash (logior 1 (ash reg 3) (ash tag 8)) 5))))
+
+            ((string-equal name "UUO-ERROR-REG-NOT-FULLTAG")
+             (let ((reg (gpr (op 0)))
+                   (tag (imm-val (op 1))))
+               (logior #xd4400000
+                       (ash (logior 2 (ash reg 3) (ash tag 8)) 5))))
+
+            ((string-equal name "UUO-ERROR-REG-NOT-SUBTAG")
+             (let ((reg (gpr (op 0)))
+                   (tag (imm-val (op 1))))
+               (logior #xd4400000
+                       (ash (logior 3 (ash reg 3) (ash tag 8)) 5))))
+
+            ((string-equal name "UUO-ERROR-REG-NOT-XTYPE")
+             (let ((reg (gpr (op 0)))
+                   (tag (imm-val (op 1))))
+               (logior #xd4400000
+                       (ash (logior 4 (ash reg 3) (ash tag 8)) 5))))
+
+            ;; Unary misc UUOs: (uuo-error-unbound reg)
+            ((string-equal name "UUO-ERROR-UNBOUND")
+             (let ((reg (gpr (op 0))))
+               (logior #xd4400000
+                       (ash (logior 5 (ash reg 3) (ash 3 8)) 5))))
+
+            ((string-equal name "UUO-ERROR-NOT-CALLABLE")
+             (let ((reg (gpr (op 0))))
+               (logior #xd4400000
+                       (ash (logior 5 (ash reg 3) (ash 0 8)) 5))))
+
+            ((string-equal name "UUO-ERROR-UDF")
+             (let ((reg (gpr (op 0))))
+               (logior #xd4400000
+                       (ash (logior 5 (ash reg 3) (ash 0 8)) 5))))
+
+            ;; Binary UUOs: (uuo-error-vector-bounds idx vec)
+            ((string-equal name "UUO-ERROR-VECTOR-BOUNDS")
+             (let ((idx (gpr (op 0)))
+                   (vec (gpr (op 1))))
+               (logior #xd4400000
+                       (ash (logior 6 (ash idx 3) (ash vec 8) (ash 0 13)) 5))))
+
+            ;; Array axis bounds: (uuo-error-array-axis-bounds idx limit header)
+            ;; Uses binary format with idx and limit as regs; header reg ignored
+            ;; (runtime reads it from the preceding instruction context).
+            ((string-equal name "UUO-ERROR-ARRAY-AXIS-BOUNDS")
+             (let ((idx (gpr (op 0)))
+                   (limit (gpr (op 1))))
+               (logior #xd4400000
+                       (ash (logior 6 (ash idx 3) (ash limit 8) (ash 0 13)) 5))))
+
+            ;; Slot-unbound error: (uuo-error-slot-unbound dest instance index)
+            ;; Encode as binary UUO with instance and index regs.
+            ((string-equal name "UUO-ERROR-SLOT-UNBOUND")
+             (let ((instance (gpr (op 1)))
+                   (index (gpr (op 2))))
+               (logior #xd4400000
+                       (ash (logior 6 (ash instance 3) (ash index 8) (ash 1 13)) 5))))
+
+            ;; Continuable unary UUOs: same encoding as non-continuable.
+            ;; The distinction is handled by the exception system based on
+            ;; whether the error can be restarted with a new value.
+            ((string-equal name "UUO-CERROR-REG-NOT-XTYPE")
+             (let ((reg (gpr (op 0)))
+                   (tag (imm-val (op 1))))
+               (logior #xd4400000
+                       (ash (logior 4 (ash reg 3) (ash tag 8)) 5))))
+
             (t
              (error "Unknown ARM64 instruction: ~s" form)))))))
 
