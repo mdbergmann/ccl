@@ -115,6 +115,8 @@
 (defarm64gpr temp2 x10)
 (defarm64gpr nfn temp2)
 (defarm64gpr temp1 x11)
+;;; next-method-context uses the same register as temp1 (like ARM32)
+(defarm64gpr next-method-context temp1)
 (defarm64gpr temp0 x12)
 (defarm64gpr arg_x x13)
 (defarm64gpr arg_y x14)

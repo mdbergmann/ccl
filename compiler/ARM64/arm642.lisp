@@ -4361,3 +4361,461 @@
                 (! unbind-interrupt-level)))
             (compiler-bug "unknown payback token ~s" r)))))))
 
+
+;;; ======================================================================
+;;; Chunk 8: Vinsn expansion, global FPR allocation, and lambda operator.
+;;; ======================================================================
+
+;;; ARM64 vinsn expansion.
+;;; Unlike ARM32 which pre-encodes instructions via vinsn-simplify-instruction,
+;;; ARM64 stores raw s-expression templates.  Resolution of register names,
+;;; parameter references, and :apply forms happens here at expansion time.
+;;; The resolved s-expressions are stored as lap-instruction opcodes;
+;;; binary encoding is deferred to arm64::arm64-finalize (Step 4).
+
+(defun arm642-expand-vinsns (header current &optional sections)
+  (declare (ignorable sections))
+  (do-dll-nodes (v header)
+    (if (%vinsn-label-p v)
+      (let* ((id (vinsn-label-id v)))
+        (if (or (typep id 'fixnum) (null id))
+          (when (or t (vinsn-label-refs v) (null id))
+            (setf (vinsn-label-info v) (arm64::emit-lap-label current v)))))
+      (arm642-expand-vinsn v current)))
+  ;;; Fix up var-eas from lregs to their values before lregs are freed.
+  (dolist (s *arm642-recorded-symbols*)
+    (let* ((var (car s))
+           (ea (var-ea var)))
+      (when (typep ea 'lreg)
+        (setf (var-ea var) (lreg-value ea))))))
+
+
+;;; Build alist mapping parameter name symbols to variable-part indices.
+;;; The ordering matches how %define-arm64-vinsn builds name-list:
+;;; args first, then temps, then non-hybrid results.
+(defun arm642-vinsn-param-names (template)
+  (let* ((result ())
+         (k -1))
+    (declare (fixnum k))
+    (flet ((add-names (specs)
+             (dolist (spec specs)
+               (when (consp spec)
+                 (push (cons (car spec) (incf k)) result)))))
+      (add-names (vinsn-template-argument-vreg-specs template))
+      (add-names (vinsn-template-temp-vreg-specs template))
+      ;; Non-hybrid results: those not already in args
+      (let* ((nhybrids (vinsn-template-nhybrids template))
+             (results (vinsn-template-result-vreg-specs template)))
+        (dolist (spec (nthcdr nhybrids results))
+          (when (consp spec)
+            (push (cons (car spec) (incf k)) result)))))
+    (nreverse result)))
+
+
+;;; Resolve a single operand form from a vinsn template body.
+;;; Handles: keywords (labels), symbols (params/registers/constants),
+;;; (N) fixnum pairs (variable-part refs), :apply, :@, :$, :@! forms.
+(defun arm642-resolve-operand (form vp param-names unique-labels)
+  (cond
+    ;; Keyword → local label reference
+    ((keywordp form)
+     (or (assq form unique-labels)
+         (compiler-bug "unknown vinsn label ~s" form)))
+    ;; Symbol → parameter name, register name, or evaluable constant
+    ((symbolp form)
+     (let ((entry (assq form param-names)))
+       (if entry
+         (svref vp (cdr entry))
+         (let ((regval (arm64::get-arm64-register form)))
+           (if regval
+             regval
+             ;; Try evaluating as a constant (e.g. arm64::node-size)
+             (if (and (boundp form) (constantp form))
+               (symbol-value form)
+               form))))))
+    ;; (N) single-element list with fixnum car → variable-part index
+    ((and (consp form) (null (cdr form)) (typep (car form) 'fixnum))
+     (svref vp (car form)))
+    ;; Non-cons atom (number, etc.) → as-is
+    ((atom form) form)
+    ;; (:apply fn args...) → evaluate function with resolved args
+    ((eq (car form) :apply)
+     (apply (cadr form)
+            (mapcar (lambda (f)
+                      (arm642-resolve-operand f vp param-names unique-labels))
+                    (cddr form))))
+    ;; Keyword-headed structural form (:@, :$, :@!, :lsl, :asr, etc.)
+    ((keywordp (car form))
+     (cons (car form)
+           (mapcar (lambda (f)
+                     (arm642-resolve-operand f vp param-names unique-labels))
+                   (cdr form))))
+    ;; Function application form
+    (t
+     (let* ((op-vals (cdr form))
+            (parsed-ops (make-list (length op-vals)))
+            (tail parsed-ops))
+       (declare (dynamic-extent parsed-ops)
+                (cons parsed-ops tail))
+       (dolist (op op-vals (apply (car form) parsed-ops))
+         (setq tail (cdr (rplaca tail
+                                 (arm642-resolve-operand
+                                  op vp param-names unique-labels)))))))))
+
+
+(defun arm642-expand-vinsn (vinsn current)
+  (let* ((template (vinsn-template vinsn))
+         (vp (vinsn-variable-parts vinsn))
+         (nvp (vinsn-template-nvp template))
+         (unique-labels ())
+         (notes (vinsn-notes vinsn))
+         (param-names (arm642-vinsn-param-names template)))
+    (declare (fixnum nvp))
+    ;; Resolve lregs in variable parts to their assigned values
+    (dotimes (i nvp)
+      (let* ((val (svref vp i)))
+        (when (typep val 'lreg)
+          (setf (svref vp i) (lreg-value val)))))
+    ;; Create unique labels for template-local labels
+    (dolist (name (vinsn-template-local-labels template))
+      (let* ((unique (cons name nil)))
+        (push unique unique-labels)
+        (arm64::make-lap-label unique)))
+    (labels
+      ((resolve (form)
+         (arm642-resolve-operand form vp param-names unique-labels))
+       (eval-predicate (f)
+         (case (car f)
+           (:pred (let* ((op-vals (cddr f))
+                         (parsed-ops (make-list (length op-vals)))
+                         (tail parsed-ops))
+                    (declare (dynamic-extent parsed-ops)
+                             (cons parsed-ops tail))
+                    (dolist (op op-vals (apply (cadr f) parsed-ops))
+                      (setq tail (cdr (rplaca tail (resolve op)))))))
+           (:not (not (eval-predicate (cadr f))))
+           (:or (dolist (pred (cadr f))
+                  (when (eval-predicate pred)
+                    (return t))))
+           (:and (dolist (pred (cadr f) t)
+                   (unless (eval-predicate pred)
+                     (return nil))))
+           (t (compiler-bug "Unknown predicate: ~s" f))))
+       (expand-insn-form (f)
+         ;; Resolve operands and emit as a lap-instruction.
+         ;; The mnemonic (car f) stays as a symbol; operands are resolved.
+         (let* ((resolved (cons (car f)
+                                (mapcar #'resolve (cdr f))))
+                (insn (arm64::make-lap-instruction resolved)))
+           (arm64::emit-lap-instruction-element insn current)))
+       (expand-form (f)
+         (if (keywordp f)
+           ;; Local label
+           (arm64::emit-lap-label current (assq f unique-labels))
+           (if (atom f)
+             (compiler-bug "Invalid form in vinsn body: ~s" f)
+             (cond
+               ;; Conditional form: (predicate subform1 subform2 ...)
+               ((consp (car f))
+                (when (eval-predicate (car f))
+                  (dolist (subform (cdr f))
+                    (expand-form subform))))
+               ;; Pseudo-ops
+               ((keywordp (car f))
+                (case (car f)
+                  ;; ARM64: :code and :data are no-ops (single section)
+                  ((:code :data) nil)
+                  (t nil)))
+               ;; Regular instruction
+               (t
+                (expand-insn-form f)))))))
+      (declare (dynamic-extent #'expand-form #'resolve #'expand-insn-form #'eval-predicate))
+      ;; Emit opening source notes
+      (when notes
+        (let* ((lab ()))
+          (dolist (note notes)
+            (unless (eq :close (vinsn-note-class note))
+              (when (eq :source-location-begin
+                        (vinsn-note-class note))
+                (push note *arm642-emitted-source-notes*))
+              (when (null lab)
+                (setq lab (arm64::make-lap-label note))
+                (arm64::emit-lap-label current note))
+              (setf (vinsn-note-address note) lab)))))
+      ;; Expand template body
+      (dolist (form (vinsn-template-body template))
+        (expand-form form))
+      ;; Emit closing source notes
+      (when notes
+        (let* ((lab ()))
+          (dolist (note notes)
+            (when (eq :close (vinsn-note-class note))
+              (when (null lab)
+                (setq lab (arm64::make-lap-label note))
+                (arm64::emit-lap-label current note))
+              (setf (vinsn-note-address note) lab)))))
+      ;; Free variable parts
+      (setf (vinsn-variable-parts vinsn) nil)
+      (when vp
+        (free-varparts-vector vp))))
+  current)
+
+
+;;; Global FPR allocation for ARM64.
+;;; ARM64 has 32 NEON/FP registers (d0-d31 for double, s0-s31 for single).
+;;; Unlike ARM32 which had limited non-volatile FPRs (d8-d15), ARM64
+;;; uses d0-d7 as volatile temps.  For global register allocation,
+;;; we use d8+ as non-volatile double-float registers.
+;;; With no GPR NVRs ($numarm64saveregs=0), FPR allocation is the only
+;;; global register optimization.
+(defun arm642-allocate-global-fprs (varsets)
+  (do* ((done nil)
+        (mask (1- (ash 1 16)))
+        (last-allocated-double -1)
+        (varsets varsets (cdr varsets))
+        (varset (caar varsets) (caar varsets)))
+       ((or done (null varsets)) (1+ last-allocated-double))
+    (let* ((need-double
+            (dolist (var varset)
+              (when (eq (var-declared-type var) 'double-float)
+                (return t)))))
+      (if need-double
+        (do* ((i 0 (1+ i))
+              (regmask (target-fpr-mask i hard-reg-class-fpr-mode-double)
+                       (target-fpr-mask i hard-reg-class-fpr-mode-double)))
+             ((> regmask mask) (setq done t))
+          (when (eql regmask (logand mask regmask))
+            (setq mask (logandc2 mask regmask))
+            (let* ((double (make-hard-fp-reg (+ (hard-regspec-value arm64::d8) i) hard-reg-class-fpr-mode-double))
+                   (single (make-hard-fp-reg (+ (hard-regspec-value arm64::s16) (ash i -1)) hard-reg-class-fpr-mode-single)))
+              (dolist (var varset)
+                (if (eq 'double-float (var-declared-type var))
+                  (setf (var-nvr var) double)
+                  (setf (var-nvr var) single)))
+              (setq last-allocated-double i)
+              (return))))
+        (do* ((i 0 (1+ i))
+              (regmask (target-fpr-mask i hard-reg-class-fpr-mode-single)
+                       (target-fpr-mask i hard-reg-class-fpr-mode-single)))
+             ((> regmask mask) (setq done t))
+          (when (eql regmask (logand mask regmask))
+            (setq mask (logandc2 mask regmask))
+            (let* ((single (make-hard-fp-reg (+ (hard-regspec-value arm64::s16) i) hard-reg-class-fpr-mode-single)))
+              (dolist (var varset)
+                (setf (var-nvr var) single))
+              (let* ((idx (ash (1+ i) -1)))
+                (when (> idx last-allocated-double)
+                  (setq last-allocated-double idx)))
+              (return))))))))
+
+
+;;; Lambda entry: the central operator for function entry sequences.
+;;; Key ARM64 differences from ARM32:
+;;; - $numarm64argregs = 3 (same as ARM32)
+;;; - $numarm64saveregs = 0 (no GPR NVRs)
+;;; - Nargs is in units of node-size (n * 8) since fixnumshift=0
+;;; - No encode-arm-immediate; use (< (ash n arm64::word-shift) 4096) for CMP imm
+;;; - No vpush-multiple-registers; push arg regs individually
+;;; - Constant pool offset is misc-data-offset + (idx+2)*word-size
+(defarm642 arm642-lambda lambda-list (seg vreg xfer req opt rest keys auxen body p2decls &optional code-note)
+  (with-arm64-local-vinsn-macros (seg vreg xfer)
+    (let* ((stack-consed-rest nil)
+           (lexprp (if (consp rest) (progn (setq rest (car rest)) t)))
+           (rest-var-bits (and rest (nx-var-bits rest)))
+           (rest-ignored-p (and rest (not lexprp) (%ilogbitp $vbitignore rest-var-bits)))
+           (want-stack-consed-rest (or rest-ignored-p
+                                       (and rest (not lexprp) (%ilogbitp $vbitdynamicextent rest-var-bits))))
+           (afunc *arm642-cur-afunc*)
+           (inherited-vars (afunc-inherited-vars afunc))
+           (fbits (afunc-bits afunc))
+           (methodp (%ilogbitp $fbitmethodp fbits))
+           (method-var (if methodp (pop req)))
+           (next-method-p (%ilogbitp $fbitnextmethp fbits))
+           (allow-other-keys-p (%car keys))
+           (hardopt (arm642-hard-opt-p opt))
+           (lap-p (when (and (consp (%car req)) (eq (%caar req) '&lap))
+                    (prog1 (%cdar req) (setq req nil))))
+           (num-inh (length inherited-vars))
+           (num-req (length req))
+           (num-opt (length (%car opt)))
+           (arg-regs nil)
+           optsupvloc
+           reglocatives
+           pregs
+           no-regs
+           (nsaved-fprs 0)
+           (*arm642-vstack* 0)
+           (*arm642-nfp-depth* *arm642-nfp-depth*)
+           (*arm642-nfp-vars* *arm642-nfp-vars*))
+      (declare (type (unsigned-byte 16) num-req num-opt num-inh))
+      (with-arm64-p2-declarations p2decls
+        (setq *arm642-inhibit-register-allocation*
+              (setq no-regs (%ilogbitp $fbitnoregs fbits)))
+        ;; ARM64: no GPR NVRs ($numarm64saveregs=0), so *arm642-nvrs* is nil
+        (multiple-value-setq (pregs reglocatives)
+          (nx2-afunc-allocate-global-registers afunc (unless no-regs *arm642-nvrs*)))
+        (@ (backend-get-next-label))    ; generic self-reference label, should be label #1
+        (when keys ;; Ensure keyvect is the first immediate
+          (backend-immediate-index (%cadr (%cdddr keys))))
+        (when code-note
+          (arm642-code-coverage-entry seg code-note))
+        (unless next-method-p
+          (setq method-var nil))
+
+        (let* ((rev-req (reverse req))
+               (rev-fixed (if inherited-vars (reverse (append inherited-vars req)) rev-req))
+               (num-fixed (length rev-fixed))
+               (rev-opt (reverse (car opt))))
+          (if (not (or opt rest keys))
+            (progn
+              (setq arg-regs (arm642-req-nargs-entry seg rev-fixed)))
+            (if (and (not (or hardopt rest keys))
+                     (<= num-opt $numarm64argregs))
+              (setq arg-regs (arm642-simple-opt-entry seg rev-opt rev-fixed))
+              (progn
+                ;; Check minimum argument count if non-zero.
+                ;; ARM64: CMP immediate range is 0..4095.
+                ;; nargs = n * node-size, so check (ash n word-shift) < 4096.
+                (when rev-fixed
+                  (let ((nargs-val (ash num-fixed arm64::word-shift)))
+                    (if (< nargs-val 4096)
+                      (! check-min-nargs num-fixed)
+                      (! check-min-nargs-large num-fixed))))
+                (unless (or rest keys)
+                  (let* ((max (+ num-fixed num-opt))
+                         (nargs-val (ash max arm64::word-shift)))
+                    (if (< nargs-val 4096)
+                      (! check-max-nargs max)
+                      (! check-max-nargs-large max))))
+                (unless lexprp
+                  (! save-lisp-context-variable))
+                ;; Initialize &optional args to NIL.  Vpushes argregs.
+                (when opt
+                  (! default-optionals (+ num-fixed num-opt)))
+                (when keys
+                  (unless opt
+                    (! vpush-argregs num-fixed))
+                  (let* ((keyvect (%car (%cdr (%cdr (%cdr (%cdr keys))))))
+                         (flags (the fixnum (logior (the fixnum (if rest 4 0))
+                                                    (the fixnum (if (or methodp allow-other-keys-p) 1 0)))))
+                         (nprev (+ num-fixed num-opt)))
+                    (declare (fixnum flags nprev))
+                    (backend-immediate-index keyvect)
+                    ;; ARM64: fixnumshift=0, so ash by target-fixnum-shift (=0) is identity
+                    (arm642-lri seg arm64::arg_y (ash flags *arm642-target-fixnum-shift*))
+                    (arm642-lri seg arm64::imm0 (ash nprev *arm642-target-fixnum-shift*))
+                    (! keyword-bind)))
+                (when rest
+                  (if lexprp
+                    (arm642-lexpr-entry seg num-fixed)
+                    (progn
+                      (if want-stack-consed-rest
+                        (setq stack-consed-rest t))
+                      (let* ((nprev (+ num-fixed num-opt))
+                             (simple (and (not keys) (= 0 nprev))))
+                        (declare (fixnum nprev))
+                        (unless simple
+                          (arm642-lri seg arm64::imm0 (ash nprev *arm642-target-fixnum-shift*)))
+                        (if stack-consed-rest
+                          (if simple
+                            (! stack-rest-arg)
+                            (if (and (not keys) (= 0 num-opt))
+                              (! req-stack-rest-arg)
+                              (! stack-cons-rest-arg)))
+                          (if simple
+                            (! heap-rest-arg)
+                            (if (and (not keys) (= 0 num-opt))
+                              (! req-heap-rest-arg)
+                              (! heap-cons-rest-arg))))))))
+                (when hardopt
+                  (arm642-lri seg arm64::imm0 (ash num-opt *arm642-target-fixnum-shift*))
+                  ;; .SPopt-supplied-p wants nargs adjusted by num-fixed
+                  (unless (= 0 num-fixed)
+                    (! scale-nargs num-fixed))
+                  (! opt-supplied-p))
+                (let* ((nwords-vpushed (+ num-fixed
+                                          num-opt
+                                          (if hardopt num-opt 0)
+                                          (if lexprp 0 (if rest 1 0))
+                                          (ash (length (%cadr keys)) 1)))
+                       (nbytes-vpushed (* nwords-vpushed *arm642-target-node-size*)))
+                  (declare (fixnum nwords-vpushed nbytes-vpushed))
+                  (arm642-set-vstack nbytes-vpushed)
+                  (setq optsupvloc (- *arm642-vstack* (* num-opt *arm642-target-node-size*)))))))
+          ;; Caller's context is saved; *arm642-vstack* is valid.
+          (! save-nfp)
+
+          (arm642-save-non-volatile-fprs seg nsaved-fprs)
+          ;; ARM64: no GPR NVRs to save ($numarm64saveregs=0), but handle
+          ;; reglocatives for constant-register bindings if any.
+          (unless (= 0 pregs)
+            (arm642-save-nvrs seg pregs)
+
+            (dolist (pair reglocatives)
+              (declare (cons pair))
+              (let* ((constant (car pair))
+                     (reg (cdr pair))
+                     (temp ($ arm64::temp2)))
+                (declare (cons constant))
+                (rplacd constant reg)
+                (let* ((idx (backend-immediate-index (car constant))))
+                  ;; ARM64: offset = misc-data-offset + (idx+2)*word-size
+                  (if (< (+ arm64::misc-data-offset (ash (+ idx 2) arm64::word-shift)) 32768)
+                    (! ref-constant temp idx)
+                    (with-imm-target () (idxreg :s32)
+                      (arm642-lri seg idxreg (+ arm64::misc-data-offset (ash (+ idx 2) arm64::word-shift)))
+                      (! ref-indexed-constant temp idxreg))))
+                (arm642-copy-register seg reg temp))))
+          (when method-var
+            (arm642-seq-bind-var seg method-var arm64::next-method-context))
+          ;; If arguments are still in arg_x/arg_y/arg_z from a "simple" entry,
+          ;; move them to their assigned registers.
+          (when arg-regs
+            (do* ((vars arg-regs (cdr vars))
+                  (arg-reg-num arm64::arg_z (1+ arg-reg-num)))
+                 ((null vars))
+              (declare (list vars) (fixnum arg-reg-num))
+              (let* ((var (car vars)))
+                (when var
+                  (let* ((reg (nx2-assign-register-var var)))
+                    (arm642-copy-register seg reg arg-reg-num)
+                    (setf (var-ea var) reg))))))
+          (setq *arm642-entry-vsp-saved-p* t)
+          (when stack-consed-rest
+            (arm642-open-undo $undostkblk))
+          (setq *arm642-entry-vstack* *arm642-vstack*)
+          (arm642-bind-lambda seg req opt rest keys auxen optsupvloc arg-regs lexprp inherited-vars))
+        (when method-var (arm642-heap-cons-next-method-var seg method-var))
+        (arm642-form seg vreg xfer body)
+        (arm642-close-lambda seg req opt rest keys auxen)
+        (dolist (v inherited-vars)
+          (arm642-close-var seg v))
+        (when method-var
+          (arm642-close-var seg method-var))
+        (let* ((bits 0))
+          (when (%i> num-inh (ldb $lfbits-numinh -1))
+            (setq num-inh (ldb $lfbits-numinh -1)))
+          (setq bits (dpb num-inh $lfbits-numinh bits))
+          (unless lap-p
+            (when (%i> num-req (ldb $lfbits-numreq -1))
+              (setq num-req (ldb $lfbits-numreq -1)))
+            (setq bits (dpb num-req $lfbits-numreq bits))
+            (when (%i> num-opt (ldb $lfbits-numopt -1))
+              (setq num-opt (ldb $lfbits-numopt -1)))
+            (setq bits (dpb num-opt $lfbits-numopt bits))
+            (when hardopt (setq bits (%ilogior (%ilsl $lfbits-optinit-bit 1) bits)))
+            (when rest (setq bits (%ilogior (if lexprp (%ilsl $lfbits-restv-bit 1) (%ilsl $lfbits-rest-bit 1)) bits)))
+            (when keys (setq bits (%ilogior (%ilsl $lfbits-keys-bit 1) bits)))
+            (when allow-other-keys-p (setq bits (%ilogior (%ilsl $lfbits-aok-bit 1) bits)))
+            (when (%ilogbitp $fbitnextmethargsp (afunc-bits afunc))
+              (if methodp
+                (setq bits (%ilogior (%ilsl $lfbits-nextmeth-with-args-bit 1) bits))
+                (let ((parent (afunc-parent afunc)))
+                  (when parent
+                    (setf (afunc-bits parent) (bitset $fbitnextmethargsp (afunc-bits parent)))))))
+            (when methodp
+              (setq bits (logior (ash 1 $lfbits-method-bit) bits))
+              (when next-method-p
+                (setq bits (logior (%ilsl $lfbits-nextmeth-bit 1) bits)))))
+          bits)))))
+

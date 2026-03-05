@@ -79,6 +79,17 @@
   (mov temp (:$ 0))
   (stp temp lr (:@! sp (:$ (- arm64::lisp-frame.size)))))
 
+;;; Save NFP (non-volatile FPR pointer).
+;;; On ARM64 with no GPR NVRs, this is essentially a no-op placeholder.
+;;; When NFP is actually used (for unboxed float temps), this would save
+;;; the native frame pointer. For now, it does nothing.
+(define-arm64-vinsn (save-nfp :predicatable) (()())
+  )
+
+;;; Restore NFP.  Like save-nfp, a placeholder for now.
+(define-arm64-vinsn (restore-nfp :predicatable) (()())
+  )
+
 ;;; Restore full lisp context (load vsp and lr from frame, pop frame).
 (define-arm64-vinsn (restore-full-lisp-context :lispcontext :pop :lrRestore :predicatable)
     (()
@@ -2154,6 +2165,36 @@
   (b.ls :ok)
   (uuo-error-wrong-nargs)
   :ok)
+
+;;; Large nargs check: for values that don't fit in CMP imm12 (>4095).
+;;; Load the comparison value into imm0 first.
+(define-arm64-vinsn check-min-nargs-large (()
+                                           ((min :u16const))
+                                           ((temp (:u64 #.arm64::imm0))))
+  (mov temp (:$ (:apply ash min arm64::word-shift)))
+  (cmp nargs temp)
+  (b.hs :ok)
+  (uuo-error-wrong-nargs)
+  :ok)
+
+(define-arm64-vinsn check-max-nargs-large (()
+                                           ((max :u16const))
+                                           ((temp (:u64 #.arm64::imm0))))
+  (mov temp (:$ (:apply ash max arm64::word-shift)))
+  (cmp nargs temp)
+  (b.ls :ok)
+  (uuo-error-wrong-nargs)
+  :ok)
+
+;;; default-optionals: call .SPdefault-optional-args subprim.
+;;; On entry, nargs has actual count; n is expected total (required + optional).
+;;; The subprim vpushes all argregs and initializes unfilled slots to nil.
+(define-arm64-vinsn (default-optionals :call :subprim) (()
+                                                        ((n :u16const))
+                                                        ((temp (:u64 #.arm64::imm0))))
+  (mov temp (:$ (:apply ash n arm64::word-shift)))
+  (ldr rt (:@ rcontext (:$ (:apply arm64::arm64-subprimitive-offset '.SPdefault-optional-args))))
+  (blr rt))
 
 
 ;;; --- Default optional arguments ---
