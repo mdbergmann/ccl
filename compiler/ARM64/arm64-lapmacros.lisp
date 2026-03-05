@@ -413,6 +413,31 @@
             `(progn ,@(forms))))))))
 
 
+;;; Push/pop on the value stack (vsp).
+;;; ARM64: node-size = 8.  Pre-decrement push, post-increment pop.
+(defarm64lapmacro vpush1 (src)
+  `(str ,src (:@! vsp (:$ (- arm64::node-size)))))
+
+(defarm64lapmacro vpop1 (dest)
+  `(ldr ,dest (:@+ vsp (:$ arm64::node-size))))
+
+;;; Jump to a subprimitive (no return).
+;;; Loads the subprim address from the TCR subprim table, then branches.
+(defarm64lapmacro spjump (spno)
+  (let* ((offset (arm64::arm64-subprimitive-offset spno)))
+    `(progn
+      (ldr rt (:@ rcontext (:$ ,offset)))
+      (br rt))))
+
+;;; Call a subprimitive (returns).
+;;; Loads the subprim address from the TCR subprim table, then calls.
+(defarm64lapmacro spcall (spno)
+  (let* ((offset (arm64::arm64-subprimitive-offset spno)))
+    `(progn
+      (ldr rt (:@ rcontext (:$ ,offset)))
+      (blr rt))))
+
+
 (provide "ARM64-LAPMACROS")
 
 ;;; end of arm64-lapmacros.lisp

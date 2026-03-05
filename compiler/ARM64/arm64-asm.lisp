@@ -1720,6 +1720,19 @@
                      (ash (gpr (op 3)) 10)
                      (ash (gpr (op 1)) 5)
                      (gpr (op 0))))
+            ((string-equal name "MSUB")
+             ;; MSUB rd, rn, rm, ra:  rd = ra - rn*rm
+             (logior #x9b008000
+                     (ash (gpr (op 2)) 16)
+                     (ash (gpr (op 3)) 10)
+                     (ash (gpr (op 1)) 5)
+                     (gpr (op 0))))
+            ((string-equal name "MNEG")
+             ;; MNEG rd, rn, rm = MSUB rd, rn, rm, xzr
+             (logior #x9b00fc00
+                     (ash (gpr (op 2)) 16)
+                     (ash (gpr (op 1)) 5)
+                     (gpr (op 0))))
             ((string-equal name "SMULH")
              (logior #x9b407c00
                      (ash (gpr (op 2)) 16)
@@ -1784,6 +1797,25 @@
                            (ash (gpr src) 16)
                            (ash (gpr rn) 5)
                            (gpr rd))))))
+
+            ;;=== ROR (rotate right — immediate and register) ===
+            ((string-equal name "ROR")
+             (let ((rd (op 0))
+                   (rn (op 1))
+                   (src (op 2)))
+               (if (is-imm src)
+                 ;; ROR rd, rn, #amt = EXTR rd, rn, rn, #amt
+                 (let ((amt (imm-val src)))
+                   (logior #x93c00000
+                           (ash (gpr rn) 16)
+                           (ash (logand amt 63) 10)
+                           (ash (gpr rn) 5)
+                           (gpr rd)))
+                 ;; ROR rd, rn, rm = RORV rd, rn, rm
+                 (logior #x9ac02c00
+                         (ash (gpr src) 16)
+                         (ash (gpr rn) 5)
+                         (gpr rd)))))
 
             ;;=== SXTB / SXTH / SXTW / UXTB / UXTH ===
             ((string-equal name "SXTB")
@@ -2089,6 +2121,12 @@
                    (index (gpr (op 2))))
                (logior #xd4400000
                        (ash (logior 6 (ash instance 3) (ash index 8) (ash 1 13)) 5))))
+
+            ;; uuo-tlb-too-small reg — TLB needs to grow
+            ((string-equal name "UUO-TLB-TOO-SMALL")
+             (let ((reg (gpr (op 0))))
+               (logior #xd4400000
+                       (ash (logior 5 (ash reg 3) (ash 2 8)) 5))))
 
             ;; Continuable unary UUOs: same encoding as non-continuable.
             ;; The distinction is handled by the exception system based on
