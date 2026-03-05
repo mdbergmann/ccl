@@ -1167,4 +1167,1213 @@
 
   )
 
+;;;=========================================================================
+;;; LAP infrastructure for ARM64
+;;; Structs, freelists, core DLL-based functions, instruction encoder,
+;;; and arm64-finalize.
+;;;=========================================================================
+
+;;; ---- Structs ----
+
+(defstruct (instruction-element (:include ccl::dll-node))
+  address
+  (size 0))
+
+(defstruct (lap-instruction (:include instruction-element (size 4))
+                            (:constructor %make-lap-instruction (source)))
+  source
+  (opcode 0))
+
+(defstruct (lap-label (:include instruction-element)
+                      (:constructor %%make-lap-label (name)))
+  name
+  refs)
+
+;;; ---- Special variables & freelists ----
+
+(defvar *lap-labels* nil)
+(defvar *lap-instruction-freelist* nil)
+(defvar *lap-label-freelist* nil)
+(defvar *arm64-constants* nil)
+
+;;; ---- Core DLL-based functions ----
+
+(defun make-lap-instruction (form)
+  (let* ((insn (ccl::alloc-dll-node *lap-instruction-freelist*)))
+    (if (typep insn 'lap-instruction)
+      (progn
+        (setf (lap-instruction-source insn) form
+              (lap-instruction-address insn) nil
+              (lap-instruction-opcode insn) 0)
+        insn)
+      (%make-lap-instruction form))))
+
+(defun emit-lap-instruction-element (insn seg)
+  (ccl::append-dll-node insn seg)
+  (let* ((addr (let* ((prev (ccl::dll-node-pred insn)))
+                 (if (eq prev seg)
+                   0
+                   (the fixnum (+ (the fixnum (instruction-element-address prev))
+                                  (the fixnum (instruction-element-size prev))))))))
+    (setf (instruction-element-address insn) addr))
+  insn)
+
+(defun %make-lap-label (name)
+  (let* ((lab (ccl::alloc-dll-node *lap-label-freelist*)))
+    (if lab
+      (progn
+        (setf (lap-label-address lab) nil
+              (lap-label-refs lab) nil
+              (lap-label-name lab) name)
+        lab)
+      (%%make-lap-label name))))
+
+(defun make-lap-label (name)
+  (let* ((lab (%make-lap-label name)))
+    (if (typep *lap-labels* 'hash-table)
+      (setf (gethash name *lap-labels*) lab)
+      (progn
+        (push lab *lap-labels*)
+        (if (> (length *lap-labels*) 255)
+          (let* ((hash (make-hash-table :size 512 :test #'eq)))
+            (dolist (l *lap-labels* (setq *lap-labels* hash))
+              (setf (gethash (lap-label-name l) hash) l))))))
+    lab))
+
+(defun find-lap-label (name)
+  (if (typep *lap-labels* 'hash-table)
+    (gethash name *lap-labels*)
+    (car (member name *lap-labels* :test #'eq :key #'lap-label-name))))
+
+(defun lap-note-label-reference (labx insn type)
+  (let* ((lab (or (find-lap-label labx)
+                  (make-lap-label labx))))
+    (push (cons insn type) (lap-label-refs lab))
+    lab))
+
+(defun emit-lap-label (seg name)
+  (let* ((lab (find-lap-label name)))
+    (if lab
+      (when (lap-label-emitted-p lab)
+        (error "Label ~s: multiply defined." name))
+      (setq lab (make-lap-label name)))
+    (emit-lap-instruction-element lab seg)))
+
+(defun lap-label-emitted-p (lab)
+  (not (null (lap-label-pred lab))))
+
+(defun lap-label-address (lab)
+  (instruction-element-address lab))
+
+(defmacro do-lap-labels ((lab &optional result) &body body)
+  (let* ((thunk-name (gensym))
+         (k (gensym))
+         (xlab (gensym)))
+    `(flet ((,thunk-name (,lab) ,@body))
+       (if (listp *lap-labels*)
+         (dolist (,xlab *lap-labels*)
+           (,thunk-name ,xlab))
+         (maphash #'(lambda (,k ,xlab)
+                      (declare (ignore ,k))
+                      (,thunk-name ,xlab))
+                  *lap-labels*))
+       ,result)))
+
+(defun section-size (seg)
+  (let* ((last (ccl::dll-node-pred seg)))
+    (if (eq last seg)
+      0
+      (the fixnum
+        (+ (the fixnum (instruction-element-address last))
+           (the fixnum (instruction-element-size last)))))))
+
+(defun set-element-addresses (start seg)
+  (ccl::do-dll-nodes (element seg start)
+    (setf (instruction-element-address element) start)
+    (incf start (instruction-element-size element))))
+
+(defun set-field-value (insn bytespec val)
+  (setf (lap-instruction-opcode insn)
+        (dpb val bytespec (lap-instruction-opcode insn))))
+
+(defun get-field-value (insn bytespec)
+  (ldb bytespec (lap-instruction-opcode insn)))
+
+;;; ---- Instruction encoder helpers ----
+
+(defun need-arm64-gpr-encoding (x)
+  "Return hardware GPR number 0-31.  Accepts integer 0-30, or symbol SP → 31."
+  (cond ((and (typep x 'fixnum) (<= 0 x 30)) x)
+        ((eq x 31) 31)
+        ((and (symbolp x)
+              (or (string-equal x "SP") (string-equal x "ZR")))
+         31)
+        (t (error "Not a valid ARM64 GPR encoding: ~s" x))))
+
+(defun need-arm64-dfpr-encoding (x)
+  "Double-float register: internal number 32-63 → hardware 0-31."
+  (cond ((and (typep x 'fixnum) (<= 32 x 63)) (- x 32))
+        ((and (typep x 'fixnum) (<= 0 x 31)) x)
+        (t (error "Not a valid ARM64 double-float register: ~s" x))))
+
+(defun need-arm64-sfpr-encoding (x)
+  "Single-float register: internal number 64-95 → hardware 0-31."
+  (cond ((and (typep x 'fixnum) (<= 64 x 95)) (- x 64))
+        ((and (typep x 'fixnum) (<= 0 x 31)) x)
+        (t (error "Not a valid ARM64 single-float register: ~s" x))))
+
+(defun need-arm64-fpr-encoding (x)
+  "Any FP register: 32-63 (double) or 64-95 (single) → hardware 0-31."
+  (cond ((and (typep x 'fixnum) (<= 32 x 63)) (- x 32))
+        ((and (typep x 'fixnum) (<= 64 x 95)) (- x 64))
+        ((and (typep x 'fixnum) (<= 0 x 31)) x)
+        (t (error "Not a valid ARM64 FPR encoding: ~s" x))))
+
+(defun arm64-gpr-p (x)
+  "True if x is a GPR number (0-30) or sp symbol."
+  (or (and (typep x 'fixnum) (<= 0 x 30))
+      (eql x 31)
+      (and (symbolp x)
+           (or (string-equal x "SP") (string-equal x "ZR")))))
+
+(defun arm64-dfpr-p (x)
+  (and (typep x 'fixnum) (<= 32 x 63)))
+
+(defun arm64-sfpr-p (x)
+  (and (typep x 'fixnum) (<= 64 x 95)))
+
+(defun arm64-fpr-p (x)
+  (and (typep x 'fixnum) (<= 32 x 95)))
+
+(defun encode-cond-keyword (kw)
+  "Map condition keyword (:eq :ne :hs :lo :mi :pl :vs :vc :hi :ls :ge :lt :gt :le) to 4-bit code."
+  (case kw
+    (:eq 0) (:ne 1)
+    (:cs 2) (:hs 2) (:cc 3) (:lo 3)
+    (:mi 4) (:pl 5) (:vs 6) (:vc 7)
+    (:hi 8) (:ls 9) (:ge 10) (:lt 11)
+    (:gt 12) (:le 13) (:al 14) (:nv 15)
+    (t (error "Unknown condition keyword: ~s" kw))))
+
+(defun parse-mnemonic-condition (mnemonic)
+  "If MNEMONIC is like B.EQ, return (values :B cond-code).  Otherwise NIL."
+  (let* ((name (string mnemonic))
+         (dot (position #\. name)))
+    (when dot
+      (let* ((base (subseq name 0 dot))
+             (cond-str (subseq name (1+ dot)))
+             (cond-val (lookup-arm64-condition-name cond-str)))
+        (when cond-val
+          (values (intern base (symbol-package mnemonic)) cond-val))))))
+
+;;; ---- Main instruction encoder ----
+
+(defun arm64-encode-instruction (form)
+  "Encode a resolved S-expression instruction FORM into a 32-bit opcode.
+   Returns (values opcode label-ref-type) where label-ref-type is
+   :B, :B-COND, :CBZ, :CBNZ, or NIL."
+  (when (null form) (return-from arm64-encode-instruction 0))
+  (let* ((mnemonic (car form))
+         (ops (cdr form)))
+    ;; Check for conditional branch: b.eq, b.ne, etc.
+    (multiple-value-bind (base-mnem cond-code)
+        (parse-mnemonic-condition mnemonic)
+      (when (and base-mnem (string-equal base-mnem "B"))
+        ;; Conditional branch: b.cond label
+        ;; Encoding: 0101 0100 [imm19] 0 [cond:4]
+        (return-from arm64-encode-instruction
+          (values (logior #x54000000 (logand cond-code #xf))
+                  :b-cond))))
+    (let* ((name (string mnemonic)))
+      (flet ((op (n) (nth n ops))
+             (gpr (x) (need-arm64-gpr-encoding x))
+             (dfpr (x) (need-arm64-dfpr-encoding x))
+             (sfpr (x) (need-arm64-sfpr-encoding x))
+             (fpr (x) (need-arm64-fpr-encoding x))
+             (imm-val (x)
+               (if (and (consp x) (eq (car x) :$))
+                 (cadr x)
+                 (error "Expected (:$ val), got ~s" x))))
+        (declare (inline op gpr dfpr sfpr fpr))
+        (macrolet ((is-imm (x) `(and (consp ,x) (eq (car ,x) :$)))
+                   (is-addr (x) `(and (consp ,x) (eq (car ,x) :@)))
+                   (is-pre (x) `(and (consp ,x) (eq (car ,x) :@!)))
+                   (is-post (x) `(and (consp ,x) (eq (car ,x) :@+)))
+                   (is-shift (x k) `(and (consp ,x) (eq (car ,x) ,k)))
+                   (is-reg-pair-next (x) `(and (consp ,x) (eq (car ,x) :+))))
+          (cond
+            ;;=== NOP ===
+            ((string-equal name "NOP")
+             #xd503201f)
+
+            ;;=== HLT ===
+            ((string-equal name "HLT")
+             (let ((imm16 (imm-val (op 0))))
+               (logior #xd4400000 (ash (logand imm16 #xffff) 5))))
+
+            ;;=== RET ===
+            ((string-equal name "RET")
+             (if ops
+               (logior #xd65f0000 (ash (gpr (op 0)) 5))
+               #xd65f03c0))  ; ret x30
+
+            ;;=== BR / BLR ===
+            ((string-equal name "BR")
+             (logior #xd61f0000 (ash (gpr (op 0)) 5)))
+            ((string-equal name "BLR")
+             (logior #xd63f0000 (ash (gpr (op 0)) 5)))
+
+            ;;=== B (unconditional) ===
+            ((string-equal name "B")
+             ;; B label — offset filled in by finalize
+             ;; Check for conditional: (b (:? cond) label) or (b (:~ cond) label)
+             (if (and (consp (op 0))
+                      (or (eq (car (op 0)) :?)
+                          (eq (car (op 0)) :~)))
+               ;; Conditional branch
+               (let* ((cond-form (op 0))
+                      (cond-key (car cond-form))
+                      (cond-name (cadr cond-form))
+                      (cc (need-arm64-condition-name cond-name)))
+                 (when (eq cond-key :~)
+                   (setq cc (logxor cc 1)))
+                 (values (logior #x54000000 (logand cc #xf))
+                         :b-cond))
+               (values #x14000000 :b)))
+
+            ;;=== BL ===
+            ((string-equal name "BL")
+             (values #x94000000 :b))
+
+            ;;=== CBZ / CBNZ ===
+            ((string-equal name "CBZ")
+             (let ((rt (gpr (op 0))))
+               (values (logior #xb4000000 rt) :cbz)))
+            ((string-equal name "CBNZ")
+             (let ((rt (gpr (op 0))))
+               (values (logior #xb5000000 rt) :cbnz)))
+
+            ;;=== ADR ===
+            ((string-equal name "ADR")
+             (let ((rd (gpr (op 0))))
+               (values (logior #x10000000 rd) :adr)))
+
+            ;;=== MOV ===
+            ((string-equal name "MOV")
+             (let ((dst (op 0))
+                   (src (op 1)))
+               (cond
+                 ;; mov rd, (:$ imm) — try movz for small non-negative
+                 ((is-imm src)
+                  (let ((val (imm-val src)))
+                    (cond
+                      ;; Try logical immediate encoding (for mov = ORR Xd, XZR, #imm)
+                      ((and (not (zerop val))
+                            (not (= (ldb (byte 64 0) val) #xffffffffffffffff))
+                            (encode-logical-immediate val))
+                       (let ((enc (encode-logical-immediate val)))
+                         (logior #xb2000000
+                                 (ash (ldb (byte 1 12) enc) 22)  ; N
+                                 (ash (ldb (byte 6 6) enc) 16)   ; immr
+                                 (ash (ldb (byte 6 0) enc) 10)   ; imms
+                                 (ash 31 5)                       ; Rn = XZR
+                                 (gpr dst))))
+                      ;; Small non-negative: use movz
+                      ((and (>= val 0) (< val #x10000))
+                       (logior #xd2800000 (ash (logand val #xffff) 5) (gpr dst)))
+                      ;; Small negative: use movn
+                      ((and (< val 0) (>= val -65536))
+                       (logior #x92800000
+                               (ash (logand (lognot val) #xffff) 5)
+                               (gpr dst)))
+                      (t (error "MOV immediate ~s too large for single instruction" val)))))
+                 ;; mov rd, rn — ORR Xd, XZR, Xn
+                 ((arm64-gpr-p src)
+                  (logior #xaa0003e0 (ash (gpr src) 16) (gpr dst)))
+                 (t (error "Invalid MOV operands: ~s" form)))))
+
+            ;;=== MOVZ ===
+            ((string-equal name "MOVZ")
+             (let* ((rd (gpr (op 0)))
+                    (imm-form (op 1))
+                    (val (imm-val imm-form))
+                    (shift 0))
+               ;; Optional shift: (:lsl 16), (:lsl 32), (:lsl 48)
+               (when (op 2)
+                 (let ((s (op 2)))
+                   (cond ((is-shift s :lsl)
+                          (setq shift (truncate (cadr s) 16)))
+                         ((and (typep s 'fixnum) (member s '(0 16 32 48)))
+                          (setq shift (truncate s 16)))
+                         (t (error "Invalid MOVZ shift: ~s" s)))))
+               (logior #xd2800000
+                       (ash (logand shift 3) 21)
+                       (ash (logand val #xffff) 5)
+                       rd)))
+
+            ;;=== MOVK ===
+            ((string-equal name "MOVK")
+             (let* ((rd (gpr (op 0)))
+                    (imm-form (op 1))
+                    (val (imm-val imm-form))
+                    (shift 0))
+               (when (op 2)
+                 (let ((s (op 2)))
+                   (cond ((is-shift s :lsl)
+                          (setq shift (truncate (cadr s) 16)))
+                         ((and (typep s 'fixnum) (member s '(0 16 32 48)))
+                          (setq shift (truncate s 16)))
+                         (t (error "Invalid MOVK shift: ~s" s)))))
+               (logior #xf2800000
+                       (ash (logand shift 3) 21)
+                       (ash (logand val #xffff) 5)
+                       rd)))
+
+            ;;=== ADD / SUB / ADDS / SUBS / CMN / CMP / NEG / NEGS ===
+            ((or (string-equal name "ADD") (string-equal name "SUB")
+                 (string-equal name "ADDS") (string-equal name "SUBS")
+                 (string-equal name "CMN") (string-equal name "CMP")
+                 (string-equal name "NEG") (string-equal name "NEGS"))
+             (let* ((is-sub (or (string-equal name "SUB")
+                                (string-equal name "SUBS")
+                                (string-equal name "CMP")
+                                (string-equal name "NEG")
+                                (string-equal name "NEGS")))
+                    (sets-flags (or (string-equal name "ADDS")
+                                    (string-equal name "SUBS")
+                                    (string-equal name "CMP")
+                                    (string-equal name "CMN")
+                                    (string-equal name "NEGS")))
+                    (is-cmp-cmn (or (string-equal name "CMP")
+                                     (string-equal name "CMN")))
+                    (is-neg (or (string-equal name "NEG")
+                                (string-equal name "NEGS"))))
+               (cond
+                 ;; CMP rn, (:$ imm) or CMP rn, rm
+                 (is-cmp-cmn
+                  (let ((rn (op 0))
+                        (src (op 1)))
+                    (if (is-imm src)
+                      ;; CMP/CMN rn, #imm — addsub-imm with rd=xzr
+                      (let ((imm (imm-val src)))
+                        (logior (if is-sub #xf1000000 #xb1000000)
+                                (ash (logand imm #xfff) 10)
+                                (ash (gpr rn) 5)
+                                31))  ; Rd = XZR(31)
+                      ;; CMP/CMN rn, rm — addsub-shift with rd=xzr
+                      (logior (if is-sub #xeb000000 #xab000000)
+                              (ash (gpr src) 16)
+                              (ash (gpr rn) 5)
+                              31))))
+                 ;; NEG/NEGS rd, rm  = SUB/SUBS rd, xzr, rm
+                 (is-neg
+                  (let ((rd (op 0))
+                        (rm (op 1)))
+                    (logior (if sets-flags #xeb000000 #xcb000000)
+                            (ash (gpr rm) 16)
+                            (ash 31 5)  ; Rn = XZR
+                            (gpr rd))))
+                 ;; ADD/SUB/ADDS/SUBS rd, rn, (:$ imm)  or  rd, rn, rm [shift]
+                 (t
+                  (let ((rd (op 0))
+                        (rn (op 1))
+                        (src2 (op 2)))
+                    (cond
+                      ;; Immediate form
+                      ((is-imm src2)
+                       (let ((imm (imm-val src2)))
+                         (logior (cond ((and is-sub sets-flags) #xf1000000)
+                                       (is-sub                  #xd1000000)
+                                       (sets-flags              #xb1000000)
+                                       (t                       #x91000000))
+                                 (ash (logand imm #xfff) 10)
+                                 (ash (gpr rn) 5)
+                                 (gpr rd))))
+                      ;; Register with optional shift: rm or (:lsl rm (:$ amt))
+                      ((is-shift src2 :lsl)
+                       (let ((rm (cadr src2))
+                             (amt (imm-val (caddr src2))))
+                         (logior (cond ((and is-sub sets-flags) #xeb000000)
+                                       (is-sub                  #xcb000000)
+                                       (sets-flags              #xab000000)
+                                       (t                       #x8b000000))
+                                 (ash (gpr rm) 16)
+                                 (ash (logand amt #x3f) 10)
+                                 (ash (gpr rn) 5)
+                                 (gpr rd))))
+                      ;; Plain register
+                      (t
+                       (logior (cond ((and is-sub sets-flags) #xeb000000)
+                                      (is-sub                  #xcb000000)
+                                      (sets-flags              #xab000000)
+                                      (t                       #x8b000000))
+                               (ash (gpr src2) 16)
+                               (ash (gpr rn) 5)
+                               (gpr rd)))))))))
+
+            ;;=== AND / ORR / EOR / TST / BIC / ORN / MVN / ANDS / BICS ===
+            ((or (string-equal name "AND") (string-equal name "ORR")
+                 (string-equal name "EOR") (string-equal name "TST")
+                 (string-equal name "BIC") (string-equal name "ORN")
+                 (string-equal name "MVN") (string-equal name "ANDS")
+                 (string-equal name "BICS") (string-equal name "EON"))
+             (let* ((is-tst (string-equal name "TST"))
+                    (is-mvn (string-equal name "MVN")))
+               (cond
+                 ;; MVN rd, rm  = ORN rd, xzr, rm
+                 (is-mvn
+                  (let ((rd (op 0))
+                        (rm (op 1)))
+                    (logior #xaa200000
+                            (ash (gpr rm) 16)
+                            (ash 31 5)
+                            (gpr rd))))
+                 ;; TST rn, (:$ imm) or TST rn, rm
+                 (is-tst
+                  (let ((rn (op 0))
+                        (src (op 1)))
+                    (if (is-imm src)
+                      ;; TST = ANDS xzr, rn, #imm
+                      (let* ((imm (imm-val src))
+                             (enc (encode-logical-immediate imm)))
+                        (unless enc
+                          (error "Cannot encode TST immediate ~s" imm))
+                        (logior #xea000000
+                                (ash (ldb (byte 1 12) enc) 22)
+                                (ash (ldb (byte 6 6) enc) 16)
+                                (ash (ldb (byte 6 0) enc) 10)
+                                (ash (gpr rn) 5)
+                                31))
+                      ;; TST rn, rm  = ANDS xzr, rn, rm
+                      (logior #xea000000
+                              (ash (gpr src) 16)
+                              (ash (gpr rn) 5)
+                              31))))
+                 ;; Regular: AND/ORR/EOR/BIC/ORN/ANDS/BICS/EON rd, rn, src
+                 (t
+                  (let ((rd (op 0))
+                        (rn (op 1))
+                        (src2 (op 2)))
+                    (if (is-imm src2)
+                      ;; Logical immediate
+                      (let* ((imm (imm-val src2))
+                             (enc (encode-logical-immediate imm))
+                             (base (cond ((string-equal name "AND")  #x92000000)
+                                         ((string-equal name "ORR")  #xb2000000)
+                                         ((string-equal name "EOR")  #xd2000000)
+                                         ((string-equal name "ANDS") #xf2000000)
+                                         (t (error "~s does not support logical immediate" name)))))
+                        (unless enc
+                          (error "Cannot encode logical immediate ~s for ~s" imm name))
+                        (logior base
+                                (ash (ldb (byte 1 12) enc) 22)
+                                (ash (ldb (byte 6 6) enc) 16)
+                                (ash (ldb (byte 6 0) enc) 10)
+                                (ash (gpr rn) 5)
+                                (gpr rd)))
+                      ;; Logical shifted register
+                      (let* ((rm-enc 0)
+                             (shift-amt 0)
+                             (shift-type 0))  ; 0=LSL, 1=LSR, 2=ASR
+                        (cond
+                          ((is-shift src2 :lsl)
+                           (setq rm-enc (gpr (cadr src2))
+                                 shift-amt (imm-val (caddr src2))
+                                 shift-type 0))
+                          ((is-shift src2 :lsr)
+                           (setq rm-enc (gpr (cadr src2))
+                                 shift-amt (imm-val (caddr src2))
+                                 shift-type 1))
+                          ((is-shift src2 :asr)
+                           (setq rm-enc (gpr (cadr src2))
+                                 shift-amt (imm-val (caddr src2))
+                                 shift-type 2))
+                          (t
+                           (setq rm-enc (gpr src2))))
+                        (let ((base (cond ((string-equal name "AND")  #x8a000000)
+                                          ((string-equal name "ORR")  #xaa000000)
+                                          ((string-equal name "EOR")  #xca000000)
+                                          ((string-equal name "BIC")  #x8a200000)
+                                          ((string-equal name "ORN")  #xaa200000)
+                                          ((string-equal name "EON")  #xca200000)
+                                          ((string-equal name "ANDS") #xea000000)
+                                          ((string-equal name "BICS") #xea200000)
+                                          (t (error "Unknown logical op ~s" name)))))
+                          (logior base
+                                  (ash shift-type 22)
+                                  (ash rm-enc 16)
+                                  (ash (logand shift-amt #x3f) 10)
+                                  (ash (gpr rn) 5)
+                                  (gpr rd)))))))))))
+
+            ;;=== MUL / MADD / SMULH / UMULH ===
+            ((string-equal name "MUL")
+             ;; MUL rd, rn, rm  = MADD rd, rn, rm, xzr
+             (logior #x9b007c00
+                     (ash (gpr (op 2)) 16)
+                     (ash (gpr (op 1)) 5)
+                     (gpr (op 0))))
+            ((string-equal name "MADD")
+             ;; MADD rd, rn, rm, ra
+             (logior #x9b000000
+                     (ash (gpr (op 2)) 16)
+                     (ash (gpr (op 3)) 10)
+                     (ash (gpr (op 1)) 5)
+                     (gpr (op 0))))
+            ((string-equal name "SMULH")
+             (logior #x9b407c00
+                     (ash (gpr (op 2)) 16)
+                     (ash (gpr (op 1)) 5)
+                     (gpr (op 0))))
+            ((string-equal name "UMULH")
+             ;; UMULH Xd, Xn, Xm: 1001 1011 110 Rm 0 11111 Rn Rd
+             (logior #x9bc07c00
+                     (ash (gpr (op 2)) 16)
+                     (ash (gpr (op 1)) 5)
+                     (gpr (op 0))))
+
+            ;;=== SDIV / UDIV ===
+            ((string-equal name "SDIV")
+             (logior #x9ac00c00
+                     (ash (gpr (op 2)) 16)
+                     (ash (gpr (op 1)) 5)
+                     (gpr (op 0))))
+            ((string-equal name "UDIV")
+             (logior #x9ac00800
+                     (ash (gpr (op 2)) 16)
+                     (ash (gpr (op 1)) 5)
+                     (gpr (op 0))))
+
+            ;;=== LSL / LSR / ASR (immediate and register) ===
+            ((or (string-equal name "LSL") (string-equal name "LSR")
+                 (string-equal name "ASR"))
+             (let ((rd (op 0))
+                   (rn (op 1))
+                   (src (op 2)))
+               (if (is-imm src)
+                 ;; Immediate: alias for UBFM/SBFM
+                 (let ((amt (imm-val src)))
+                   (cond
+                     ((string-equal name "LSL")
+                      ;; LSL rd, rn, #amt = UBFM rd, rn, #(64-amt), #(63-amt)
+                      (let ((immr (logand (- 64 amt) 63))
+                            (imms (- 63 amt)))
+                        (logior #xd3400000
+                                (ash immr 16)
+                                (ash (logand imms #x3f) 10)
+                                (ash (gpr rn) 5)
+                                (gpr rd))))
+                     ((string-equal name "LSR")
+                      ;; LSR rd, rn, #amt = UBFM rd, rn, #amt, #63
+                      (logior #xd340fc00
+                              (ash (logand amt #x3f) 16)
+                              (ash (gpr rn) 5)
+                              (gpr rd)))
+                     ((string-equal name "ASR")
+                      ;; ASR rd, rn, #amt = SBFM rd, rn, #amt, #63
+                      (logior #x9340fc00
+                              (ash (logand amt #x3f) 16)
+                              (ash (gpr rn) 5)
+                              (gpr rd)))))
+                 ;; Register: LSLV/LSRV/ASRV
+                 (let ((op2-code (cond ((string-equal name "LSL") #x2000)
+                                       ((string-equal name "LSR") #x2400)
+                                       (t                         #x2800))))
+                   (logior #x9ac00000
+                           op2-code
+                           (ash (gpr src) 16)
+                           (ash (gpr rn) 5)
+                           (gpr rd))))))
+
+            ;;=== SXTB / SXTH / SXTW / UXTB / UXTH ===
+            ((string-equal name "SXTB")
+             ;; SBFM Xd, Xn, #0, #7
+             (logior #x93400000
+                     (ash 7 10)
+                     (ash (gpr (op 1)) 5)
+                     (gpr (op 0))))
+            ((string-equal name "SXTH")
+             ;; SBFM Xd, Xn, #0, #15
+             (logior #x93400000
+                     (ash 15 10)
+                     (ash (gpr (op 1)) 5)
+                     (gpr (op 0))))
+            ((string-equal name "SXTW")
+             ;; SBFM Xd, Xn, #0, #31
+             (logior #x93400000
+                     (ash 31 10)
+                     (ash (gpr (op 1)) 5)
+                     (gpr (op 0))))
+            ((string-equal name "UXTB")
+             ;; UBFM Wd, Wn, #0, #7  (32-bit form)
+             (logior #x53000000
+                     (ash 7 10)
+                     (ash (gpr (op 1)) 5)
+                     (gpr (op 0))))
+            ((string-equal name "UXTH")
+             ;; UBFM Wd, Wn, #0, #15  (32-bit form)
+             (logior #x53000000
+                     (ash 15 10)
+                     (ash (gpr (op 1)) 5)
+                     (gpr (op 0))))
+
+            ;;=== LDR / LDUR / LDR (scaled positive offset or register) ===
+            ((string-equal name "LDR")
+             (arm64-encode-load-store form name ops #t 8 #b11))
+            ((string-equal name "LDUR")
+             (arm64-encode-ldur-stur form name ops #t 8 #b11))
+            ((string-equal name "STR")
+             (arm64-encode-load-store form name ops nil 8 #b11))
+            ((string-equal name "STUR")
+             (arm64-encode-ldur-stur form name ops nil 8 #b11))
+            ((string-equal name "LDRB")
+             (arm64-encode-load-store form name ops #t 1 #b00))
+            ((string-equal name "LDRH")
+             (arm64-encode-load-store form name ops #t 2 #b01))
+            ((string-equal name "LDRSB")
+             ;; LDRSB (64-bit) — size=00, opc=10
+             (arm64-encode-load-store form name ops #t 1 #b00 #b10))
+            ((string-equal name "LDRSH")
+             ;; LDRSH (64-bit) — size=01, opc=10
+             (arm64-encode-load-store form name ops #t 2 #b01 #b10))
+            ((string-equal name "LDRSW")
+             ;; LDRSW — size=10, opc=10
+             (arm64-encode-load-store form name ops #t 4 #b10 #b10))
+            ((string-equal name "STRB")
+             (arm64-encode-load-store form name ops nil 1 #b00))
+            ((string-equal name "STRH")
+             (arm64-encode-load-store form name ops nil 2 #b01))
+
+            ;;=== LDP / STP ===
+            ((or (string-equal name "LDP") (string-equal name "STP"))
+             (arm64-encode-ldp-stp form name ops))
+
+            ;;=== CSEL / CSINC / CSINV / CSNEG / CSET ===
+            ((string-equal name "CSEL")
+             ;; CSEL Xd, Xn, Xm, cond
+             (let ((cond-val (encode-cond-keyword (op 3))))
+               (logior #x9a800000
+                       (ash (gpr (op 2)) 16)
+                       (ash cond-val 12)
+                       (ash (gpr (op 1)) 5)
+                       (gpr (op 0)))))
+            ((string-equal name "CSINC")
+             (let ((cond-val (encode-cond-keyword (op 3))))
+               (logior #x9a800400
+                       (ash (gpr (op 2)) 16)
+                       (ash cond-val 12)
+                       (ash (gpr (op 1)) 5)
+                       (gpr (op 0)))))
+            ((string-equal name "CSINV")
+             (let ((cond-val (encode-cond-keyword (op 3))))
+               (logior #xda800000
+                       (ash (gpr (op 2)) 16)
+                       (ash cond-val 12)
+                       (ash (gpr (op 1)) 5)
+                       (gpr (op 0)))))
+            ((string-equal name "CSNEG")
+             (let ((cond-val (encode-cond-keyword (op 3))))
+               (logior #xda800400
+                       (ash (gpr (op 2)) 16)
+                       (ash cond-val 12)
+                       (ash (gpr (op 1)) 5)
+                       (gpr (op 0)))))
+            ((string-equal name "CSET")
+             ;; CSET Xd, cond  = CSINC Xd, XZR, XZR, invert(cond)
+             (let ((cond-val (logxor (encode-cond-keyword (op 1)) 1)))
+               (logior #x9a9f07e0
+                       (ash cond-val 12)
+                       (gpr (op 0)))))
+
+            ;;=== Floating-point arithmetic ===
+            ((string-equal name "FADD")
+             (arm64-encode-fp-arith ops #x1e602800))
+            ((string-equal name "FSUB")
+             (arm64-encode-fp-arith ops #x1e603800))
+            ((string-equal name "FMUL")
+             (arm64-encode-fp-arith ops #x1e600800))
+            ((string-equal name "FDIV")
+             (arm64-encode-fp-arith ops #x1e601800))
+
+            ;;=== FP unary ===
+            ((string-equal name "FNEG")
+             (arm64-encode-fp-unary ops #x1e614000))
+            ((string-equal name "FSQRT")
+             (arm64-encode-fp-unary ops #x1e61c000))
+            ((string-equal name "FABS")
+             (arm64-encode-fp-unary ops #x1e60c000))
+
+            ;;=== FCMP ===
+            ((string-equal name "FCMP")
+             (let ((fn (op 0))
+                   (fm (op 1)))
+               (cond
+                 ;; Both double FP regs
+                 ((and (arm64-dfpr-p fn) (arm64-dfpr-p fm))
+                  (logior #x1e602000
+                          (ash (dfpr fm) 16)
+                          (ash (dfpr fn) 5)))
+                 ;; Both single FP regs
+                 ((and (arm64-sfpr-p fn) (arm64-sfpr-p fm))
+                  (logior #x1e202000
+                          (ash (sfpr fm) 16)
+                          (ash (sfpr fn) 5)))
+                 ;; fcmp dn, #0.0
+                 ((and (arm64-dfpr-p fn)
+                       (or (eql fm 0) (eql fm 0.0d0)))
+                  (logior #x1e602008
+                          (ash (dfpr fn) 5)))
+                 ((and (arm64-sfpr-p fn)
+                       (or (eql fm 0) (eql fm 0.0)))
+                  (logior #x1e202008
+                          (ash (sfpr fn) 5)))
+                 (t (error "Invalid FCMP operands: ~s" form)))))
+
+            ;;=== FMOV ===
+            ((string-equal name "FMOV")
+             (let ((dst (op 0))
+                   (src (op 1)))
+               (cond
+                 ;; fmov dn, dm
+                 ((and (arm64-dfpr-p dst) (arm64-dfpr-p src))
+                  (logior #x1e604000
+                          (ash (dfpr src) 5)
+                          (dfpr dst)))
+                 ;; fmov sn, sm
+                 ((and (arm64-sfpr-p dst) (arm64-sfpr-p src))
+                  (logior #x1e204000
+                          (ash (sfpr src) 5)
+                          (sfpr dst)))
+                 ;; fmov dn, xn (gpr→double)
+                 ((and (arm64-dfpr-p dst) (arm64-gpr-p src))
+                  (logior #x9e670000
+                          (ash (gpr src) 5)
+                          (dfpr dst)))
+                 ;; fmov xn, dn (double→gpr)
+                 ((and (arm64-gpr-p dst) (arm64-dfpr-p src))
+                  (logior #x9e660000
+                          (ash (dfpr src) 5)
+                          (gpr dst)))
+                 ;; fmov sn, wn (gpr→single, W-reg form)
+                 ((and (arm64-sfpr-p dst) (arm64-gpr-p src))
+                  (logior #x1e270000
+                          (ash (gpr src) 5)
+                          (sfpr dst)))
+                 ;; fmov wn, sn (single→gpr, W-reg form)
+                 ((and (arm64-gpr-p dst) (arm64-sfpr-p src))
+                  (logior #x1e260000
+                          (ash (sfpr src) 5)
+                          (gpr dst)))
+                 (t (error "Invalid FMOV operands: ~s" form)))))
+
+            ;;=== SCVTF ===
+            ((string-equal name "SCVTF")
+             (let ((dst (op 0))
+                   (src (op 1)))
+               (cond
+                 ;; scvtf dn, xn
+                 ((and (arm64-dfpr-p dst) (arm64-gpr-p src))
+                  (logior #x9e620000
+                          (ash (gpr src) 5)
+                          (dfpr dst)))
+                 ;; scvtf sn, xn  (using 64-bit source)
+                 ((and (arm64-sfpr-p dst) (arm64-gpr-p src))
+                  (logior #x9e220000
+                          (ash (gpr src) 5)
+                          (sfpr dst)))
+                 (t (error "Invalid SCVTF operands: ~s" form)))))
+
+            ;;=== FCVTZS ===
+            ((string-equal name "FCVTZS")
+             (let ((dst (op 0))
+                   (src (op 1)))
+               (cond
+                 ;; fcvtzs xn, dn
+                 ((and (arm64-gpr-p dst) (arm64-dfpr-p src))
+                  (logior #x9e780000
+                          (ash (dfpr src) 5)
+                          (gpr dst)))
+                 ;; fcvtzs xn, sn
+                 ((and (arm64-gpr-p dst) (arm64-sfpr-p src))
+                  (logior #x9e380000
+                          (ash (sfpr src) 5)
+                          (gpr dst)))
+                 (t (error "Invalid FCVTZS operands: ~s" form)))))
+
+            ;;=== FCVT (between float precisions) ===
+            ((string-equal name "FCVT")
+             (let ((dst (op 0))
+                   (src (op 1)))
+               (cond
+                 ;; fcvt dn, sn (single→double)
+                 ((and (arm64-dfpr-p dst) (arm64-sfpr-p src))
+                  (logior #x1e22c000
+                          (ash (sfpr src) 5)
+                          (dfpr dst)))
+                 ;; fcvt sn, dn (double→single)
+                 ((and (arm64-sfpr-p dst) (arm64-dfpr-p src))
+                  (logior #x1e624000
+                          (ash (dfpr src) 5)
+                          (sfpr dst)))
+                 (t (error "Invalid FCVT operands: ~s" form)))))
+
+            (t
+             (error "Unknown ARM64 instruction: ~s" form)))))))
+
+
+;;; ---- Load/store encoding helpers ----
+
+(defun arm64-encode-load-store (form name ops is-load scale size-bits
+                                &optional (opc-override nil))
+  "Encode LDR/STR family with (:@ base (:$ off)) or (:@ base index) addressing."
+  (declare (ignore name))
+  (let* ((rt-raw (first ops))
+         (addr (second ops))
+         (is-fpr (arm64-fpr-p rt-raw))
+         (rt (if is-fpr (need-arm64-fpr-encoding rt-raw) (need-arm64-gpr-encoding rt-raw)))
+         (opc (or opc-override (if is-load (if is-fpr #b01 #b01) #b00))))
+    ;; Determine addressing mode
+    (cond
+      ;; (:@ base (:$ offset)) — unsigned offset
+      ((and (consp addr) (eq (car addr) :@)
+            (consp (caddr addr)) (eq (car (caddr addr)) :$))
+       (let* ((base (need-arm64-gpr-encoding (cadr addr)))
+              (offset (cadr (caddr addr)))
+              (v-bit (if is-fpr 1 0)))
+         ;; Unsigned offset: try scaled form first
+         (if (and (>= offset 0) (zerop (mod offset scale)))
+           (let ((scaled-off (truncate offset scale)))
+             (if (<= scaled-off #xfff)
+               ;; LDR (unsigned offset): size[31:30] 11 V[26] 01 imm12[21:10] Rn[9:5] Rt[4:0]
+               (logior (ash size-bits 30)
+                       #x39000000
+                       (ash v-bit 26)
+                       (ash opc 22)
+                       (ash (logand scaled-off #xfff) 10)
+                       (ash base 5)
+                       rt)
+               ;; Offset too large for unsigned: use unscaled
+               (arm64-encode-unscaled-offset size-bits v-bit opc base offset rt)))
+           ;; Not naturally aligned or negative: use unscaled (LDUR/STUR form)
+           (arm64-encode-unscaled-offset size-bits v-bit opc base offset rt))))
+      ;; (:@ base index) — register offset (no shift, no extend)
+      ((and (consp addr) (eq (car addr) :@)
+            (not (consp (caddr addr))))
+       (let* ((base (need-arm64-gpr-encoding (cadr addr)))
+              (index (need-arm64-gpr-encoding (caddr addr)))
+              (v-bit (if is-fpr 1 0)))
+         ;; Register offset: size 11 V opc 1 Rm option(011=LSL) S(0) 10 Rn Rt
+         (logior (ash size-bits 30)
+                 #x38200800
+                 (ash v-bit 26)
+                 (ash opc 22)
+                 (ash index 16)
+                 (ash #b011 13)  ; option = LSL
+                 (ash base 5)
+                 rt)))
+      ;; (:@! base (:$ offset)) — pre-index
+      ((and (consp addr) (eq (car addr) :@!)
+            (consp (caddr addr)) (eq (car (caddr addr)) :$))
+       (let* ((base (need-arm64-gpr-encoding (cadr addr)))
+              (offset (cadr (caddr addr)))
+              (v-bit (if is-fpr 1 0)))
+         (arm64-encode-pre-post-index size-bits v-bit opc base offset rt #b11)))
+      ;; (:@+ base (:$ offset)) — post-index
+      ((and (consp addr) (eq (car addr) :@+)
+            (consp (caddr addr)) (eq (car (caddr addr)) :$))
+       (let* ((base (need-arm64-gpr-encoding (cadr addr)))
+              (offset (cadr (caddr addr)))
+              (v-bit (if is-fpr 1 0)))
+         (arm64-encode-pre-post-index size-bits v-bit opc base offset rt #b01)))
+      (t (error "Unsupported addressing mode in ~s" form)))))
+
+(defun arm64-encode-ldur-stur (form name ops is-load scale size-bits)
+  "Encode LDUR/STUR — always unscaled offset."
+  (declare (ignore name scale))
+  (let* ((rt-raw (first ops))
+         (addr (second ops))
+         (is-fpr (arm64-fpr-p rt-raw))
+         (rt (if is-fpr (need-arm64-fpr-encoding rt-raw) (need-arm64-gpr-encoding rt-raw)))
+         (opc (if is-load (if is-fpr #b01 #b01) #b00))
+         (v-bit (if is-fpr 1 0)))
+    (cond
+      ((and (consp addr) (eq (car addr) :@)
+            (consp (caddr addr)) (eq (car (caddr addr)) :$))
+       (let* ((base (need-arm64-gpr-encoding (cadr addr)))
+              (offset (cadr (caddr addr))))
+         (arm64-encode-unscaled-offset size-bits v-bit opc base offset rt)))
+      (t (error "Unsupported addressing mode for LDUR/STUR: ~s" form)))))
+
+(defun arm64-encode-unscaled-offset (size-bits v-bit opc base offset rt)
+  "LDUR/STUR encoding: size 11 V opc 0 imm9 00 Rn Rt"
+  (logior (ash size-bits 30)
+          #x38000000
+          (ash v-bit 26)
+          (ash opc 22)
+          (ash (logand offset #x1ff) 12)
+          (ash base 5)
+          rt))
+
+(defun arm64-encode-pre-post-index (size-bits v-bit opc base offset rt mode)
+  "Pre/post-index encoding: size 11 V opc 0 imm9 mode Rn Rt
+   mode: 11=pre-index, 01=post-index"
+  (logior (ash size-bits 30)
+          #x38000000
+          (ash v-bit 26)
+          (ash opc 22)
+          (ash (logand offset #x1ff) 12)
+          (ash mode 10)
+          (ash base 5)
+          rt))
+
+;;; ---- LDP / STP ----
+
+(defun arm64-encode-ldp-stp (form name ops)
+  "Encode LDP/STP with signed offset, pre-index, or post-index."
+  (let* ((is-load (string-equal name "LDP"))
+         (rt1-raw (first ops))
+         (rt2-raw (second ops))
+         (addr (third ops))
+         (is-fpr (arm64-fpr-p rt1-raw)))
+    ;; rt2 can be (:+ rt1 1) meaning consecutive register
+    (let* ((rt1 (if is-fpr (need-arm64-fpr-encoding rt1-raw) (need-arm64-gpr-encoding rt1-raw)))
+           (rt2 (cond
+                  ((and (consp rt2-raw) (eq (car rt2-raw) :+))
+                   ;; (:+ reg 1) → reg+1
+                   (let ((base-reg (if is-fpr
+                                     (need-arm64-fpr-encoding (cadr rt2-raw))
+                                     (need-arm64-gpr-encoding (cadr rt2-raw)))))
+                     (+ base-reg (caddr rt2-raw))))
+                  (t (if is-fpr
+                       (need-arm64-fpr-encoding rt2-raw)
+                       (need-arm64-gpr-encoding rt2-raw)))))
+           (scale (if is-fpr 8 8))  ; 64-bit for both GPR and FPR
+           (opc-bits (if is-fpr #b01 #b10))  ; 01=FP 64-bit, 10=GPR 64-bit
+           (l-bit (if is-load 1 0))
+           (v-bit (if is-fpr 1 0)))
+      (cond
+        ;; (:@ base (:$ offset)) — signed offset
+        ((and (consp addr) (eq (car addr) :@)
+              (consp (caddr addr)) (eq (car (caddr addr)) :$))
+         (let* ((base (need-arm64-gpr-encoding (cadr addr)))
+                (offset (cadr (caddr addr)))
+                (imm7 (truncate offset scale)))
+           (logior (ash opc-bits 30)
+                   #x29000000
+                   (ash v-bit 26)
+                   (ash l-bit 22)
+                   (ash (logand imm7 #x7f) 15)
+                   (ash rt2 10)
+                   (ash base 5)
+                   rt1)))
+        ;; (:@! base (:$ offset)) — pre-index
+        ((and (consp addr) (eq (car addr) :@!)
+              (consp (caddr addr)) (eq (car (caddr addr)) :$))
+         (let* ((base (need-arm64-gpr-encoding (cadr addr)))
+                (offset (cadr (caddr addr)))
+                (imm7 (truncate offset scale)))
+           (logior (ash opc-bits 30)
+                   #x29800000
+                   (ash v-bit 26)
+                   (ash l-bit 22)
+                   (ash (logand imm7 #x7f) 15)
+                   (ash rt2 10)
+                   (ash base 5)
+                   rt1)))
+        ;; (:@+ base (:$ offset)) — post-index
+        ((and (consp addr) (eq (car addr) :@+)
+              (consp (caddr addr)) (eq (car (caddr addr)) :$))
+         (let* ((base (need-arm64-gpr-encoding (cadr addr)))
+                (offset (cadr (caddr addr)))
+                (imm7 (truncate offset scale)))
+           (logior (ash opc-bits 30)
+                   #x28800000
+                   (ash v-bit 26)
+                   (ash l-bit 22)
+                   (ash (logand imm7 #x7f) 15)
+                   (ash rt2 10)
+                   (ash base 5)
+                   rt1)))
+        (t (error "Unsupported LDP/STP addressing: ~s" form))))))
+
+
+;;; ---- FP arithmetic helpers ----
+
+(defun arm64-encode-fp-arith (ops base-opcode)
+  "Encode 2-source FP arithmetic: FADD, FSUB, FMUL, FDIV.
+   base-opcode is for double precision; single = base with bit 22 cleared."
+  (let ((rd (first ops))
+        (rn (second ops))
+        (rm (third ops)))
+    (cond
+      ((and (arm64-dfpr-p rd) (arm64-dfpr-p rn) (arm64-dfpr-p rm))
+       (logior base-opcode
+               (ash (need-arm64-dfpr-encoding rm) 16)
+               (ash (need-arm64-dfpr-encoding rn) 5)
+               (need-arm64-dfpr-encoding rd)))
+      ((and (arm64-sfpr-p rd) (arm64-sfpr-p rn) (arm64-sfpr-p rm))
+       ;; Single precision: clear bit 22 (type field)
+       (logior (logand base-opcode (lognot (ash 1 22)))
+               (ash (need-arm64-sfpr-encoding rm) 16)
+               (ash (need-arm64-sfpr-encoding rn) 5)
+               (need-arm64-sfpr-encoding rd)))
+      (t (error "Mismatched FP register types in ~s" ops)))))
+
+(defun arm64-encode-fp-unary (ops base-opcode)
+  "Encode 1-source FP: FNEG, FSQRT, FABS."
+  (let ((rd (first ops))
+        (rn (second ops)))
+    (cond
+      ((and (arm64-dfpr-p rd) (arm64-dfpr-p rn))
+       (logior base-opcode
+               (ash (need-arm64-dfpr-encoding rn) 5)
+               (need-arm64-dfpr-encoding rd)))
+      ((and (arm64-sfpr-p rd) (arm64-sfpr-p rn))
+       (logior (logand base-opcode (lognot (ash 1 22)))
+               (ash (need-arm64-sfpr-encoding rn) 5)
+               (need-arm64-sfpr-encoding rd)))
+      (t (error "Mismatched FP register types in ~s" ops)))))
+
+
+;;; ---- Label reference extraction ----
+
+(defun arm64-extract-branch-info (source)
+  "Given a resolved instruction S-expression, return (values label ref-type)
+   if it references a label, or (values nil nil) otherwise.
+   ref-type is :b, :b-cond, :cbz, :cbnz, or :adr."
+  (when (null source)
+    (return-from arm64-extract-branch-info (values nil nil)))
+  (let* ((mnemonic (car source))
+         (ops (cdr source))
+         (name (string mnemonic)))
+    ;; Check for b.eq, b.ne, etc.
+    (multiple-value-bind (base-mnem cond-code)
+        (parse-mnemonic-condition mnemonic)
+      (declare (ignore cond-code))
+      (when (and base-mnem (string-equal base-mnem "B"))
+        (return-from arm64-extract-branch-info
+          (values (first ops) :b-cond))))
+    (cond
+      ((string-equal name "B")
+       (if (and (consp (first ops))
+                (or (eq (car (first ops)) :?)
+                    (eq (car (first ops)) :~)))
+         ;; (b (:? cond) label)
+         (values (second ops) :b-cond)
+         ;; (b label)
+         (values (first ops) :b)))
+      ((string-equal name "BL")
+       (values (first ops) :b))
+      ((string-equal name "CBZ")
+       (values (second ops) :cbz))
+      ((string-equal name "CBNZ")
+       (values (second ops) :cbnz))
+      ((string-equal name "ADR")
+       (values (second ops) :adr))
+      (t (values nil nil)))))
+
+
+;;; ---- Resolve a branch offset into an opcode ----
+
+(defun arm64-patch-branch-opcode (opcode ref-type diff-words diff-bytes)
+  "Patch branch offset into OPCODE.  DIFF-WORDS = (label - insn) / 4."
+  (case ref-type
+    ;; Unconditional branch: imm26 at bits [25:0]
+    (:b (logior (logand opcode #xfc000000)
+                (logand diff-words #x3ffffff)))
+    ;; Conditional branch: imm19 at bits [23:5]
+    (:b-cond (logior (logand opcode #xff00001f)
+                     (ash (logand diff-words #x7ffff) 5)))
+    ;; CBZ/CBNZ: imm19 at bits [23:5]
+    ((:cbz :cbnz)
+     (logior (logand opcode #xff00001f)
+             (ash (logand diff-words #x7ffff) 5)))
+    ;; ADR: immhi at bits [23:5], immlo at bits [30:29]
+    (:adr
+     (logior (logand opcode #x9f00001f)
+             (ash (logand (ash diff-bytes -2) #x7ffff) 5)
+             (ash (logand diff-bytes #x3) 29)))
+    (t (error "Unknown label ref type ~s" ref-type))))
+
+
+;;; ---- arm64-finalize ----
+
+(defun arm64-finalize (seg)
+  "Encode all instructions in SEG, resolve labels.
+   Returns the number of 32-bit words."
+  (let* ((branch-refs nil))
+    ;; Pass 1: encode all instructions, collecting branch label references
+    (ccl::do-dll-nodes (element seg)
+      (when (typep element 'lap-instruction)
+        (let* ((source (lap-instruction-source element)))
+          (when source
+            (multiple-value-bind (opcode ref-type)
+                (arm64-encode-instruction source)
+              (setf (lap-instruction-opcode element) opcode)
+              ;; Extract label reference from source s-expression
+              (multiple-value-bind (label-name branch-type)
+                  (arm64-extract-branch-info source)
+                (declare (ignore branch-type))
+                (when (and ref-type label-name)
+                  (push (list element label-name ref-type) branch-refs))))))))
+
+    ;; Pass 2: dead branch elimination — remove unconditional branches to
+    ;; the immediately following label
+    (let ((removed nil))
+      (setq branch-refs
+            (delete-if
+             (lambda (ref)
+               (destructuring-bind (insn label-name ref-type) ref
+                 (when (eq ref-type :b)
+                   (let* ((lab (find-lap-label label-name)))
+                     (when (and lab
+                                (lap-label-emitted-p lab)
+                                (eql (lap-label-address lab)
+                                     (+ (instruction-element-address insn) 4)))
+                       (ccl::remove-dll-node insn)
+                       (setq removed t)
+                       t)))))
+             branch-refs))
+      (when removed
+        (set-element-addresses 0 seg)))
+
+    ;; Pass 3: resolve branch label references
+    ;; ARM64 branch offsets are (label-addr - insn-addr) / 4, no PC+8 adjustment
+    (dolist (ref branch-refs)
+      (destructuring-bind (insn label-name ref-type) ref
+        (let* ((lab (find-lap-label label-name)))
+          (unless lab
+            (error "Undefined label ~s" label-name))
+          (when (lap-label-emitted-p lab)
+            (let* ((labaddr (lap-label-address lab))
+                   (insn-addr (instruction-element-address insn))
+                   (diff-bytes (- labaddr insn-addr))
+                   (diff-words (ash diff-bytes -2)))
+              (setf (lap-instruction-opcode insn)
+                    (arm64-patch-branch-opcode
+                     (lap-instruction-opcode insn)
+                     ref-type diff-words diff-bytes)))))))
+
+    ;; Also resolve any label refs registered via lap-note-label-reference
+    ;; (used by arm64-lap.lisp assemble-instruction path)
+    (do-lap-labels (lab)
+      (if (lap-label-emitted-p lab)
+        (let* ((labaddr (lap-label-address lab)))
+          (dolist (ref (lap-label-refs lab))
+            (destructuring-bind (insn . reftype) ref
+              (let* ((insn-addr (instruction-element-address insn))
+                     (diff-bytes (- labaddr insn-addr))
+                     (diff-words (ash diff-bytes -2)))
+                (setf (lap-instruction-opcode insn)
+                      (arm64-patch-branch-opcode
+                       (lap-instruction-opcode insn)
+                       reftype diff-words diff-bytes))))))
+        (when (lap-label-refs lab)
+          (error "LAP label ~s was referenced but not defined."
+                 (lap-label-name lab)))))
+
+    ;; Return number of 32-bit instruction words
+    (ash (section-size seg) -2)))
+
+
 (provide "ARM64-ASM")
