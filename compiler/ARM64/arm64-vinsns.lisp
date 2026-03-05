@@ -3650,6 +3650,24 @@
   (cmp sp sp))
 
 
+;;; --- sign-extend-halfword: sign-extend 16-bit value to tagged fixnum ---
+;;; Used by %word-to-int operator.  ARM64 SXTH sign-extends bits 0-15.
+(define-arm64-vinsn (sign-extend-halfword :predicatable)
+    (((dest :lisp))
+     ((src :lisp))
+     ())
+  (sxth dest src))
+
+;;; --- u32->char: wrap a u32 value into a character-tagged node ---
+;;; Used by %code-char operator.
+(define-arm64-vinsn (u32->char :predicatable)
+    (((dest :lisp))
+     ((src :imm))
+     ())
+  (lsl dest src (:$ arm64::charcode-shift))
+  (movk dest (:$ (:apply ash arm64::tag-character 8)) (:lsl 48)))
+
+
 ;;; In case arm64::*arm64-opcodes* was changed since this file was compiled.
 #+maybe-never
 (queue-fixup
