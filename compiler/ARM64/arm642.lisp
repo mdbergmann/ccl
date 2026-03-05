@@ -2512,3 +2512,1136 @@
             (! check-misc-bound unscaled-idx src))
           (@ common-case)
           (arm642-vset1 seg vreg xfer type-keyword src unscaled-idx index-known-fixnum result-reg (arm642-unboxed-reg-for-aset seg type-keyword result-reg safe constval) constval needs-memoization))))))
+
+;;; ======================================================================
+;;; Section 6: Core Register/Stack Utilities (Chunk 6)
+;;; ======================================================================
+
+(defun arm642-one-lreg-form (seg form lreg)
+  (let ((is-float (= (hard-regspec-class lreg) hard-reg-class-fpr)))
+    (if is-float
+      (arm642-form-float seg lreg nil form)
+      (arm642-form seg lreg nil form))
+    lreg))
+
+(defun arm642-one-targeted-reg-form (seg form reg)
+  (arm642-one-lreg-form seg form reg))
+
+(defun arm642-one-untargeted-lreg-form (seg form reg)
+  (arm642-one-lreg-form seg form (if (typep reg 'lreg) reg (make-unwired-lreg reg))))
+
+(defun same-arm64-reg-p (x y)
+  (and (eq (hard-regspec-value x) (hard-regspec-value y))
+       (let* ((class (hard-regspec-class x)))
+         (and (eq class (hard-regspec-class y))
+              (or (not (eql class hard-reg-class-fpr))
+                  (eq (%get-regspec-mode x)
+                      (%get-regspec-mode y)))))))
+
+;;; If REG is a node reg, add it to the bitmask.
+(defun arm642-restrict-node-target (reg mask)
+  (if (node-reg-p reg)
+    (logior mask (ash 1 (hard-regspec-value reg)))
+    mask))
+
+;;; If suggested reg is a node reg that contains a stack location,
+;;; try to use some other node temp.
+(defun arm642-try-non-conflicting-reg (suggested reserved)
+  (let* ((mask *arm642-gpr-locations-valid-mask*))
+    (or (when (and (node-reg-p suggested)
+                   (logbitp (hard-regspec-value suggested) mask))
+          (setq mask (logior mask reserved))
+          (%available-node-temp (logand *available-backend-node-temps*
+                                        (lognot mask))))
+        suggested)))
+
+(defun arm642-one-untargeted-reg-form (seg form suggested &optional (reserved 0))
+  (or (arm642-reg-for-form form suggested)
+      (if (and (acode-p form)
+               (eq (acode-operator form) (%nx1-operator %current-tcr)))
+        arm64::rcontext
+        (if (node-reg-p suggested)
+          (arm642-one-untargeted-lreg-form seg form (arm642-try-non-conflicting-reg suggested reserved))
+          (arm642-one-untargeted-lreg-form seg form suggested)))))
+
+(defun arm642-push-register (seg areg)
+  (let* ((a-float (= (hard-regspec-class areg) hard-reg-class-fpr))
+         (fpr-mode-name (if a-float (fpr-mode-value-name (get-regspec-mode areg))))
+         (a-node (unless a-float (= (get-regspec-mode areg) hard-reg-class-gpr-mode-node)))
+         (nested (> *arm642-undo-count* 0))
+         vinsn)
+    (with-arm64-local-vinsn-macros (seg)
+      (if a-node
+        (setq vinsn (arm642-vpush-register seg areg))
+        (let* ((offset *arm642-nfp-depth*))
+          (setq vinsn
+                (if a-float
+                  (case fpr-mode-name
+                    ((:double-float :complex-single-float)
+                     (if nested
+                       (! nfp-store-double-float-nested areg offset)
+                       (! nfp-store-double-float areg offset)))
+                    (:complex-double-float
+                     (incf offset 8)
+                     (if nested
+                       (! nfp-store-complex-double-float-nested areg offset)
+                       (! nfp-store-complex-double-float areg offset)))
+                    (:single-float
+                     (if nested
+                       (! nfp-store-single-float-nested areg offset)
+                       (! nfp-store-single-float areg offset))))
+                  (if nested
+                    (! nfp-store-unboxed-word-nested areg offset)
+                    (! nfp-store-unboxed-word areg offset))))
+          (push vinsn *arm642-all-nfp-pushes*)
+          (incf offset 8)
+          (setq *arm642-nfp-depth* offset)))
+      vinsn)))
+
+(defun arm642-pop-register (seg areg)
+  (let* ((a-float (= (hard-regspec-class areg) hard-reg-class-fpr))
+         (fpr-mode-name (if a-float (fpr-mode-value-name (get-regspec-mode areg))))
+         (a-node (unless a-float (= (get-regspec-mode areg) hard-reg-class-gpr-mode-node)))
+         (nested (> *arm642-undo-count* 0))
+         vinsn)
+    (with-arm64-local-vinsn-macros (seg)
+      (if a-node
+        (setq vinsn (arm642-vpop-register seg areg))
+        (let* ((offset (- *arm642-nfp-depth* 8)))
+          (setq vinsn
+                (if a-float
+                  (case fpr-mode-name
+                    ((:double-float :complex-single-float)
+                     (if nested
+                       (! nfp-load-double-float-nested areg offset)
+                       (! nfp-load-double-float areg offset)))
+                    (:complex-double-float
+                     (decf offset 8)
+                     (if nested
+                       (! nfp-load-complex-double-float-nested areg offset)
+                       (! nfp-load-complex-double-float areg offset)))
+                    (:single-float
+                     (if nested
+                       (! nfp-load-single-float-nested areg offset)
+                       (! nfp-load-single-float areg offset))))
+                  (if nested
+                    (! nfp-load-unboxed-word-nested areg offset)
+                    (! nfp-load-unboxed-word areg offset))))
+          (setq *arm642-nfp-depth* offset)))
+      vinsn)))
+
+(defun arm642-vpush-register (seg src)
+  (with-arm64-local-vinsn-macros (seg)
+    (prog1
+      (! vpush-register src)
+      (arm642-regmap-note-store src *arm642-vstack*)
+      (arm642-adjust-vstack *arm642-target-node-size*))))
+
+(defun arm642-vpush-register-arg (seg src)
+  (arm642-vpush-register seg src))
+
+(defun arm642-vpop-register (seg dest)
+  (with-arm64-local-vinsn-macros (seg)
+    (prog1
+      (! vpop-register dest)
+      (arm642-adjust-vstack (- *arm642-target-node-size*)))))
+
+(defun arm642-copy-register (seg dest src)
+  (with-arm64-local-vinsn-macros (seg)
+    (when dest
+      (let* ((dest-gpr (backend-ea-physical-reg dest hard-reg-class-gpr))
+             (src-gpr (if src (backend-ea-physical-reg src hard-reg-class-gpr)))
+             (dest-fpr (backend-ea-physical-reg dest hard-reg-class-fpr))
+             (src-fpr (if src (backend-ea-physical-reg src hard-reg-class-fpr)))
+             (src-mode (if src (get-regspec-mode src)))
+             (dest-mode (get-regspec-mode dest))
+             (dest-crf (backend-ea-physical-reg dest hard-reg-class-crf)))
+        (if (null src)
+          (if dest-gpr
+            (! load-nil dest-gpr)
+            (if dest-crf
+              (! set-eq-bit dest-crf)))
+          (if dest-crf
+            ;; "Copying" a GPR to a CR field means comparing it to nil.
+            ;; On ARM64, use rnil register (nil value is too large for CMP immediate).
+            (if src-gpr
+              (! compare-to-nil dest src)
+              (! compare-to-nil dest arm64::rnil))
+            (if (and dest-gpr src-gpr)
+              (case dest-mode
+                (#.hard-reg-class-gpr-mode-node ; boxed result.
+                 (case src-mode
+                   (#.hard-reg-class-gpr-mode-node
+                    (unless (eql dest-gpr src-gpr)
+                      (! copy-gpr dest src)))
+                   (#.hard-reg-class-gpr-mode-u32
+                    (arm642-box-u32 seg dest src))
+                   (#.hard-reg-class-gpr-mode-s32
+                    (arm642-box-s32 seg dest src))
+                   (#.hard-reg-class-gpr-mode-u16
+                    (! u16->fixnum dest src))
+                   (#.hard-reg-class-gpr-mode-s16
+                    (! s16->fixnum dest src))
+                   (#.hard-reg-class-gpr-mode-u8
+                    (! u8->fixnum dest src))
+                   (#.hard-reg-class-gpr-mode-s8
+                    (! s8->fixnum dest src))
+                   (#.hard-reg-class-gpr-mode-address
+                    (! macptr->heap dest src))))
+                ((#.hard-reg-class-gpr-mode-u32
+                  #.hard-reg-class-gpr-mode-address)
+                 (case src-mode
+                   (#.hard-reg-class-gpr-mode-node
+                    (let* ((src-type (get-node-regspec-type-modes src)))
+                      (declare (fixnum src-type))
+                      (case dest-mode
+                        (#.hard-reg-class-gpr-mode-u32
+                         (! unbox-u32 dest src))
+                        (#.hard-reg-class-gpr-mode-address
+                         (unless (or (logbitp #.hard-reg-class-gpr-mode-address src-type)
+                                     *arm642-reckless*)
+                           (! trap-unless-macptr src))
+                         (! deref-macptr dest src)))))
+                   ((#.hard-reg-class-gpr-mode-u32
+                     #.hard-reg-class-gpr-mode-s32
+                     #.hard-reg-class-gpr-mode-address)
+                    (unless (eql dest-gpr src-gpr)
+                      (! copy-gpr dest src)))
+                   ((#.hard-reg-class-gpr-mode-u16
+                     #.hard-reg-class-gpr-mode-s16)
+                    (! u16->u32 dest src))
+                   ((#.hard-reg-class-gpr-mode-u8
+                     #.hard-reg-class-gpr-mode-s8)
+                    (! u8->u32 dest src))))
+                (#.hard-reg-class-gpr-mode-s32
+                 (case src-mode
+                   (#.hard-reg-class-gpr-mode-node
+                    (! unbox-s32 dest src))
+                   ((#.hard-reg-class-gpr-mode-u32
+                     #.hard-reg-class-gpr-mode-s32
+                     #.hard-reg-class-gpr-mode-address)
+                    (unless (eql dest-gpr src-gpr)
+                      (! copy-gpr dest src)))
+                   (#.hard-reg-class-gpr-mode-u16
+                    (! u16->u32 dest src))
+                   (#.hard-reg-class-gpr-mode-s16
+                    (! s16->s32 dest src))
+                   (#.hard-reg-class-gpr-mode-u8
+                    (! u8->u32 dest src))
+                   (#.hard-reg-class-gpr-mode-s8
+                    (! s8->s32 dest src))))
+                (#.hard-reg-class-gpr-mode-u16
+                 (case src-mode
+                   (#.hard-reg-class-gpr-mode-node
+                    (! unbox-u16 dest src))
+                   ((#.hard-reg-class-gpr-mode-u8
+                     #.hard-reg-class-gpr-mode-s8)
+                    (! u8->u32 dest src))
+                   (t
+                    (unless (eql dest-gpr src-gpr)
+                      (! copy-gpr dest src)))))
+                (#.hard-reg-class-gpr-mode-s16
+                 (case src-mode
+                   (#.hard-reg-class-gpr-mode-node
+                    (! unbox-s16 dest src))
+                   (#.hard-reg-class-gpr-mode-s8
+                    (! s8->s32 dest src))
+                   (#.hard-reg-class-gpr-mode-u8
+                    (! u8->u32 dest src))
+                   (t
+                    (unless (eql dest-gpr src-gpr)
+                      (! copy-gpr dest src)))))
+                (#.hard-reg-class-gpr-mode-u8
+                 (case src-mode
+                   (#.hard-reg-class-gpr-mode-node
+                    (if *arm642-reckless*
+                      (! %unbox-u8 dest src)
+                      (! unbox-u8 dest src)))
+                   (t
+                    (unless (eql dest-gpr src-gpr)
+                      (! copy-gpr dest src)))))
+                (#.hard-reg-class-gpr-mode-s8
+                 (case src-mode
+                   (#.hard-reg-class-gpr-mode-node
+                    (! unbox-s8 dest src))
+                   (t
+                    (unless (eql dest-gpr src-gpr)
+                      (! copy-gpr dest src))))))
+              (if src-gpr
+                (if dest-fpr
+                  (progn
+                    (case src-mode
+                      (#.hard-reg-class-gpr-mode-node
+                       (case dest-mode
+                         (#.hard-reg-class-fpr-mode-double
+                          (unless (or (logbitp hard-reg-class-fpr-type-double
+                                               (get-node-regspec-type-modes src))
+                                      *arm642-reckless*)
+                            (! trap-unless-double-float src))
+                          (! get-double dest src))
+                         (#.hard-reg-class-fpr-mode-single
+                          (unless *arm642-reckless*
+                            (! trap-unless-single-float src))
+                          (! get-single dest src))
+                         (#.hard-reg-class-fpr-mode-complex-single-float
+                          (unless *arm642-reckless*
+                            (! trap-unless-typecode= src arm64::subtag-complex-single-float))
+                          (! get-complex-single-float dest src))
+                         (#.hard-reg-class-fpr-mode-complex-double-float
+                          (unless *arm642-reckless*
+                            (! trap-unless-typecode= src arm64::subtag-complex-double-float))
+                          (! get-complex-double-float dest src)))))))
+                (if dest-gpr
+                  (case dest-mode
+                    (#.hard-reg-class-gpr-mode-node
+                     (if src-fpr
+                       (case src-mode
+                         (#.hard-reg-class-fpr-mode-double
+                          (! double->heap dest src))
+                         (#.hard-reg-class-fpr-mode-complex-double-float
+                          (! complex-double-float->heap dest src))
+                         (#.hard-reg-class-fpr-mode-single
+                          (! single->node dest src))
+                         (#.hard-reg-class-fpr-mode-complex-single-float
+                          (! complex-single-float->node dest src))))))
+                  (if (and src-fpr dest-fpr)
+                    (unless (and (eql dest-fpr src-fpr)
+                                 (eql dest-mode src-mode))
+                      (case src-mode
+                        (#.hard-reg-class-fpr-mode-single
+                         (case dest-mode
+                           (#.hard-reg-class-fpr-mode-single
+                            (! single-to-single dest src))
+                           (#.hard-reg-class-fpr-mode-double
+                            (if *arm642-float-safety*
+                              (with-fp-target (src dest) (temp :double-float)
+                                (! clear-pending-fpu-exceptions)
+                                (! single-to-double temp src)
+                                (! trap-if-fpu-exception)
+                                (! double-to-double dest temp))
+                              (! single-to-double dest src)))))
+                        (#.hard-reg-class-fpr-mode-double
+                         (case dest-mode
+                           (#.hard-reg-class-fpr-mode-single
+                            (if *arm642-float-safety*
+                              (with-fp-target (dest src) (temp :single-float)
+                                (! clear-pending-fpu-exceptions)
+                                (! double-to-single temp src)
+                                (! trap-if-fpu-exception)
+                                (! single-to-single dest temp))
+                              (! double-to-single dest src)))
+                           (#.hard-reg-class-fpr-mode-double
+                            (! double-to-double dest src))))
+                        (#.hard-reg-class-fpr-mode-complex-single-float
+                         (case dest-mode
+                           (#.hard-reg-class-fpr-mode-complex-single-float
+                            (! complex-single-float-to-complex-single-float dest src))))
+                        (#.hard-reg-class-fpr-mode-complex-double-float
+                         (case dest-mode
+                           (#.hard-reg-class-fpr-mode-complex-double-float
+                            (! complex-double-float-to-complex-double-float dest src))))))))))))))))
+
+(defun arm642-unreachable-store (&optional vreg)
+  ;; I don't think that anything needs to be done here,
+  ;; but leave this guy around until we're sure.
+  (declare (ignore vreg))
+  nil)
+
+(defun arm642-lri (seg reg value)
+  (with-arm64-local-vinsn-macros (seg)
+    (if (>= value 0)
+      (! lri reg value)
+      (! lri reg (logand value #xffffffffffffffff)))))
+
+;;; Callers should really be sure that this is what they want to use.
+(defun arm642-absolute-natural (seg vreg xfer value)
+  (with-arm64-local-vinsn-macros (seg vreg xfer)
+    (when vreg
+      (arm642-lri seg vreg value))
+    (^)))
+
+;;; ======================================================================
+;;; Section 7: Symbol/Function Support (Chunk 6)
+;;; ======================================================================
+
+(defun arm642-immediate-function-p (f)
+  (setq f (acode-unwrapped-form-value f))
+  (and (acode-p f)
+       (or (eq (acode-operator f) (%nx1-operator immediate))
+           (eq (acode-operator f) (%nx1-operator simple-function)))))
+
+(defun arm64-constant-form-p (form)
+  (setq form (nx-untyped-form form))
+  (if form
+    (or (nx-null form)
+        (nx-t form)
+        (and (acode-p form)
+             (or (eq (acode-operator form) (%nx1-operator immediate))
+                 (eq (acode-operator form) (%nx1-operator fixnum))
+                 (eq (acode-operator form) (%nx1-operator simple-function)))))))
+
+(defun arm642-integer-constant-p (form mode)
+  (let* ((val
+          (or (acode-fixnum-form-p (setq form (acode-unwrapped-form form)))
+              (and (acode-p form)
+                   (eq (acode-operator form) (%nx1-operator immediate))
+                   (setq form (car (acode-operands form)))
+                   (if (typep form 'integer)
+                     form)))))
+    (and val (%typep val (mode-specifier-type mode)) val)))
+
+(defun arm642-nfp-ref-p (form)
+  (let* ((op (if (acode-p form) (acode-operator form))))
+    (if (or (eq op (%nx1-operator inherited-arg))
+            (eq op (%nx1-operator lexical-reference)))
+      (let* ((var (car (acode-operands form))))
+        (not (null (rassoc var *arm642-nfp-vars*)))))))
+
+(defun arm64-side-effect-free-form-p (form)
+  (when (acode-p (setq form (acode-unwrapped-form-value form)))
+    (unless (arm642-nfp-ref-p form)
+      (or (arm64-constant-form-p form)
+          (if (eq (acode-operator form) (%nx1-operator lexical-reference))
+            (not (%ilogbitp $vbitsetq (nx-var-bits (car (acode-operands form))))))))))
+
+(defun arm642-symbol-entry-locative (sym)
+  (setq sym (require-type sym 'symbol))
+  (when (eq sym '%call-next-method-with-args)
+    (setf (afunc-bits *arm642-cur-afunc*)
+          (%ilogior (%ilsl $fbitnextmethargsp 1) (afunc-bits *arm642-cur-afunc*))))
+  (or (assq sym *arm642-fcells*)
+      (let ((new (list sym)))
+        (push new *arm642-fcells*)
+        new)))
+
+(defun arm642-symbol-value-cell (sym)
+  (setq sym (require-type sym 'symbol))
+  (or (assq sym *arm642-vcells*)
+      (let ((new (list sym)))
+        (push new *arm642-vcells*)
+        (ensure-binding-index sym)
+        new)))
+
+(defun arm642-symbol-locative-p (imm)
+  (and (consp imm)
+       (or (memq imm *arm642-vcells*)
+           (memq imm *arm642-fcells*))))
+
+(defun arm642-afunc-lfun-ref (afunc)
+  (or
+   (afunc-lfun afunc)
+   (progn (pushnew afunc (afunc-fwd-refs *arm642-cur-afunc*) :test #'eq)
+          afunc)))
+
+(defun arm642-augment-arglist (afunc arglist &optional (maxregs $numarm64argregs))
+  (let ((inherited-args (afunc-inherited-vars afunc)))
+    (when inherited-args
+      (let* ((current-afunc *arm642-cur-afunc*)
+             (stkargs (car arglist))
+             (regargs (cadr arglist))
+             (inhforms nil)
+             (numregs (length regargs))
+             (own-inhvars (afunc-inherited-vars current-afunc)))
+        (dolist (var inherited-args)
+          (let* ((root-var (nx-root-var var))
+                 (other-guy
+                  (dolist (v own-inhvars #|(compiler-bug "other guy not found")|# root-var)
+                    (when (eq root-var (nx-root-var v)) (return v)))))
+            (push (make-acode (%nx1-operator inherited-arg) other-guy) inhforms)))
+        (dolist (form inhforms)
+          (if (%i< numregs maxregs)
+            (progn
+              (setq regargs (nconc regargs (list form)))
+              (setq numregs (%i+ numregs 1)))
+            (push form stkargs)))
+        (%rplaca (%cdr arglist) regargs)
+        (%rplaca arglist stkargs))))
+  arglist)
+
+(defun arm642-formlist (seg stkargs &optional revregargs)
+  (with-arm64-local-vinsn-macros (seg)
+    (let* ((nregs (length revregargs))
+           (n nregs))
+      (declare (fixnum n))
+      (dolist (arg stkargs)
+        (let* ((reg (arm642-one-untargeted-reg-form seg arg arm64::arg_z)))
+          (arm642-vpush-register-arg seg reg)
+          (incf n)))
+      (when revregargs
+        (let* ((zform (%car revregargs))
+               (yform (%cadr revregargs))
+               (xform (%caddr revregargs)))
+          (if (eq 3 nregs)
+            (arm642-three-targeted-reg-forms seg xform ($ arm64::arg_x) yform ($ arm64::arg_y) zform ($ arm64::arg_z))
+            (if (eq 2 nregs)
+              (arm642-two-targeted-reg-forms seg yform ($ arm64::arg_y) zform ($ arm64::arg_z))
+              (arm642-one-targeted-reg-form seg zform ($ arm64::arg_z))))))
+      n)))
+
+(defun arm642-arglist (seg args)
+  (arm642-formlist seg (car args) (cadr args)))
+
+;;; ======================================================================
+;;; Section 8: Function Calling Infrastructure (Chunk 6)
+;;; ======================================================================
+
+(defun arm642-lexical-reference-p (form)
+  (when (acode-p form)
+    (let ((op (acode-operator (setq form (acode-unwrapped-form-value form)))))
+      (when (or (eq op (%nx1-operator lexical-reference))
+                (eq op (%nx1-operator inherited-arg)))
+        (car (acode-operands form))))))
+
+(defun arm642-tail-call-alias (immref sym &optional arglist)
+  (let ((alias (cdr (assq sym *arm642-tail-call-aliases*))))
+    (if (and alias (or (null arglist) (eq (+ (length (car arglist)) (length (cadr arglist))) (cdr alias))))
+      (make-acode (%nx1-operator immediate) (car alias))
+      immref)))
+
+;;; If BODY is essentially an APPLY involving an &rest arg, try to avoid
+;;; consing it.
+(defun arm642-eliminate-&rest (body rest key-p auxen rest-values)
+  (when (and rest (not key-p) (not (cadr auxen)) rest-values)
+    (when (eq (logand (the fixnum (nx-var-bits rest))
+                      (logior (ash -1 $vbitspecial)
+                              (ash 1 $vbitclosed) (ash 1 $vbitsetq) (ash 1 $vbitcloseddownward)))
+              0)
+      (do* ()
+           ((not (acode-p body)))
+        (let* ((op (acode-operator body)))
+          (if (or (eq op (%nx1-operator lexical-function-call))
+                  (eq op (%nx1-operator call)))
+            (destructuring-bind (fn-form (stack-args reg-args) &optional spread-p) (acode-operands body)
+               (unless (and (eq spread-p t)
+                           (eq (arm642-lexical-reference-p (%car reg-args)) rest))
+                (return nil))
+              (flet ((independent-of-all-values (form)
+                       (setq form (acode-unwrapped-form-value form))
+                       (or (arm64-constant-form-p form)
+                           (let* ((lexref (arm642-lexical-reference-p form)))
+                             (and lexref
+                                  (neq lexref rest)
+                                  (dolist (val rest-values t)
+                                    (unless (nx2-var-not-set-by-form-p lexref val)
+                                      (return))))))))
+                (unless (or (eq op (%nx1-operator lexical-function-call))
+                            (independent-of-all-values fn-form))
+                  (return nil))
+                (if (dolist (s stack-args t)
+                          (unless (independent-of-all-values s)
+                            (return nil)))
+                  (let* ((arglist (append stack-args rest-values)))
+                    (return
+                     (make-acode op
+                                 fn-form
+                                 (if (<= (length arglist) $numarm64argregs)
+                                   (list nil (reverse arglist))
+                                   (list (butlast arglist $numarm64argregs)
+                                         (reverse (last arglist $numarm64argregs))))
+                                 nil)))
+                  (return nil))))
+            (if (eq op (%nx1-operator local-block))
+              (setq body (cadr (acode-operands body)))
+              (if (and (eq op (%nx1-operator if))
+                       (eq (arm642-lexical-reference-p (car (acode-operands body))) rest))
+                (setq body (car (cdr (acode-operands body))))
+                (return nil)))))))))
+
+(defun arm642-call-fn (seg vreg xfer fn arglist spread-p)
+  (with-arm64-local-vinsn-macros (seg vreg xfer)
+    (when spread-p
+      (destructuring-bind (stack-args reg-args) arglist
+        (when (and (null (cdr reg-args))
+                   (nx-null (acode-unwrapped-form-value (car reg-args))))
+          (setq spread-p nil)
+          (let* ((nargs (length stack-args)))
+            (declare (fixnum nargs))
+            (if (<= nargs $numarm64argregs)
+              (setq arglist (list nil (reverse stack-args)))
+              (setq arglist (list (butlast stack-args $numarm64argregs) (reverse (last stack-args $numarm64argregs)))))))))
+    (let* ((lexref (arm642-lexical-reference-p fn))
+           (simple-case (or (fixnump fn)
+                            (typep fn 'lreg)
+                            (arm642-immediate-function-p fn)
+                            (and
+                             lexref
+                             (not spread-p)
+                             (flet ((all-simple (args)
+                                      (dolist (arg args t)
+                                        (when (and arg (not (nx2-var-not-set-by-form-p lexref arg)))
+                                          (return)))))
+                               (and (all-simple (car arglist))
+                                    (all-simple (cadr arglist))
+                                    (setq fn (var-ea lexref)))))))
+           (cstack *arm642-cstack*)
+           (vstack *arm642-vstack*))
+      (setq xfer (or xfer 0))
+      (when (and (eq xfer $backend-return)
+                 (eq 0 *arm642-undo-count*)
+                 (acode-p fn)
+                 (eq (acode-operator fn) (%nx1-operator immediate))
+                 (symbolp (car (acode-operands fn))))
+        (setq fn (arm642-tail-call-alias fn (car (acode-operands fn)) arglist)))
+
+      (if (and (eq xfer $backend-return) (not (arm642-tailcallok xfer)))
+        (progn
+          (arm642-call-fn seg vreg $backend-mvpass fn arglist spread-p)
+          (arm642-set-vstack (%i+ (if simple-case 0 *arm642-target-node-size*) vstack))
+          (setq *arm642-cstack* cstack)
+          (let ((*arm642-returning-values* t)) (arm642-do-return seg)))
+        (let* ((mv-p (arm642-mv-p xfer)))
+          (unless simple-case
+            (arm642-vpush-register seg (arm642-one-untargeted-reg-form seg fn arm64::arg_z))
+            (setq fn (arm642-vloc-ea vstack)))
+          (arm642-invoke-fn seg fn (arm642-arglist seg arglist) spread-p xfer)
+          (if (and (logbitp $backend-mvpass-bit xfer)
+                   (not simple-case))
+            (progn
+              (! save-values)
+              (! vstack-discard 1)
+              (arm642-set-nargs seg 0)
+              (! recover-values))
+            (unless (or mv-p simple-case)
+              (! vstack-discard 1)))
+          (arm642-set-vstack vstack)
+          (setq *arm642-cstack* cstack)
+          (when (or (logbitp $backend-mvpass-bit xfer) (not mv-p))
+            (<- arm64::arg_z)
+            (arm642-branch seg (logand (lognot $backend-mvpass-mask) xfer) vreg))))
+      nil)))
+
+(defun arm642-restore-full-lisp-context (seg)
+  (with-arm64-local-vinsn-macros (seg)
+    (! restore-full-lisp-context)))
+
+(defun arm642-call-symbol (seg jump-p)
+  (with-arm64-local-vinsn-macros (seg)
+    (if *arm642-optimize-for-space*
+      (if jump-p
+        (! jump-known-symbol-ool)
+        (! call-known-symbol-ool))
+      (if jump-p
+        (! jump-known-symbol)
+        (! call-known-symbol arm64::arg_z)))))
+
+;;; Nargs = nil -> multiple-value case.
+;;; On ARM64: no dedicated fn register, use nfn everywhere.
+;;; ARM64 has no NVRs ($numarm64saveregs=0) but keep restore calls as no-ops.
+(defun arm642-invoke-fn (seg fn nargs spread-p xfer)
+  (with-arm64-local-vinsn-macros (seg)
+    (let* ((f-op (acode-unwrapped-form-value fn))
+           (immp (and (acode-p f-op)
+                      (eq (acode-operator f-op) (%nx1-operator immediate))))
+           (symp (and immp (symbolp (car (acode-operands f-op)))))
+           (label-p (and (fixnump fn)
+                         (locally (declare (fixnum fn))
+                           (and (= fn -1) (- fn)))))
+           (tail-p (eq xfer $backend-return))
+           (func (if (acode-p f-op) (car (acode-operands f-op))))
+           (a-reg nil)
+           (lfunp (and (acode-p f-op)
+                       (eq (acode-operator f-op) (%nx1-operator simple-function))))
+           (expression-p (or (typep fn 'lreg) (and (fixnump fn) (not label-p))))
+           (callable (or symp lfunp label-p))
+           (destreg (if symp ($ arm64::fname) (if lfunp ($ arm64::nfn) (unless label-p ($ arm64::nfn)))))
+           (known-fixed-nargs nil)
+           (label (when label-p
+                    (if (and *arm642-fixed-args-label*
+                             (eql nargs *arm642-fixed-nargs*)
+                             (not spread-p)
+                             (not (arm642-mvpass-p xfer)))
+                      (progn
+                        (setq known-fixed-nargs t)
+                        (if tail-p
+                          *arm642-fixed-args-tail-label*
+                          *arm642-fixed-args-label*))
+                      1))))
+      (when expression-p
+        ;;Have to do this before spread args, since might be vsp-relative.
+        (if nargs
+          (arm642-do-lexical-reference seg destreg fn)
+          (arm642-copy-register seg destreg fn)))
+      (if (or symp lfunp)
+        (setq func (if symp (arm642-symbol-entry-locative func)
+                     (arm642-afunc-lfun-ref func))
+              a-reg (arm642-register-constant-p func)))
+      (when tail-p
+        #-no-compiler-bugs
+        (unless (or immp symp lfunp (typep fn 'lreg) (fixnump fn)) (compiler-bug "Well, well, well.  How could this have happened ?"))
+        (when a-reg
+          (arm642-copy-register seg destreg a-reg))
+        (unless spread-p
+          (arm642-restore-nvrs seg (null nargs))
+          (arm642-restore-non-volatile-fprs seg)
+          (! restore-nfp)))
+      (if spread-p
+        (progn
+          (arm642-set-nargs seg (%i- nargs 1))
+          (if (eq spread-p 0)
+            (! spread-lexpr)
+            (! spread-list))
+          (arm642-restore-nvrs seg nil)
+          (arm642-restore-non-volatile-fprs seg)
+          (! restore-nfp))
+        (if nargs
+          (unless known-fixed-nargs (arm642-set-nargs seg nargs))
+          (! pop-argument-registers)))
+      (if callable
+        (if (not tail-p)
+          (if (arm642-mvpass-p xfer)
+            (let* ((call-reg (if symp ($ arm64::fname) ($ arm64::nfn))))
+              (if label-p
+                (arm642-copy-register seg call-reg ($ arm64::nfn))
+                (if a-reg
+                  (arm642-copy-register seg call-reg a-reg)
+                  (arm642-store-immediate seg func call-reg)))
+              (if symp
+                (! pass-multiple-values-symbol)
+                (! pass-multiple-values)))
+            (progn
+              (if label-p
+                (progn
+                  ;; ARM64: no fn register, use nfn→nfn (identity, but keep for clarity)
+                  (arm642-copy-register seg ($ arm64::nfn) ($ arm64::nfn))
+                  (! call-label (aref *backend-labels* label)))
+                (progn
+                  (if a-reg
+                    (arm642-copy-register seg destreg a-reg)
+                    (arm642-store-immediate seg func destreg))
+                  (if symp
+                    (arm642-call-symbol seg nil)
+                    (! call-known-function))))))
+          (progn
+            (arm642-unwind-stack seg xfer 0 0 #x7fffff)
+            (if (and (not spread-p) nargs (%i<= nargs $numarm64argregs))
+              (progn
+                (if label-p
+                  (unless known-fixed-nargs
+                    ;; ARM64: no fn register, nfn→nfn is identity
+                    (arm642-copy-register seg arm64::nfn arm64::nfn)))
+                (unless (or label-p a-reg) (arm642-store-immediate seg func destreg))
+                (unless known-fixed-nargs
+                  (arm642-restore-full-lisp-context seg))
+                (if label-p
+                  (! jump (aref *backend-labels* label))
+                  (progn
+                    (if symp
+                      (arm642-call-symbol seg t)
+                      (! jump-known-function)))))
+              (progn
+                (if label-p
+                  (arm642-copy-register seg arm64::nfn arm64::nfn)
+                  (unless a-reg (arm642-store-immediate seg func destreg)))
+                (cond ((or spread-p (null nargs))
+                       (if symp
+                         (! tail-call-sym-gen)
+                         (! tail-call-fn-gen)))
+                      ((%i> nargs $numarm64argregs)
+                       (if symp
+                         (! tail-call-sym-slide)
+                         (! tail-call-fn-slide)))
+                      (t
+                       (! restore-full-lisp-context)
+                       (if symp
+                         (! jump-known-symbol)
+                         (! jump-known-function))))))))
+        ;; The general (funcall) case: we don't know (at compile-time)
+        ;; for sure whether we've got a symbol or a (local, constant)
+        ;; function.
+        (progn
+          (unless (or (fixnump fn) (typep fn 'lreg))
+            (arm642-one-targeted-reg-form seg fn destreg))
+          (if (not tail-p)
+            (if (arm642-mvpass-p xfer)
+              (! pass-multiple-values)
+              (! funcall))
+            (cond ((or (null nargs) spread-p)
+                   (! tail-funcall-gen))
+                  ((%i> nargs $numarm64argregs)
+                   (! tail-funcall-slide))
+                  (t
+                   (! tail-funcall-vsp)))))))
+    nil))
+
+;;; ======================================================================
+;;; Section 9: MV/Control Flow Support (Chunk 6)
+;;; ======================================================================
+
+(defun arm642-mvpass-p (xfer)
+  (if xfer (or (logbitp $backend-mvpass-bit xfer) (eq xfer $backend-mvpass))))
+
+(defun arm642-tailcallok (xfer)
+  (and (eq xfer $backend-return)
+       *arm642-tail-allow*
+       (eq 0 *arm642-undo-count*)))
+
+(defun arm642-mv-p (cd)
+  (or (eq cd $backend-return) (arm642-mvpass-p cd)))
+
+(defun arm642-do-return (seg)
+  (let* ((*arm642-vstack* *arm642-vstack*))
+    (with-arm64-local-vinsn-macros (seg)
+      (progn
+        (arm642-set-vstack (arm642-unwind-stack seg $backend-return 0 0 #x7fffff))
+        (if *arm642-returning-values*
+          (progn
+            (arm642-restore-nvrs seg t)
+            (arm642-restore-non-volatile-fprs seg)
+            (! restore-nfp)
+            (! nvalret))
+          (progn
+            (arm642-restore-nvrs seg nil)
+            (arm642-restore-non-volatile-fprs seg)
+            (! restore-nfp)
+            (! popj)))))
+    nil))
+
+(defun arm642-unwind-stack (seg xfer target-catch target-cstack target-vstack)
+  (let* ((current-catch *arm642-undo-count*)
+         (current-cstack *arm642-cstack*)
+         (current-vstack *arm642-vstack*)
+         (diff (%i- current-catch target-catch))
+         target
+         (exit-vstack current-vstack))
+    (declare (ignore-if-unused target))
+    (when (neq 0 diff)
+      (setq exit-vstack (arm642-nlexit seg xfer diff))
+      (multiple-value-setq (target current-cstack current-vstack)
+        (arm642-decode-stack (aref *arm642-undo-stack* target-catch))))
+    (if (%i< 0 (setq diff (%i- current-cstack target-cstack)))
+      (with-arm64-local-vinsn-macros (seg)
+        (! adjust-sp diff)))
+    (if (%i< 0 (setq diff (%i- current-vstack target-vstack)))
+      (with-arm64-local-vinsn-macros (seg)
+        (! vstack-discard (ash diff (- *arm642-target-fixnum-shift*)))))
+    exit-vstack))
+
+(defun arm642-multiple-value-body (seg form)
+  (let* ((lab (backend-get-next-label))
+         (*arm642-vstack* *arm642-vstack*)
+         (old-stack (arm642-encode-stack)))
+    (with-arm64-local-vinsn-macros (seg)
+      (arm642-open-undo $undomvexpect)
+      (arm642-undo-body seg nil (logior $backend-mvpass-mask lab) form old-stack)
+      (@ lab))))
+
+(defun arm642-mvcall (seg vreg xfer fn arglist &optional recursive-p)
+  (let* ((cstack *arm642-cstack*)
+         (vstack *arm642-vstack*))
+    (with-arm64-local-vinsn-macros (seg vreg xfer)
+      (if (and (eq xfer $backend-return) (not (arm642-tailcallok xfer)))
+        (progn
+          (arm642-mvcall seg vreg $backend-mvpass fn arglist t)
+          (arm642-set-vstack (%i+ (if arglist *arm642-target-node-size* 0) vstack))
+          (setq *arm642-cstack* cstack)
+          (let* ((*arm642-returning-values* t)) (^)))
+        (let* ((mv-p (arm642-mv-p xfer)))
+          (if (null arglist)
+            (arm642-call-fn seg vreg xfer fn arglist nil)
+            (progn
+              (arm642-vpush-register seg (arm642-one-untargeted-reg-form seg fn arm64::arg_z))
+              (arm642-multiple-value-body seg (pop arglist))
+              (when arglist
+                (arm642-open-undo $undostkblk)
+                (! save-values)
+                (dolist (form arglist)
+                  (arm642-multiple-value-body seg form)
+                  (! add-values))
+                (arm642-set-nargs seg 0)
+                (! recover-values)
+                (arm642-close-undo))
+              (! lisp-word-ref arm64::nfn arm64::vsp arm64::nargs)
+              (arm642-invoke-fn seg arm64::nfn nil nil xfer)))
+          (unless recursive-p
+            (if mv-p
+              (unless (eq xfer $backend-return)
+                (let* ((*arm642-returning-values* t))
+                  (^)))
+              (progn
+                (arm642-adjust-vstack (- *arm642-target-node-size*))
+                (! vstack-discard 1)
+                (<- arm64::arg_z)
+                (^)))))))))
+
+;;; ======================================================================
+;;; Section 10: Closure & Builtin Support (Chunk 6)
+;;; ======================================================================
+
+(defun arm642-seq-fbind (seg vreg xfer vars afuncs body p2decls)
+  (let* ((old-stack (arm642-encode-stack))
+         (copy afuncs)
+         (func nil))
+    (with-arm642-p2-declarations p2decls
+      (dolist (var vars)
+        (when (neq 0 (afunc-fn-refcount (setq func (pop afuncs))))
+          (arm642-seq-bind-var seg var (nx1-afunc-ref func))))
+      (arm642-undo-body seg vreg xfer body old-stack)
+      (dolist (var vars)
+        (when (neq 0 (afunc-fn-refcount (setq func (pop copy))))
+          (arm642-close-var seg var))))))
+
+(defun arm642-make-closure (seg afunc downward-p)
+  (with-arm64-local-vinsn-macros (seg)
+    (flet ((var-to-reg (var target)
+             (let* ((ea (var-ea (var-bits var))))
+               (if ea
+                 (arm642-addrspec-to-reg seg (arm642-ea-open ea) target)
+                 (! load-nil target))
+               target))
+           (set-some-cells (dest cellno c0 c1 c2 c3)
+             (declare (fixnum cellno))
+             (! misc-set-c-node c0 dest cellno)
+             (incf cellno)
+             (when c1
+               (! misc-set-c-node c1 dest cellno)
+               (incf cellno)
+               (when c2
+                 (! misc-set-c-node c2 dest cellno)
+                 (incf cellno)
+                 (when c3
+                   (! misc-set-c-node c3 dest cellno)
+                   (incf cellno))))
+             cellno))
+      (let* ((inherited-vars (afunc-inherited-vars afunc))
+             (arch (backend-target-arch *target-backend*))
+             (dest ($ arm64::arg_z))
+             (vsize (+ (length inherited-vars)
+                       3                ; entrypoint,%closure-code%, afunc
+                       2)))             ; name, lfun-bits
+        (declare (list inherited-vars))
+        (if downward-p
+          (progn
+            (let* ((*arm642-vstack* *arm642-vstack*))
+              (arm642-lri seg arm64::arg_x (ash (nx-lookup-target-uvector-subtag :function) *arm642-target-fixnum-shift*))
+              (arm642-lri seg arm64::temp0 0)
+              (! %closure-code% arm64::arg_y)
+              (arm642-store-immediate seg (arm642-afunc-lfun-ref afunc) arm64::arg_z)
+              (arm642-vpush-register-arg seg arm64::arg_x)
+              (arm642-vpush-register-arg seg arm64::temp0)
+              (arm642-vpush-register-arg seg arm64::arg_y)
+              (arm642-vpush-register-arg seg arm64::arg_z)
+              (dolist (v inherited-vars)
+                (arm642-vpush-register-arg seg (var-to-reg v arm64::arg_z)))
+              (! load-nil arm64::arg_z)
+              (arm642-vpush-register-arg seg arm64::arg_z)
+              (arm642-lri seg arm64::arg_z (ash (ash 1 $lfbits-trampoline-bit) *arm642-target-fixnum-shift*))
+              (arm642-vpush-register-arg seg arm64::arg_z)
+              (arm642-set-nargs seg (1+ vsize))
+              (! make-stack-closure))
+            (arm642-open-undo $undostkblk))
+          (let* ((cell 1))
+            (declare (fixnum cell))
+            (progn
+              (arm642-lri seg
+                        arm64::imm0
+                        (arch::make-vheader vsize (nx-lookup-target-uvector-subtag :function)))
+              (! %alloc-misc-fixed dest arm64::imm0 (ash vsize (arch::target-word-shift arch))))
+            (! %closure-code% arm64::arg_x)
+            (! %codevector-entry arm64::lr arm64::arg_x)
+            (! misc-set-c-node arm64::lr dest 0)
+            (arm642-store-immediate seg (arm642-afunc-lfun-ref afunc) arm64::arg_y)
+            (with-node-temps (arm64::arg_z) (t0 t1 t2 t3)
+              (do* ((ccode arm64::arg_x nil)
+                    (func arm64::arg_y nil))
+                   ((null inherited-vars))
+                (let* ((t0r (or ccode (if inherited-vars (var-to-reg (pop inherited-vars) t0))))
+                       (t1r (or func (if inherited-vars (var-to-reg (pop inherited-vars) t1))))
+                       (t2r (if inherited-vars (var-to-reg (pop inherited-vars) t2)))
+                       (t3r (if inherited-vars (var-to-reg (pop inherited-vars) t3))))
+                  (setq cell (set-some-cells dest cell t0r t1r t2r t3r)))))
+            (arm642-lri seg arm64::arg_y (ash (ash 1 $lfbits-trampoline-bit) *arm642-target-fixnum-shift*))
+            (! load-nil arm64::arg_x)
+            (! misc-set-c-node arm64::arg_x dest cell)
+            (! misc-set-c-node arm64::arg_y dest (1+ cell))))
+        dest))))
+
+(defun arm642-builtin-index-subprim (idx)
+  (let* ((arch (backend-target-arch *target-backend*))
+         (table (arch::target-primitive->subprims arch))
+         (shift (arch::target-subprims-shift arch)))
+    (dolist (cell table)
+      (destructuring-bind ((low . high) . base) cell
+        (if (and (>= idx low)
+                 (< idx high))
+          (return (+ base (ash (- idx low) shift))))))))
+
+(defun arm642-fixed-call-builtin (seg vreg xfer name)
+  (with-arm64-local-vinsn-macros (seg vreg xfer)
+    (let* ((index (arch::builtin-function-name-offset name))
+           (subprim (if index
+                      (arm642-builtin-index-subprim index)
+                      (or (arm64::arm64-subprimitive-offset name)
+                          (compiler-bug "Unknown builtin subprim index for ~s" name))))
+           (tail-p (arm642-tailcallok xfer)))
+      (when tail-p
+        (arm642-restore-nvrs seg nil)
+        (arm642-restore-non-volatile-fprs seg)
+        (! restore-nfp)
+        (arm642-restore-full-lisp-context seg))
+      (if tail-p
+        (! jump-subprim subprim)
+        (progn
+          (! call-subprim subprim)
+          (<- ($ arm64::arg_z))
+          (^))))))
+
+(defun arm642-unary-builtin (seg vreg xfer name form)
+  (with-arm64-local-vinsn-macros (seg)
+    (arm642-one-targeted-reg-form seg form ($ arm64::arg_z))
+    (arm642-fixed-call-builtin seg vreg xfer name)))
+
+(defun arm642-binary-builtin (seg vreg xfer name form1 form2)
+  (with-arm64-local-vinsn-macros (seg)
+    (arm642-two-targeted-reg-forms seg form1 ($ arm64::arg_y) form2 ($ arm64::arg_z))
+    (arm642-fixed-call-builtin seg vreg xfer name)))
+
+(defun arm642-ternary-builtin (seg vreg xfer name form1 form2 form3)
+  (with-arm64-local-vinsn-macros (seg)
+    (arm642-three-targeted-reg-forms seg form1 ($ arm64::arg_x) form2 ($ arm64::arg_y) form3 ($ arm64::arg_z))
+    (arm642-fixed-call-builtin seg vreg xfer name)))
+
+;;; ======================================================================
+;;; Section 11: defarm642 Macro + Call Operators (Chunk 6)
+;;; ======================================================================
+
+(eval-when (:compile-toplevel :execute :load-toplevel)
+
+  (defmacro defarm642 (name locative arglist &body forms)
+    (multiple-value-bind (body decls)
+        (parse-body forms nil t)
+      (destructuring-bind (vcode-block dest control &rest other-args) arglist
+        (let* ((fun `(nfunction ,name
+                      (lambda (,vcode-block ,dest ,control ,@other-args) ,@decls
+                              (block ,name (with-arm64-local-vinsn-macros (,vcode-block ,dest ,control) ,@body))))))
+          `(progn
+            (record-source-file ',name 'function)
+            (svset *arm642-specials* (%ilogand #.operator-id-mask (%nx1-operator ,locative)) ,fun))))))
+  )
+
+(defarm642 arm642-multiple-value-list multiple-value-list (seg vreg xfer form)
+  (arm642-multiple-value-body seg form)
+  (! list)
+  (when vreg
+    (<- arm64::arg_z))
+  (^))
+
+(defarm642 arm642-call call (seg vreg xfer fn arglist &optional spread-p)
+  (when (and (null vreg)
+             (acode-p fn)
+             (eq (acode-operator fn) (%nx1-operator immediate)))
+    (let* ((name (car (acode-operands fn))))
+      (when (memq name *warn-if-function-result-ignored*)
+        (p2-whine *arm642-cur-afunc* :result-ignored name))))
+  (arm642-call-fn seg vreg xfer fn arglist spread-p))
+
+(defarm642 arm642-self-call self-call (seg vreg xfer arglist &optional spread-p)
+  (setq arglist (arm642-augment-arglist *arm642-cur-afunc* arglist (if spread-p 1 $numarm64argregs)))
+  (arm642-call-fn seg vreg xfer -1 arglist spread-p))
+
+(defarm642 arm642-lexical-function-call lexical-function-call (seg vreg xfer afunc arglist &optional spread-p)
+  (arm642-call-fn seg vreg xfer (make-acode (%nx1-operator simple-function) afunc)
+                (arm642-augment-arglist afunc arglist (if spread-p 1 $numarm64argregs))
+                spread-p))
+
+(defarm642 arm642-builtin-call builtin-call (seg vreg xfer index arglist)
+  (let* ((nargs (arm642-arglist seg arglist))
+         (tail-p (and (arm642-tailcallok xfer) (<= nargs $numarm64argregs)))
+         (idx (acode-fixnum-form-p index))
+         (idx-subprim (arm642-builtin-index-subprim idx))
+         (subprim
+          (or idx-subprim
+              (compiler-bug "Isn't this code long since unused ?")
+              #+nil
+              (case nargs
+                (0 (arm64::arm64-subprimitive-offset '.SPcallbuiltin0))
+                (1 (arm64::arm64-subprimitive-offset '.SPcallbuiltin1))
+                (2 (arm64::arm64-subprimitive-offset '.SPcallbuiltin2))
+                (3 (arm64::arm64-subprimitive-offset '.SPcallbuiltin3))
+                (t (arm64::arm64-subprimitive-offset '.SPcallbuiltin))))))
+    (when tail-p
+      (arm642-restore-nvrs seg nil)
+      (arm642-restore-non-volatile-fprs seg)
+      (! restore-nfp)
+      (arm642-restore-full-lisp-context seg))
+    #+nil
+    (unless idx-subprim
+      (! lri arm64::imm0 (ash idx *arm642-target-fixnum-shift*))
+      (when (eql subprim (arm64::arm64-subprimitive-offset '.SPcallbuiltin))
+        (arm642-set-nargs seg nargs)))
+    (if tail-p
+      (! jump-subprim subprim)
+      (progn
+        (! call-subprim subprim)
+        (<- arm64::arg_z)
+        (^)))))
+
+(defarm642 arm642-multiple-value-call multiple-value-call (seg vreg xfer fn arglist)
+  (arm642-mvcall seg vreg xfer fn arglist))
+
+;;; ======================================================================
+;;; Section 12: Additional Helpers (Chunk 6)
+;;; ======================================================================
+
+;;; On ARM64, fixnumshift=0 so val is just the raw fixnum value.
+;;; ARM64 add/sub immediates: unsigned 12-bit (< 4096).
+;;; For CMP we can use either CMP (subtract) or CMN (add), so check abs(val).
+(defun arm642-constant-for-compare-p (form &optional unboxed)
+  (setq form (acode-unwrapped-form form))
+  (when (acode-p form)
+    (let* ((op (acode-operator form)))
+      (if (eql op (%nx1-operator fixnum))
+        (let* ((val (if unboxed
+                      (car (acode-operands form))
+                      (ash (car (acode-operands form)) arm64::fixnumshift))))
+          (if (< (abs val) 4096)
+            val))
+        (if (eql op (%nx1-operator %unbound-marker))
+          arm64::unbound-marker
+          (if (eql op (%nx1-operator %slot-unbound-marker))
+            arm64::slot-unbound-marker))))))
+
+(defun arm642-hard-opt-p (opts)
+  (or
+   (dolist (x (%cadr opts))
+     (unless (nx-null x) (return t)))
+   (dolist (x (%caddr opts))
+     (when x (return t)))))
+
+(defun arm642-close-lambda (seg req opt rest keys auxen)
+  (dolist (var req)
+    (arm642-close-var seg var))
+  (dolist (var (%car opt))
+    (arm642-close-var seg var))
+  (dolist (var (%caddr opt))
+    (when var
+      (arm642-close-var seg var)))
+  (if rest
+    (arm642-close-var seg rest))
+  (dolist (var (%cadr keys))
+    (arm642-close-var seg var))
+  (dolist (var (%caddr keys))
+    (if var (arm642-close-var seg var)))
+  (dolist (var (%car auxen))
+    (arm642-close-var seg var)))
+
+(defun arm642-natural-constant (seg vreg xfer value)
+  (arm642-use-operator
+   (if (typep value *nx-target-fixnum-type*)
+     (%nx1-operator fixnum)
+     (%nx1-operator immediate))
+   seg vreg xfer value))
+
+(defun arm642-store-macptr (seg vreg address-reg)
+  (with-arm64-local-vinsn-macros (seg vreg)
+    (when (arm642-for-value-p vreg)
+      (if (logbitp vreg arm64-imm-regs)
+        (<- address-reg)
+        (! macptr->heap vreg address-reg)))))
+
+(defun arm642-store-signed-longword (seg vreg imm-reg)
+  (with-arm64-local-vinsn-macros (seg vreg)
+    (when (arm642-for-value-p vreg)
+      (if (logbitp vreg arm64-imm-regs)
+        (<- imm-reg)
+        (arm642-box-s32 seg vreg imm-reg)))))
+
