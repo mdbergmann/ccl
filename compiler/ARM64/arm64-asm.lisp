@@ -2137,6 +2137,21 @@
                (logior #xd4400000
                        (ash (logior 4 (ash reg 3) (ash tag 8)) 5))))
 
+            ;;=== MRS: read system register ===
+            ;; (mrs Rd (:$ sysreg-encoding))
+            ;; sysreg is 15-bit: op0[1]:op1[3]:CRn[4]:CRm[4]:op2[3]
+            ((string-equal name "MRS")
+             (let ((rd (gpr (op 0)))
+                   (sysreg (imm-val (op 1))))
+               (logior #xD5300000 (ash (logand sysreg #x7FFF) 5) rd)))
+
+            ;;=== MSR: write system register ===
+            ;; (msr (:$ sysreg-encoding) Rn)
+            ((string-equal name "MSR")
+             (let ((sysreg (imm-val (op 0)))
+                   (rn (gpr (op 1))))
+               (logior #xD5100000 (ash (logand sysreg #x7FFF) 5) rn)))
+
             (t
              (error "Unknown ARM64 instruction: ~s" form)))))))
 
