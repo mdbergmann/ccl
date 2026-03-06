@@ -270,7 +270,12 @@
 (defun setup-arm64-ftd (backend)
   (or (backend-target-foreign-type-data backend)
       (let* ((name (backend-name backend))
-             (ftd
+             (pkg-name (case name
+                         (:darwinarm64 "ARM64-DARWIN")
+                         (:linuxarm64 "ARM64-LINUX"))))
+        (when pkg-name
+          (or (find-package pkg-name) (make-package pkg-name :use '("COMMON-LISP"))))
+        (let* ((ftd
               (case name
                 (:darwinarm64
                  (make-ftd :interface-db-directory "ccl:darwin-arm64-headers;"
@@ -305,17 +310,24 @@
                            (intern "GENERATE-CALLBACK-BINDINGS" "ARM64-LINUX")
                            :callback-return-value-function
                            (intern "GENERATE-CALLBACK-RETURN-VALUE" "ARM64-LINUX"))))))
-        (install-standard-foreign-types ftd)
-        (use-interface-dir :libc ftd)
-        (setf (backend-target-foreign-type-data backend) ftd))))
+          (install-standard-foreign-types ftd)
+          (use-interface-dir :libc ftd)
+          (setf (backend-target-foreign-type-data backend) ftd)))))
+
+#-arm64-target
+(setup-arm64-ftd *arm64-backend*)
 
 (pushnew *arm64-backend* *known-backends* :key #'backend-name)
 #-arm64-target
 (progn
   #+(or darwinarm64-target (not arm64-target))
-  (pushnew *darwinarm64-backend* *known-backends* :key #'backend-name)
+  (progn
+    (setup-arm64-ftd *darwinarm64-backend*)
+    (pushnew *darwinarm64-backend* *known-backends* :key #'backend-name))
   #+(or linuxarm64-target (not arm64-target))
-  (pushnew *linuxarm64-backend* *known-backends* :key #'backend-name))
+  (progn
+    (setup-arm64-ftd *linuxarm64-backend*)
+    (pushnew *linuxarm64-backend* *known-backends* :key #'backend-name)))
 
 
 ;;; AAPCS64 FFI stubs.

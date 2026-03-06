@@ -95,7 +95,7 @@
   '(arm-backend arm-vinsns arm2))
 
 (defparameter *arm64-compiler-modules*
-  '(arm64-arch arm64env arm64-asm arm64-lap))
+  '(arm64-arch arm64env arm64-asm risc-lap arm64-lap))
 
 (defparameter *arm64-compiler-backend-modules*
   '(arm64-backend arm64-vinsns arm642))

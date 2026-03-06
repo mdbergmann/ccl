@@ -1447,11 +1447,11 @@
 
             ;;=== CBZ / CBNZ ===
             ((string-equal name "CBZ")
-             (let ((rt (gpr (op 0))))
-               (values (logior #xb4000000 rt) :cbz)))
+             (let ((dest (gpr (op 0))))
+               (values (logior #xb4000000 dest) :cbz)))
             ((string-equal name "CBNZ")
-             (let ((rt (gpr (op 0))))
-               (values (logior #xb5000000 rt) :cbnz)))
+             (let ((dest (gpr (op 0))))
+               (values (logior #xb5000000 dest) :cbnz)))
 
             ;;=== ADR ===
             ((string-equal name "ADR")
@@ -1704,7 +1704,7 @@
                                   (ash rm-enc 16)
                                   (ash (logand shift-amt #x3f) 10)
                                   (ash (gpr rn) 5)
-                                  (gpr rd)))))))))))
+                                  (gpr rd))))))))))
 
             ;;=== MUL / MADD / SMULH / UMULH ===
             ((string-equal name "MUL")
@@ -1877,26 +1877,26 @@
 
             ;;=== LDR / LDUR / LDR (scaled positive offset or register) ===
             ((string-equal name "LDR")
-             (arm64-encode-load-store form name ops #t 8 #b11))
+             (arm64-encode-load-store form name ops t 8 #b11))
             ((string-equal name "LDUR")
-             (arm64-encode-ldur-stur form name ops #t 8 #b11))
+             (arm64-encode-ldur-stur form name ops t 8 #b11))
             ((string-equal name "STR")
              (arm64-encode-load-store form name ops nil 8 #b11))
             ((string-equal name "STUR")
              (arm64-encode-ldur-stur form name ops nil 8 #b11))
             ((string-equal name "LDRB")
-             (arm64-encode-load-store form name ops #t 1 #b00))
+             (arm64-encode-load-store form name ops t 1 #b00))
             ((string-equal name "LDRH")
-             (arm64-encode-load-store form name ops #t 2 #b01))
+             (arm64-encode-load-store form name ops t 2 #b01))
             ((string-equal name "LDRSB")
              ;; LDRSB (64-bit) — size=00, opc=10
-             (arm64-encode-load-store form name ops #t 1 #b00 #b10))
+             (arm64-encode-load-store form name ops t 1 #b00 #b10))
             ((string-equal name "LDRSH")
              ;; LDRSH (64-bit) — size=01, opc=10
-             (arm64-encode-load-store form name ops #t 2 #b01 #b10))
+             (arm64-encode-load-store form name ops t 2 #b01 #b10))
             ((string-equal name "LDRSW")
              ;; LDRSW — size=10, opc=10
-             (arm64-encode-load-store form name ops #t 4 #b10 #b10))
+             (arm64-encode-load-store form name ops t 4 #b10 #b10))
             ((string-equal name "STRB")
              (arm64-encode-load-store form name ops nil 1 #b00))
             ((string-equal name "STRH")
@@ -1906,11 +1906,11 @@
             ;; LDR32: zero-extending 32-bit load (LDR Wt, [addr])
             ;; STR32: 32-bit store (STR Wt, [addr])
             ((string-equal name "LDR32")
-             (arm64-encode-load-store form name ops #t 4 #b10))
+             (arm64-encode-load-store form name ops t 4 #b10))
             ((string-equal name "STR32")
              (arm64-encode-load-store form name ops nil 4 #b10))
             ((string-equal name "LDUR32")
-             (arm64-encode-ldur-stur form name ops #t 4 #b10))
+             (arm64-encode-ldur-stur form name ops t 4 #b10))
             ((string-equal name "STUR32")
              (arm64-encode-ldur-stur form name ops nil 4 #b10))
 
@@ -2191,7 +2191,8 @@
                (logior #xD5100000 (ash (logand sysreg #x7FFF) 5) rn)))
 
             (t
-             (error "Unknown ARM64 instruction: ~s" form)))))))
+             (error "Unknown ARM64 instruction: ~s" form))))))))
+
 
 
 ;;; ---- Load/store encoding helpers ----
@@ -2203,7 +2204,7 @@
   (let* ((rt-raw (first ops))
          (addr (second ops))
          (is-fpr (arm64-fpr-p rt-raw))
-         (rt (if is-fpr (need-arm64-fpr-encoding rt-raw) (need-arm64-gpr-encoding rt-raw)))
+         (dest (if is-fpr (need-arm64-fpr-encoding rt-raw) (need-arm64-gpr-encoding rt-raw)))
          (opc (or opc-override (if is-load (if is-fpr #b01 #b01) #b00))))
     ;; Determine addressing mode
     (cond
@@ -2224,11 +2225,11 @@
                        (ash opc 22)
                        (ash (logand scaled-off #xfff) 10)
                        (ash base 5)
-                       rt)
+                       dest)
                ;; Offset too large for unsigned: use unscaled
-               (arm64-encode-unscaled-offset size-bits v-bit opc base offset rt)))
+               (arm64-encode-unscaled-offset size-bits v-bit opc base offset dest)))
            ;; Not naturally aligned or negative: use unscaled (LDUR/STUR form)
-           (arm64-encode-unscaled-offset size-bits v-bit opc base offset rt))))
+           (arm64-encode-unscaled-offset size-bits v-bit opc base offset dest))))
       ;; (:@ base index) — register offset (no shift, no extend)
       ((and (consp addr) (eq (car addr) :@)
             (not (consp (caddr addr))))
@@ -2243,21 +2244,21 @@
                  (ash index 16)
                  (ash #b011 13)  ; option = LSL
                  (ash base 5)
-                 rt)))
+                 dest)))
       ;; (:@! base (:$ offset)) — pre-index
       ((and (consp addr) (eq (car addr) :@!)
             (consp (caddr addr)) (eq (car (caddr addr)) :$))
        (let* ((base (need-arm64-gpr-encoding (cadr addr)))
               (offset (cadr (caddr addr)))
               (v-bit (if is-fpr 1 0)))
-         (arm64-encode-pre-post-index size-bits v-bit opc base offset rt #b11)))
+         (arm64-encode-pre-post-index size-bits v-bit opc base offset dest #b11)))
       ;; (:@+ base (:$ offset)) — post-index
       ((and (consp addr) (eq (car addr) :@+)
             (consp (caddr addr)) (eq (car (caddr addr)) :$))
        (let* ((base (need-arm64-gpr-encoding (cadr addr)))
               (offset (cadr (caddr addr)))
               (v-bit (if is-fpr 1 0)))
-         (arm64-encode-pre-post-index size-bits v-bit opc base offset rt #b01)))
+         (arm64-encode-pre-post-index size-bits v-bit opc base offset dest #b01)))
       (t (error "Unsupported addressing mode in ~s" form)))))
 
 (defun arm64-encode-ldur-stur (form name ops is-load scale size-bits)
@@ -2266,7 +2267,7 @@
   (let* ((rt-raw (first ops))
          (addr (second ops))
          (is-fpr (arm64-fpr-p rt-raw))
-         (rt (if is-fpr (need-arm64-fpr-encoding rt-raw) (need-arm64-gpr-encoding rt-raw)))
+         (dest (if is-fpr (need-arm64-fpr-encoding rt-raw) (need-arm64-gpr-encoding rt-raw)))
          (opc (if is-load (if is-fpr #b01 #b01) #b00))
          (v-bit (if is-fpr 1 0)))
     (cond
@@ -2274,10 +2275,10 @@
             (consp (caddr addr)) (eq (car (caddr addr)) :$))
        (let* ((base (need-arm64-gpr-encoding (cadr addr)))
               (offset (cadr (caddr addr))))
-         (arm64-encode-unscaled-offset size-bits v-bit opc base offset rt)))
+         (arm64-encode-unscaled-offset size-bits v-bit opc base offset dest)))
       (t (error "Unsupported addressing mode for LDUR/STUR: ~s" form)))))
 
-(defun arm64-encode-unscaled-offset (size-bits v-bit opc base offset rt)
+(defun arm64-encode-unscaled-offset (size-bits v-bit opc base offset dest)
   "LDUR/STUR encoding: size 11 V opc 0 imm9 00 Rn Rt"
   (logior (ash size-bits 30)
           #x38000000
@@ -2285,9 +2286,9 @@
           (ash opc 22)
           (ash (logand offset #x1ff) 12)
           (ash base 5)
-          rt))
+          dest))
 
-(defun arm64-encode-pre-post-index (size-bits v-bit opc base offset rt mode)
+(defun arm64-encode-pre-post-index (size-bits v-bit opc base offset dest mode)
   "Pre/post-index encoding: size 11 V opc 0 imm9 mode Rn Rt
    mode: 11=pre-index, 01=post-index"
   (logior (ash size-bits 30)
@@ -2297,7 +2298,7 @@
           (ash (logand offset #x1ff) 12)
           (ash mode 10)
           (ash base 5)
-          rt))
+          dest))
 
 ;;; ---- LDP / STP ----
 
