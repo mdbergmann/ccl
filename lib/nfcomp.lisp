@@ -1272,6 +1272,9 @@ Will differ from *compiling-file* during an INCLUDE")
       (case type-code
         (#.target::tag-fixnum
          (fasl-scan-fixnum exp))
+        #+arm64-target
+        (#.arm64::tag-negative-fixnum
+         (fasl-scan-fixnum exp))
         (#+ppc64-target #.target::fulltag-cons
          #-ppc64-target #.target::tag-list (fasl-scan-list exp))
         #+ppc32-target
@@ -1288,6 +1291,8 @@ Will differ from *compiling-file* during an INCLUDE")
           #.x8664::fulltag-imm-1))
         #+arm-target
         (#.arm::tag-imm)
+        #+arm64-target
+        ((#.arm64::tag-single-float #.arm64::tag-character))
         (t
          (if
            #+ppc32-target
@@ -1304,6 +1309,9 @@ Will differ from *compiling-file* during an INCLUDE")
                                  (ash 1 x8664::fulltag-immheader-2))))
            #+arm-target
            (= (the fixnum (logand type-code arm::fulltagmask)) arm::fulltag-immheader)
+           #+arm64-target
+           (and (logbitp 7 (the fixnum type-code))
+                (not (logbitp 5 (the fixnum type-code))))
            (case type-code
              (#.target::subtag-dead-macptr (fasl-unknown exp))
              (#.target::subtag-macptr
@@ -1323,7 +1331,8 @@ Will differ from *compiling-file* during an INCLUDE")
              (#+ppc-target #.target::subtag-symbol
               #+x8632-target #.target::subtag-symbol
               #+x8664-target #.target::tag-symbol
-              #+arm-target #.target::subtag-symbol (fasl-scan-symbol exp))
+              #+arm-target #.target::subtag-symbol
+              #+arm64-target #.target::subtag-symbol (fasl-scan-symbol exp))
              ((#.target::subtag-instance #.target::subtag-struct)
               (fasl-scan-user-form exp))
              (#.target::subtag-package (fasl-scan-ref exp))

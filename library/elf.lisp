@@ -189,7 +189,7 @@
                   ))
     (functions)))
 
-#+(or arm-target ppc-target)
+#+(or arm-target arm64-target ppc-target)
 (defun collect-elf-static-functions ()
   (ccl::purify)
   (multiple-value-bind (pure-low pure-high)
@@ -200,7 +200,7 @@
             (values (ash (ccl::%fixnum-ref a target::area.low) target::fixnumshift)
                     (ash (ccl::%fixnum-ref a target::area.active) target::fixnumshift)))))
     (let* ((hash (make-hash-table :test #'eq))
-           (code-vector-index #+ppc-target 0 #+arm-target 1))
+           (code-vector-index #+ppc-target 0 #+(or arm-target arm64-target) 1))
       (ccl::%map-lfuns #'(lambda (f)
                            (let* ((code-vector  (ccl:uvref f code-vector-index))
                                   (startaddr (+ (ccl::%address-of code-vector)
@@ -262,12 +262,14 @@
             #+x86-target (%address-of f)
             #+ppc-target (- (%address-of (uvref f 0)) (- ppc::fulltag-misc ppc::node-size))
             #+arm-target (- (%address-of (uvref f 1)) (- arm::fulltag-misc arm::node-size))
+            #+arm64-target (- (%address-of (uvref f 1)) (- arm64::fulltag-misc arm64::node-size))
             (pref p
                   #+64-bit-target :<E>lf64_<S>ym.st_size
                   #+32-bit-target :<E>lf32_<S>ym.st_size)
             #+x86-target (1+ (ash (1- (%function-code-words f)) target::word-shift))
             #+ppc-target (ash (uvsize (uvref f 0)) ppc::word-shift)
             #+arm-target (ash (uvsize (uvref f 1)) arm::word-shift)
+            #+arm64-target (ash (uvsize (uvref f 1)) arm64::word-shift)
             ))))
 
 (defun elf-section-index (section)
@@ -374,6 +376,7 @@
                                            #+ppc32-target #$EM_PPC
                                            #+ppc64-target #$EM_PPC64
                                            #+arm-target #$EM_ARM
+                                           #+arm64-target #$EM_AARCH64
                                            ))
          (program-header (new-elf-program-header object))
          (lisp-section (new-elf-section object))

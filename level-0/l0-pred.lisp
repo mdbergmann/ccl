@@ -515,6 +515,131 @@
 
 );#+(or ppc32-target arm-target)
 
+#+arm64-target
+(progn
+(defparameter *nodeheader-types*
+  ;; Indexed by (logand subtag #x1f) for gvector subtags 0xA0-0xBF.
+  #(ratio                               ; 0 - subtag-ratio
+    complex                             ; 1 - subtag-complex
+    function                            ; 2 - subtag-function
+    symbol                              ; 3 - subtag-symbol
+    catch-frame                         ; 4 - subtag-catch-frame
+    basic-stream                        ; 5 - subtag-basic-stream
+    lock                                ; 6 - subtag-lock
+    hash-table-vector                   ; 7 - subtag-hash-vector
+    pool                                ; 8 - subtag-pool
+    population                          ; 9 - subtag-weak
+    package                             ; 10 - subtag-package
+    slot-vector                         ; 11 - subtag-slot-vector
+    standard-instance                   ; 12 - subtag-instance
+    structure                           ; 13 - subtag-struct
+    internal-structure                  ; 14 - subtag-istruct
+    value-cell                          ; 15 - subtag-value-cell
+    xfunction                           ; 16 - subtag-xfunction
+    bogus                               ; 17
+    bogus                               ; 18
+    bogus                               ; 19
+    bogus                               ; 20
+    bogus                               ; 21
+    bogus                               ; 22
+    bogus                               ; 23
+    bogus                               ; 24
+    bogus                               ; 25
+    bogus                               ; 26
+    bogus                               ; 27
+    bogus                               ; 28
+    array-header                        ; 29 - subtag-arrayH
+    vector-header                       ; 30 - subtag-vectorH
+    simple-vector                       ; 31 - subtag-simple-vector
+    ))
+
+(defparameter *immheader-types*
+  ;; Indexed by (logand subtag #x3f) for immheader subtags 0x80-0x9F.
+  #(bignum                              ; 0 - subtag-bignum
+    simple-signed-long-vector           ; 1 - subtag-s32-vector
+    double-float                        ; 2 - subtag-double-float
+    simple-unsigned-long-vector         ; 3 - subtag-u32-vector
+    (complex single-float)              ; 4 - subtag-complex-single-float
+    simple-short-float-vector           ; 5 - subtag-single-float-vector
+    (complex double-float)              ; 6 - subtag-complex-double-float
+    simple-base-string                  ; 7 - subtag-simple-base-string
+    xcode-vector                        ; 8 - subtag-xcode-vector
+    bogus                               ; 9
+    macptr                              ; 10 - subtag-macptr
+    simple-signed-doubleword-vector     ; 11 - subtag-s64-vector
+    dead-macptr                         ; 12 - subtag-dead-macptr
+    simple-unsigned-doubleword-vector   ; 13 - subtag-u64-vector
+    bogus                               ; 14
+    simple-fixnum-vector                ; 15 - subtag-fixnum-vector
+    bogus                               ; 16
+    simple-double-float-vector          ; 17 - subtag-double-float-vector
+    bogus                               ; 18
+    simple-complex-single-float-vector  ; 19 - subtag-complex-single-float-vector
+    bogus                               ; 20
+    simple-signed-byte-vector           ; 21 - subtag-s8-vector
+    bogus                               ; 22
+    simple-unsigned-byte-vector         ; 23 - subtag-u8-vector
+    bogus                               ; 24
+    simple-signed-word-vector           ; 25 - subtag-s16-vector
+    bogus                               ; 26
+    simple-unsigned-word-vector         ; 27 - subtag-u16-vector
+    bogus                               ; 28
+    simple-complex-double-float-vector  ; 29 - subtag-complex-double-float-vector
+    bogus                               ; 30
+    simple-bit-vector                   ; 31 - subtag-bit-vector
+    ))
+
+(defun %type-of (thing)
+  (if (null thing)
+    'null
+    (let* ((typecode (typecode thing)))
+      (declare (fixnum typecode))
+      (cond ((= typecode arm64::tag-fixnum) 'fixnum)
+            ((= typecode arm64::tag-negative-fixnum) 'fixnum)
+            ((= typecode arm64::tag-cons) 'cons)
+            ((= typecode arm64::tag-single-float) 'short-float)
+            ((= typecode arm64::tag-character) 'character)
+            ((logbitp 7 typecode)
+             ;; Uvector header subtag (bit 7 set)
+             (if (= typecode arm64::subtag-macptr)
+               (if (classp thing)
+                 (class-name thing)
+                 'macptr)
+               (if (logbitp 5 typecode)
+                 ;; Gvector (nodeheader): bit 5 set
+                 (let ((type (%svref *nodeheader-types*
+                                     (logand typecode #x1f))))
+                   (cond ((eq type 'function)
+                          (let ((bits (lfun-bits thing)))
+                            (declare (fixnum bits))
+                            (if (logbitp $lfbits-trampoline-bit bits)
+                              (let ((inner-fn (closure-function thing)))
+                                (if (neq inner-fn thing)
+                                  (let ((inner-bits (lfun-bits inner-fn)))
+                                    (if (logbitp $lfbits-method-bit
+                                                 inner-bits)
+                                      'compiled-lexical-closure
+                                      (if (logbitp $lfbits-gfn-bit
+                                                   inner-bits)
+                                        'standard-generic-function
+                                        (if (logbitp $lfbits-cm-bit
+                                                     inner-bits)
+                                          'combined-method
+                                          'compiled-lexical-closure))))
+                                  'compiled-lexical-closure))
+                              (if (logbitp $lfbits-method-bit bits)
+                                'method-function
+                                'compiled-function))))
+                         ((eq type 'lock)
+                          (or (uvref thing target::lock.kind-cell)
+                              type))
+                         (t type)))
+                 ;; Immheader: bit 5 clear
+                 (%svref *immheader-types* (logand typecode #x3f)))))
+            (t 'immediate)))))
+
+);#+arm64-target
+
 #+ppc64-target
 (progn
 (defparameter *immheader-types*

@@ -93,7 +93,7 @@ are running on, or NIL if we can't find any useful information."
                               (read-line f nil nil))
                         (target #+ppc-target "machine"
                                 #+x86-target "model name"
-                                #+arm-target "Hardware"))
+                                #+(or arm-target arm64-target) "Hardware"))
                        ((null line))
                     (let* ((matched (cpu-info-match target line)))
                       (when matched (return matched)))))))
@@ -825,6 +825,7 @@ are running on, or NIL if we can't find any useful information."
   (#+ppc-target ppc-xdisassemble
    #+x86-target x86-xdisassemble
    #+arm-target arm-xdisassemble
+   #+arm64-target arm64-xdisassemble
    (require-type (function-for-disassembly thing) 'compiled-function)))
 
 (defun function-for-disassembly (thing)
@@ -1305,6 +1306,16 @@ are running on, or NIL if we can't find any useful information."
                      (%svref *immheader-types* (ash i -3)))
                     ((= fulltag target::fulltag-nodeheader)
                      (%svref *nodeheader-types* (ash i -3)))))))
+    #+arm64-target
+    (dotimes (i 256)
+      ;; ARM64 TBI subtags: bit 7 set = uvector header,
+      ;; bit 5 clear = immheader, bit 5 set = nodeheader (gvector).
+      ;; Index = (- i #x80) for immheaders, (- i #xA0) for nodeheaders.
+      (when (logbitp 7 i)
+        (setf (%svref a i)
+              (if (logbitp 5 i)
+                (%svref *nodeheader-types* (logand i #x1f))
+                (%svref *immheader-types* (logand i #x3f))))))
     a))
 
   

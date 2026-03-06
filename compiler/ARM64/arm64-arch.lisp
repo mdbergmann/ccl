@@ -561,6 +561,12 @@
 (defconstant tag-illegal (logior imm-tag-mask 5))           ; #x15
 (defconstant tag-stack-alloc (logior imm-tag-mask 6))       ; #x16
 
+;;; Compatibility aliases — other parts of the codebase reference
+;;; target::tag-fixnum, target::tag-list, etc. uniformly across all archs.
+(defconstant tag-fixnum tag-positive-fixnum)     ; = 0
+(defconstant tag-list tag-cons)                  ; = 3 (nil handled separately)
+(defconstant fulltagmask #xFF)                   ; full tag byte mask
+
 ;;; Subtag aliases for immediates — other parts of the codebase
 ;;; reference these under the subtag- naming convention.
 (defconstant subtag-single-float tag-single-float)
@@ -593,6 +599,7 @@
 (defconstant gvector-tag-mask (ash 1 gvector-tag-bit))     ; #x20
 
 (defconstant uvector-ref #x40)
+(defconstant fulltag-misc uvector-ref)                         ; for target:: compatibility
 (defconstant uvector-header #x80)
 (defconstant uvector-mask (logior uvector-header uvector-ref))  ; #xC0
 
