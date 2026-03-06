@@ -287,8 +287,10 @@
   (car (rassoc val *arm64-condition-names* :test #'eq)))
 
 (defun need-arm64-condition-name (name)
-  (or (lookup-arm64-condition-name name)
-      (error "Unknown ARM64 condition name ~s." name)))
+  (if (typep name 'fixnum)
+    name
+    (or (lookup-arm64-condition-name name)
+        (error "Unknown ARM64 condition name ~s." name))))
 
 
 (defstruct arm64-opcode
@@ -1192,8 +1194,8 @@
 ;;; ---- Special variables & freelists ----
 
 (defvar *lap-labels* nil)
-(defvar *lap-instruction-freelist* nil)
-(defvar *lap-label-freelist* nil)
+(ccl::def-standard-initial-binding *lap-instruction-freelist* (ccl::make-dll-node-freelist))
+(ccl::def-standard-initial-binding *lap-label-freelist* (ccl::make-dll-node-freelist))
 (defvar *arm64-constants* nil)
 
 ;;; ---- Core DLL-based functions ----
@@ -1467,18 +1469,7 @@
                  ((is-imm src)
                   (let ((val (imm-val src)))
                     (cond
-                      ;; Try logical immediate encoding (for mov = ORR Xd, XZR, #imm)
-                      ((and (not (zerop val))
-                            (not (= (ldb (byte 64 0) val) #xffffffffffffffff))
-                            (encode-logical-immediate val))
-                       (let ((enc (encode-logical-immediate val)))
-                         (logior #xb2000000
-                                 (ash (ldb (byte 1 12) enc) 22)  ; N
-                                 (ash (ldb (byte 6 6) enc) 16)   ; immr
-                                 (ash (ldb (byte 6 0) enc) 10)   ; imms
-                                 (ash 31 5)                       ; Rn = XZR
-                                 (gpr dst))))
-                      ;; Small non-negative: use movz
+                      ;; Small non-negative: use movz (preferred for simple values)
                       ((and (>= val 0) (< val #x10000))
                        (logior #xd2800000 (ash (logand val #xffff) 5) (gpr dst)))
                       ;; Small negative: use movn
@@ -1486,7 +1477,17 @@
                        (logior #x92800000
                                (ash (logand (lognot val) #xffff) 5)
                                (gpr dst)))
-                      (t (error "MOV immediate ~s too large for single instruction" val)))))
+                      ;; Try logical immediate encoding (for mov = ORR Xd, XZR, #imm)
+                      (t
+                       (let ((enc (encode-logical-immediate val)))
+                         (if enc
+                           (logior #xb2000000
+                                   (ash (ldb (byte 1 12) enc) 22)  ; N
+                                   (ash (ldb (byte 6 6) enc) 16)   ; immr
+                                   (ash (ldb (byte 6 0) enc) 10)   ; imms
+                                   (ash 31 5)                       ; Rn = XZR
+                                   (gpr dst))
+                           (error "MOV immediate ~s too large for single instruction" val)))))))
                  ;; mov rd, rn — ORR Xd, XZR, Xn
                  ((arm64-gpr-p src)
                   (logior #xaa0003e0 (ash (gpr src) 16) (gpr dst)))
@@ -1589,10 +1590,11 @@
                                  (ash (logand imm #xfff) 10)
                                  (ash (gpr rn) 5)
                                  (gpr rd))))
-                      ;; Register with optional shift: rm or (:lsl rm (:$ amt))
+                      ;; Register with optional shift: rm or (:lsl rm amt)
                       ((is-shift src2 :lsl)
                        (let ((rm (cadr src2))
-                             (amt (imm-val (caddr src2))))
+                             (amt (let ((s (caddr src2)))
+                                    (if (consp s) (imm-val s) s))))
                          (logior (cond ((and is-sub sets-flags) #xeb000000)
                                        (is-sub                  #xcb000000)
                                        (sets-flags              #xab000000)
@@ -1628,7 +1630,7 @@
                             (ash (gpr rm) 16)
                             (ash 31 5)
                             (gpr rd))))
-                 ;; TST rn, (:$ imm) or TST rn, rm
+                 ;; TST rn, (:$ imm) or TST rn, rm [, shift #amt]
                  (is-tst
                   (let ((rn (op 0))
                         (src (op 1)))
@@ -1638,17 +1640,40 @@
                              (enc (encode-logical-immediate imm)))
                         (unless enc
                           (error "Cannot encode TST immediate ~s" imm))
-                        (logior #xea000000
+                        (logior #xf2000000
                                 (ash (ldb (byte 1 12) enc) 22)
                                 (ash (ldb (byte 6 6) enc) 16)
                                 (ash (ldb (byte 6 0) enc) 10)
                                 (ash (gpr rn) 5)
                                 31))
-                      ;; TST rn, rm  = ANDS xzr, rn, rm
-                      (logior #xea000000
-                              (ash (gpr src) 16)
-                              (ash (gpr rn) 5)
-                              31))))
+                      ;; TST rn, rm [, shift #amt] = ANDS xzr, rn, rm [, shift #amt]
+                      (let* ((rm-enc 0)
+                             (shift-amt 0)
+                             (shift-type 0))
+                        (cond
+                          ((is-shift src :lsl)
+                           (setq rm-enc (gpr (cadr src))
+                                 shift-amt (let ((s (caddr src)))
+                                             (if (consp s) (imm-val s) s))
+                                 shift-type 0))
+                          ((is-shift src :lsr)
+                           (setq rm-enc (gpr (cadr src))
+                                 shift-amt (let ((s (caddr src)))
+                                             (if (consp s) (imm-val s) s))
+                                 shift-type 1))
+                          ((is-shift src :asr)
+                           (setq rm-enc (gpr (cadr src))
+                                 shift-amt (let ((s (caddr src)))
+                                             (if (consp s) (imm-val s) s))
+                                 shift-type 2))
+                          (t
+                           (setq rm-enc (gpr src))))
+                        (logior #xea000000
+                                (ash shift-type 22)
+                                (ash rm-enc 16)
+                                (ash (logand shift-amt #x3f) 10)
+                                (ash (gpr rn) 5)
+                                31)))))
                  ;; Regular: AND/ORR/EOR/BIC/ORN/ANDS/BICS/EON rd, rn, src
                  (t
                   (let ((rd (op 0))
@@ -1675,21 +1700,22 @@
                       (let* ((rm-enc 0)
                              (shift-amt 0)
                              (shift-type 0))  ; 0=LSL, 1=LSR, 2=ASR
-                        (cond
-                          ((is-shift src2 :lsl)
-                           (setq rm-enc (gpr (cadr src2))
-                                 shift-amt (imm-val (caddr src2))
-                                 shift-type 0))
-                          ((is-shift src2 :lsr)
-                           (setq rm-enc (gpr (cadr src2))
-                                 shift-amt (imm-val (caddr src2))
-                                 shift-type 1))
-                          ((is-shift src2 :asr)
-                           (setq rm-enc (gpr (cadr src2))
-                                 shift-amt (imm-val (caddr src2))
-                                 shift-type 2))
-                          (t
-                           (setq rm-enc (gpr src2))))
+                        (flet ((shift-val (s) (if (consp s) (imm-val s) s)))
+                          (cond
+                            ((is-shift src2 :lsl)
+                             (setq rm-enc (gpr (cadr src2))
+                                   shift-amt (shift-val (caddr src2))
+                                   shift-type 0))
+                            ((is-shift src2 :lsr)
+                             (setq rm-enc (gpr (cadr src2))
+                                   shift-amt (shift-val (caddr src2))
+                                   shift-type 1))
+                            ((is-shift src2 :asr)
+                             (setq rm-enc (gpr (cadr src2))
+                                   shift-amt (shift-val (caddr src2))
+                                   shift-type 2))
+                            (t
+                             (setq rm-enc (gpr src2)))))
                         (let ((base (cond ((string-equal name "AND")  #x8a000000)
                                           ((string-equal name "ORR")  #xaa000000)
                                           ((string-equal name "EOR")  #xca000000)
@@ -2166,14 +2192,34 @@
                (logior #xd4400000
                        (ash (logior 5 (ash reg 3) (ash 2 8)) 5))))
 
-            ;; Continuable unary UUOs: same encoding as non-continuable.
-            ;; The distinction is handled by the exception system based on
-            ;; whether the error can be restarted with a new value.
+            ;; Continuable unary UUOs: same encoding as non-continuable
+            ;; but with format code +8 to distinguish from non-continuable.
+            ((string-equal name "UUO-CERROR-REG-NOT-LISPTAG")
+             (let ((reg (gpr (op 0)))
+                   (tag (imm-val (op 1))))
+               (logior #xd4400000
+                       (ash (logior 1 (ash reg 3) (ash tag 8)) 5))))
+
             ((string-equal name "UUO-CERROR-REG-NOT-XTYPE")
              (let ((reg (gpr (op 0)))
                    (tag (imm-val (op 1))))
                (logior #xd4400000
                        (ash (logior 4 (ash reg 3) (ash tag 8)) 5))))
+
+            ;; EEP (external entry point) unresolved: (uuo-eep-unresolved dest src)
+            ((string-equal name "UUO-EEP-UNRESOLVED")
+             (let ((dest (gpr (op 0)))
+                   (src (gpr (op 1))))
+               (logior #xd4400000
+                       (ash (logior 6 (ash dest 3) (ash src 8) (ash 2 13)) 5))))
+
+            ;; Interrupt now: nullary UUO
+            ((string-equal name "UUO-INTERRUPT-NOW")
+             (logior #xd4400000 (ash (logior 0 (ash 2 3)) 5)))
+
+            ;; Debug trap: nullary UUO
+            ((string-equal name "UUO-DEBUG-TRAP")
+             (logior #xd4400000 (ash (logior 0 (ash 3 3)) 5)))
 
             ;;=== MRS: read system register ===
             ;; (mrs Rd (:$ sysreg-encoding))
@@ -2230,7 +2276,7 @@
                (arm64-encode-unscaled-offset size-bits v-bit opc base offset dest)))
            ;; Not naturally aligned or negative: use unscaled (LDUR/STUR form)
            (arm64-encode-unscaled-offset size-bits v-bit opc base offset dest))))
-      ;; (:@ base index) — register offset (no shift, no extend)
+      ;; (:@ base index) — register offset (no shift)
       ((and (consp addr) (eq (car addr) :@)
             (not (consp (caddr addr))))
        (let* ((base (need-arm64-gpr-encoding (cadr addr)))
@@ -2243,6 +2289,26 @@
                  (ash opc 22)
                  (ash index 16)
                  (ash #b011 13)  ; option = LSL
+                 (ash base 5)
+                 dest)))
+      ;; (:@ base (:lsl index shift)) — register offset with shift
+      ((and (consp addr) (eq (car addr) :@)
+            (consp (caddr addr)) (eq (car (caddr addr)) :lsl))
+       (let* ((base (need-arm64-gpr-encoding (cadr addr)))
+              (index-form (caddr addr))
+              (index (need-arm64-gpr-encoding (cadr index-form)))
+              (shift-amt (let ((s (caddr index-form)))
+                           (if (consp s) (cadr s) s)))
+              (v-bit (if is-fpr 1 0))
+              (s-bit (if (plusp shift-amt) 1 0)))
+         ;; Register offset with shift: size 11 V opc 1 Rm option(011) S 10 Rn Rt
+         (logior (ash size-bits 30)
+                 #x38200800
+                 (ash v-bit 26)
+                 (ash opc 22)
+                 (ash index 16)
+                 (ash #b011 13)  ; option = LSL
+                 (ash s-bit 12)
                  (ash base 5)
                  dest)))
       ;; (:@! base (:$ offset)) — pre-index

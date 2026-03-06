@@ -760,6 +760,8 @@
 )
 
 
+(eval-when (:compile-toplevel :load-toplevel :execute)
+
 ;;; Storage layout macros — 8-byte steps for 64-bit
 (defmacro define-storage-layout (name origin &rest cells)
   `(progn
@@ -816,6 +818,7 @@
 ;;; needed before the complex-double-float data to restore 16-byte alignment.
 (defconstant misc-complex-dfloat-offset (+ misc-data-offset node-size))  ; = 8
 
+) ; eval-when
 
 ;;; NIL and T Values
 ;;;

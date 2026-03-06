@@ -84,11 +84,7 @@
               vinsn-name (car vinsn-name)))
       (unless (and (symbolp vinsn-name) (eq *CCL-PACKAGE* (symbol-package vinsn-name)))
         (setq vinsn-name (intern (string vinsn-name) *CCL-PACKAGE*)))
-      (dolist (n (append args temps))
-        (add-spec-name (valid-spec-name n)))
-      (setq name-list (nreverse name-list))
-      ;; We now know that "args" is an alist; we don't know if
-      ;; "results" is.  First, make sure that there are no duplicate
+      ;; First, make sure that there are no duplicate
       ;; result names (and validate "results".)
       (do* ((res results tail)
             (tail (cdr res) (cdr tail)))
@@ -107,9 +103,13 @@
               (if (eq res-name (caar match-args))
                 (setf nhybrids (1+ nhybrids)
                       match-args (cdr match-args))
-                (error "~S - hybrid results should appear in same order as arguments." res-name)))))
-        (dolist (name non-hybrid-results)
-          (add-spec-name name)))
+                (error "~S - hybrid results should appear in same order as arguments." res-name))))))
+      ;; Build name-list in vp order: results&args then temps.
+      ;; results&args = results + (nthcdr nhybrids args).
+      ;; This must match the vp layout from match-template-vregs.
+      (dolist (n (append results (nthcdr nhybrids args) temps))
+        (add-spec-name (valid-spec-name n)))
+      (setq name-list (nreverse name-list))
       (let* ((k -1))
         (declare (fixnum k))
         (let* ((name-alist (mapcar #'(lambda (n) (cons n (list (incf k)))) name-list)))

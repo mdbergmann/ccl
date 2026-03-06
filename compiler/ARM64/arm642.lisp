@@ -4391,24 +4391,21 @@
 
 
 ;;; Build alist mapping parameter name symbols to variable-part indices.
-;;; The ordering matches how %define-arm64-vinsn builds name-list:
-;;; args first, then temps, then non-hybrid results.
+;;; The ordering matches the vp layout from match-template-vregs:
+;;; results&args (= results then remaining args) then temps.
 (defun arm642-vinsn-param-names (template)
   (let* ((result ())
-         (k -1))
-    (declare (fixnum k))
+         (k -1)
+         (nhybrids (vinsn-template-nhybrids template)))
+    (declare (fixnum k nhybrids))
     (flet ((add-names (specs)
              (dolist (spec specs)
                (when (consp spec)
                  (push (cons (car spec) (incf k)) result)))))
-      (add-names (vinsn-template-argument-vreg-specs template))
-      (add-names (vinsn-template-temp-vreg-specs template))
-      ;; Non-hybrid results: those not already in args
-      (let* ((nhybrids (vinsn-template-nhybrids template))
-             (results (vinsn-template-result-vreg-specs template)))
-        (dolist (spec (nthcdr nhybrids results))
-          (when (consp spec)
-            (push (cons (car spec) (incf k)) result)))))
+      ;; results&args = results + (nthcdr nhybrids args)
+      (add-names (vinsn-template-result-vreg-specs template))
+      (add-names (nthcdr nhybrids (vinsn-template-argument-vreg-specs template)))
+      (add-names (vinsn-template-temp-vreg-specs template)))
     (nreverse result)))
 
 
@@ -4438,12 +4435,18 @@
      (svref vp (car form)))
     ;; Non-cons atom (number, etc.) → as-is
     ((atom form) form)
+    ;; (QUOTE x) → return x (quoted symbols in vinsn templates)
+    ((eq (car form) 'quote)
+     (cadr form))
     ;; (:apply fn args...) → evaluate function with resolved args
     ((eq (car form) :apply)
-     (apply (cadr form)
-            (mapcar (lambda (f)
-                      (arm642-resolve-operand f vp param-names unique-labels))
-                    (cddr form))))
+     (let* ((fn (cadr form))
+            (resolved-args (mapcar (lambda (f)
+                                     (arm642-resolve-operand f vp param-names unique-labels))
+                                   (cddr form))))
+       (if (and (symbolp fn) (macro-function fn))
+         (eval (cons fn resolved-args))
+         (apply fn resolved-args))))
     ;; Keyword-headed structural form (:@, :$, :@!, :lsl, :asr, etc.)
     ((keywordp (car form))
      (cons (car form)
@@ -4452,15 +4455,19 @@
                    (cdr form))))
     ;; Function application form
     (t
-     (let* ((op-vals (cdr form))
+     (let* ((fn (car form))
+            (op-vals (cdr form))
             (parsed-ops (make-list (length op-vals)))
             (tail parsed-ops))
        (declare (dynamic-extent parsed-ops)
                 (cons parsed-ops tail))
-       (dolist (op op-vals (apply (car form) parsed-ops))
+       (dolist (op op-vals)
          (setq tail (cdr (rplaca tail
                                  (arm642-resolve-operand
-                                  op vp param-names unique-labels)))))))))
+                                  op vp param-names unique-labels)))))
+       (if (and (symbolp fn) (macro-function fn))
+         (eval (cons fn parsed-ops))
+         (apply fn parsed-ops))))))
 
 
 (defun arm642-expand-vinsn (vinsn current)
@@ -4471,11 +4478,23 @@
          (notes (vinsn-notes vinsn))
          (param-names (arm642-vinsn-param-names template)))
     (declare (fixnum nvp))
-    ;; Resolve lregs in variable parts to their assigned values
+    ;; Resolve lregs in variable parts to their assigned values.
+    ;; For FPR lregs, add offset (32 for double, 64 for single) so the
+    ;; encoder can distinguish FPRs from GPRs (both use hardware regs 0-31).
     (dotimes (i nvp)
       (let* ((val (svref vp i)))
         (when (typep val 'lreg)
-          (setf (svref vp i) (lreg-value val)))))
+          (let ((hw-reg (lreg-value val)))
+            (setf (svref vp i)
+                  (if (eql (lreg-class val) hard-reg-class-fpr)
+                    (ecase (lreg-mode val)
+                      ((#.hard-reg-class-fpr-mode-double
+                        #.hard-reg-class-fpr-mode-complex-double-float)
+                       (+ hw-reg 32))
+                      ((#.hard-reg-class-fpr-mode-single
+                        #.hard-reg-class-fpr-mode-complex-single-float)
+                       (+ hw-reg 64)))
+                    hw-reg))))))
     ;; Create unique labels for template-local labels
     (dolist (name (vinsn-template-local-labels template))
       (let* ((unique (cons name nil)))

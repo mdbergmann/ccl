@@ -3584,11 +3584,13 @@
 ;;; ivector-typecode-p: check if a typecode represents an ivector.
 (define-arm64-vinsn ivector-typecode-p (((dest :lisp))
                                         ((src :lisp))
-                                        ((tag :u64)))
+                                        ((tag :u64)
+                                         (mask :u64)))
   ;; Ivector subtags have bit 7 set, bit 5 clear
   (and tag src (:$ #xff))
   (eor tag tag (:$ arm64::uvector-header))
-  (tst tag (:$ (:apply logior arm64::uvector-header arm64::gvector-tag-mask)))
+  (mov mask (:$ (:apply logior arm64::uvector-header arm64::gvector-tag-mask)))
+  (tst tag mask)
   (b.ne :not-ivector)
   ((:not (:pred =
                 (:apply %hard-regspec-value dest)
@@ -3600,13 +3602,16 @@
   :done)
 
 ;;; gvector-typecode-p: check if a typecode represents a gvector.
+;;; Gvector subtags have bits 7,5 set (uvector-header | gvector-tag-mask = 0xA0).
+;;; 0xA0 is not a valid ARM64 bitmask immediate, so use register-based masking.
 (define-arm64-vinsn gvector-typecode-p (((dest :lisp))
                                         ((src :lisp))
-                                        ((tag :u64)))
-  ;; Gvector subtags have bit 7 set, bit 5 set
+                                        ((tag :u64)
+                                         (mask :u64)))
   (and tag src (:$ #xff))
-  (and tag tag (:$ (:apply logior arm64::uvector-header arm64::gvector-tag-mask)))
-  (cmp tag (:$ (:apply logior arm64::uvector-header arm64::gvector-tag-mask)))
+  (mov mask (:$ (:apply logior arm64::uvector-header arm64::gvector-tag-mask)))
+  (and tag tag mask)
+  (cmp tag mask)
   (b.ne :not-gvector)
   ((:not (:pred =
                 (:apply %hard-regspec-value dest)
@@ -3666,6 +3671,795 @@
      ())
   (lsl dest src (:$ arm64::charcode-shift))
   (movk dest (:$ (:apply ash arm64::tag-character 8)) (:lsl 48)))
+
+
+;;; ======================================================================
+;;; Missing vinsns — added during cross-compilation bring-up
+;;; ======================================================================
+
+;;; --- Bit test operations ---
+
+(define-arm64-vinsn %ilogbitp-constant-bit (((dest :crf))
+                                             ((fixnum :imm)
+                                              (bitnum :u8const)))
+  (tst fixnum (:$ (:apply ash 1 bitnum))))
+
+(define-arm64-vinsn %ilogbitp-variable-bit (((dest :crf))
+                                             ((fixnum :imm)
+                                              (bitnum :u8))
+                                             ((mask :imm)))
+  (mov mask (:$ 1))
+  (tst fixnum (:lsl mask bitnum)))
+
+(define-arm64-vinsn extract-variable-bit-fixnum (((dest :lisp))
+                                                  ((src :imm)
+                                                   (bitnum :u8)))
+  (lsr dest src bitnum)
+  (and dest dest (:$ 1)))
+
+;;; --- Bit manipulation ---
+
+(define-arm64-vinsn set-constant-bit-to-0 (((dest :u32))
+                                            ((src :u32)
+                                             (bitnum :u8const)))
+  (bic dest src (:$ (:apply ash 1 bitnum))))
+
+(define-arm64-vinsn set-constant-bit-to-1 (((dest :u32))
+                                            ((src :u32)
+                                             (bitnum :u8const)))
+  (orr dest src (:$ (:apply ash 1 bitnum))))
+
+(define-arm64-vinsn set-constant-bit-to-variable-value (((dest :u32))
+                                                         ((src :u32)
+                                                          (val :u32)
+                                                          (bitnum :u8const))
+                                                         ((mask :u32)))
+  (mov mask (:$ (:apply ash 1 bitnum)))
+  (bic dest src mask)
+  (tst val val)
+  (b.eq :done)
+  (orr dest dest mask)
+  :done)
+
+(define-arm64-vinsn set-or-clear-bit (((dest :u32))
+                                       ((src :u32)
+                                        (mask :u32)
+                                        (crf :crf)))
+  (b.eq :clear)
+  (orr dest src mask)
+  (b :done)
+  :clear
+  (bic dest src mask)
+  :done)
+
+(define-arm64-vinsn shift-left-variable-word (((dest :u32))
+                                               ((src :u32)
+                                                (count :u32)))
+  (lsl dest src count))
+
+(define-arm64-vinsn u32logandc2 (((dest :u32))
+                                  ((x :u32)
+                                   (y :u32)))
+  (bic dest x y))
+
+(define-arm64-vinsn u32logior (((dest :u32))
+                                ((x :u32)
+                                 (y :u32)))
+  (orr dest x y))
+
+;;; --- Arithmetic ---
+
+(define-arm64-vinsn (add-immediate :predicatable) (((dest :imm))
+                                                    ((src :imm)
+                                                     (imm :s32const)))
+  (add dest src (:$ imm)))
+
+(define-arm64-vinsn add-immediate-set-flags (((dest :imm)
+                                              (flags :crf))
+                                             ((src :imm)
+                                              (imm :s32const)))
+  (adds dest src (:$ imm)))
+
+(define-arm64-vinsn (natural-shift-left :predicatable) (((dest :u64))
+                                                         ((src :u64)
+                                                          (count :u8const)))
+  (lsl dest src (:$ count)))
+
+(define-arm64-vinsn (natural-shift-right :predicatable) (((dest :u64))
+                                                          ((src :u64)
+                                                           (count :u8const)))
+  (lsr dest src (:$ count)))
+
+(define-arm64-vinsn set-carry-if-fixnum-in-range (((idx :lisp)
+                                                   (flags :crf))
+                                                  ((reg :imm)
+                                                   (min :s32const)
+                                                   (span :u32const)))
+  (sub idx reg (:$ min))
+  (cmp idx (:$ span)))
+
+;;; --- Stack / frame ---
+
+(define-arm64-vinsn (adjust-sp :predicatable) (()
+                                                ((amount :s32const)))
+  (add sp sp (:$ amount)))
+
+(define-arm64-vinsn load-vframe-address (((dest :imm))
+                                          ((offset :s32const)))
+  (add dest sp (:$ offset)))
+
+(define-arm64-vinsn copy-lexpr-argument (()
+                                          ()
+                                          ((temp :imm)))
+  (ldr temp (:@ vsp nargs))
+  (str temp (:@! vsp (:$ (- arm64::node-size)))))
+
+;;; --- Type checks ---
+
+(define-arm64-vinsn trap-unless-macptr (()
+                                        ((object :lisp))
+                                        ((tag :u8)))
+  (lsr tag object (:$ arm64::tag-shift))
+  (tst tag (:$ arm64::uvector-ref))
+  (b.eq :fail)
+  (ldur tag (:@ object (:$ arm64::misc-subtag-offset)))
+  (and tag tag (:$ #xff))
+  (cmp tag (:$ arm64::subtag-macptr))
+  (b.eq :ok)
+  :fail
+  (uuo-error-reg-not-xtype object (:$ arm64::subtag-macptr))
+  :ok)
+
+(define-arm64-vinsn trap-unless-simple-1d-array (()
+                                                  ((object :lisp)
+                                                   (expected :u8const))
+                                                  ((tag :u8)))
+  (lsr tag object (:$ arm64::tag-shift))
+  (tst tag (:$ arm64::uvector-ref))
+  (b.eq :fail)
+  (ldur tag (:@ object (:$ arm64::misc-subtag-offset)))
+  (and tag tag (:$ #xff))
+  (cmp tag (:$ expected))
+  (b.eq :ok)
+  :fail
+  (uuo-error-reg-not-xtype object (:$ expected))
+  :ok)
+
+(define-arm64-vinsn trap-unless-simple-array-2 (()
+                                                 ((object :lisp)
+                                                  (expected :u8const))
+                                                 ((tag :u8)))
+  (lsr tag object (:$ arm64::tag-shift))
+  (tst tag (:$ arm64::uvector-ref))
+  (b.eq :fail)
+  (ldur tag (:@ object (:$ arm64::misc-subtag-offset)))
+  (and tag tag (:$ #xff))
+  (cmp tag (:$ expected))
+  (b.eq :ok)
+  :fail
+  (uuo-error-reg-not-xtype object (:$ expected))
+  :ok)
+
+(define-arm64-vinsn trap-unless-simple-array-3 (()
+                                                 ((object :lisp)
+                                                  (expected :u8const))
+                                                 ((tag :u8)))
+  (lsr tag object (:$ arm64::tag-shift))
+  (tst tag (:$ arm64::uvector-ref))
+  (b.eq :fail)
+  (ldur tag (:@ object (:$ arm64::misc-subtag-offset)))
+  (and tag tag (:$ #xff))
+  (cmp tag (:$ expected))
+  (b.eq :ok)
+  :fail
+  (uuo-error-reg-not-xtype object (:$ expected))
+  :ok)
+
+(define-arm64-vinsn trap-unless-typed-array-2 (()
+                                                ((object :lisp)
+                                                 (expected :u8const))
+                                                ((tag :u8)))
+  (lsr tag object (:$ arm64::tag-shift))
+  (tst tag (:$ arm64::uvector-ref))
+  (b.eq :fail)
+  (ldur tag (:@ object (:$ arm64::misc-subtag-offset)))
+  (and tag tag (:$ #xff))
+  (cmp tag (:$ expected))
+  (b.eq :ok)
+  :fail
+  (uuo-error-reg-not-xtype object (:$ expected))
+  :ok)
+
+(define-arm64-vinsn trap-unless-typed-array-3 (()
+                                                ((object :lisp)
+                                                 (expected :u8const))
+                                                ((tag :u8)))
+  (lsr tag object (:$ arm64::tag-shift))
+  (tst tag (:$ arm64::uvector-ref))
+  (b.eq :fail)
+  (ldur tag (:@ object (:$ arm64::misc-subtag-offset)))
+  (and tag tag (:$ #xff))
+  (cmp tag (:$ expected))
+  (b.eq :ok)
+  :fail
+  (uuo-error-reg-not-xtype object (:$ expected))
+  :ok)
+
+(define-arm64-vinsn trap-unless-vector-type (()
+                                              ((object :lisp)
+                                               (expected :u8const))
+                                              ((tag :u8)))
+  (lsr tag object (:$ arm64::tag-shift))
+  (tst tag (:$ arm64::uvector-ref))
+  (b.eq :fail)
+  (ldur tag (:@ object (:$ arm64::misc-subtag-offset)))
+  (and tag tag (:$ #xff))
+  (cmp tag (:$ expected))
+  (b.eq :ok)
+  :fail
+  (uuo-error-reg-not-xtype object (:$ expected))
+  :ok)
+
+;;; Vector header operations
+(define-arm64-vinsn set-z-if-vector-header (((dest :crf))
+                                             ((src :lisp))
+                                             ((tag :u8)))
+  (ldur tag (:@ src (:$ arm64::misc-subtag-offset)))
+  (and tag tag (:$ #xff))
+  (cmp tag (:$ arm64::subtag-vectorH)))
+
+(define-arm64-vinsn check-vector-header-bound (()
+                                                ((header :lisp)
+                                                 (index :imm))
+                                                ((dim :imm)))
+  (ldr dim (:@ header (:$ arm64::vectorH.logsize)))
+  (cmp index dim)
+  (b.lo :ok)
+  (uuo-error-vector-bounds index header)
+  :ok)
+
+(define-arm64-vinsn deref-vector-header (((vector :lisp)
+                                          (index :imm))
+                                         ((vector :lisp)
+                                          (index :imm))
+                                         ((temp :imm)))
+  :again
+  (ldr temp (:@ vector (:$ arm64::vectorH.flags)))
+  (tst temp (:$ (:apply ash 1 $arh_disp_bit)))
+  (ldr temp (:@ vector (:$ arm64::vectorH.displacement)))
+  (add index index temp)
+  (ldr vector (:@ vector (:$ arm64::vectorH.data-vector)))
+  (b.ne :again))
+
+;;; Character / string operations
+
+(define-arm64-vinsn require-char-code (()
+                                        ((object :lisp))
+                                        ((tag :u8)))
+  (lsr tag object (:$ arm64::tag-shift))
+  (cmp tag (:$ arm64::tag-character))
+  (b.eq :ok)
+  (uuo-cerror-reg-not-xtype object (:$ arm64::tag-character))
+  :ok)
+
+(define-arm64-vinsn (code-char->char :predicatable) (((dest :lisp))
+                                                      ((src :imm)))
+  (lsl dest src (:$ arm64::charcode-shift))
+  (movk dest (:$ (:apply ash arm64::tag-character 8)) (:lsl 48)))
+
+;;; 8-bit string access
+(define-arm64-vinsn (%schar8 :predicatable) (((dest :lisp))
+                                              ((str :lisp)
+                                               (idx :imm))
+                                              ((temp :u32)))
+  (add temp idx (:$ arm64::misc-data-offset))
+  (ldrb temp (:@ str temp))
+  (lsl dest temp (:$ arm64::charcode-shift))
+  (movk dest (:$ (:apply ash arm64::tag-character 8)) (:lsl 48)))
+
+(define-arm64-vinsn (%scharcode8 :predicatable) (((dest :imm))
+                                                   ((str :lisp)
+                                                    (idx :imm))
+                                                   ((temp :u32)))
+  (add temp idx (:$ arm64::misc-data-offset))
+  (ldrb dest (:@ str temp)))
+
+(define-arm64-vinsn %set-schar8 (()
+                                   ((str :lisp)
+                                    (idx :imm)
+                                    (char :lisp))
+                                   ((temp :u32)
+                                    (offset :u32)))
+  (lsr temp char (:$ arm64::charcode-shift))
+  (add offset idx (:$ arm64::misc-data-offset))
+  (strb temp (:@ str offset)))
+
+(define-arm64-vinsn %set-scharcode8 (()
+                                      ((str :lisp)
+                                       (idx :imm)
+                                       (code :imm))
+                                      ((offset :u32)))
+  (add offset idx (:$ arm64::misc-data-offset))
+  (strb code (:@ str offset)))
+
+;;; 32-bit string access
+(define-arm64-vinsn (%schar32 :predicatable) (((dest :lisp))
+                                               ((str :lisp)
+                                                (idx :imm))
+                                               ((temp :u32)))
+  (add temp idx (:$ (:apply ash arm64::misc-data-offset -2)))
+  (ldr temp (:@ str (:lsl temp 2)))
+  (lsl dest temp (:$ arm64::charcode-shift))
+  (movk dest (:$ (:apply ash arm64::tag-character 8)) (:lsl 48)))
+
+(define-arm64-vinsn (%scharcode32 :predicatable) (((dest :imm))
+                                                    ((str :lisp)
+                                                     (idx :imm))
+                                                    ((temp :u32)))
+  (add temp idx (:$ (:apply ash arm64::misc-data-offset -2)))
+  (ldr dest (:@ str (:lsl temp 2))))
+
+(define-arm64-vinsn %set-schar32 (()
+                                   ((str :lisp)
+                                    (idx :imm)
+                                    (char :lisp))
+                                   ((temp :u32)
+                                    (offset :u32)))
+  (lsr temp char (:$ arm64::charcode-shift))
+  (add offset idx (:$ (:apply ash arm64::misc-data-offset -2)))
+  (str temp (:@ str (:lsl offset 2))))
+
+(define-arm64-vinsn %set-scharcode32 (()
+                                       ((str :lisp)
+                                        (idx :imm)
+                                        (code :imm))
+                                       ((offset :u32)))
+  (add offset idx (:$ (:apply ash arm64::misc-data-offset -2)))
+  (str code (:@ str (:lsl offset 2))))
+
+;;; --- Unboxing ---
+
+(define-arm64-vinsn (%unbox-u8 :predicatable) (((dest :u8))
+                                                ((src :lisp)))
+  (and dest src (:$ #xff)))
+
+;;; --- Integer narrowing ---
+
+(define-arm64-vinsn (s8->fixnum :predicatable) (((dest :imm))
+                                                 ((src :imm)))
+  (sbfx dest src 0 8))
+
+(define-arm64-vinsn (s16->fixnum :predicatable) (((dest :imm))
+                                                  ((src :imm)))
+  (sbfx dest src 0 16))
+
+(define-arm64-vinsn (u8->fixnum :predicatable) (((dest :imm))
+                                                 ((src :imm)))
+  (and dest src (:$ #xff)))
+
+(define-arm64-vinsn (u16->fixnum :predicatable) (((dest :imm))
+                                                  ((src :imm)))
+  (and dest src (:$ #xffff)))
+
+(define-arm64-vinsn (s8->s32 :predicatable) (((dest :s32))
+                                              ((src :s32)))
+  (sbfx dest src 0 8))
+
+(define-arm64-vinsn (s16->s32 :predicatable) (((dest :s32))
+                                               ((src :s32)))
+  (sbfx dest src 0 16))
+
+(define-arm64-vinsn (u8->u32 :predicatable) (((dest :u32))
+                                              ((src :u32)))
+  (and dest src (:$ #xff)))
+
+(define-arm64-vinsn (u16->u32 :predicatable) (((dest :u32))
+                                               ((src :u32)))
+  (and dest src (:$ #xffff)))
+
+;;; --- Memory access (doubleword = 64-bit) ---
+
+(define-arm64-vinsn (mem-ref-c-doubleword :predicatable) (((dest :u64))
+                                                           ((src :address)
+                                                            (index :s16const)))
+  (ldr dest (:@ src (:$ index))))
+
+(define-arm64-vinsn (mem-ref-doubleword :predicatable) (((dest :u64))
+                                                         ((src :address)
+                                                          (index :imm)))
+  (ldr dest (:@ src index)))
+
+(define-arm64-vinsn (mem-set-c-doubleword :predicatable) (()
+                                                           ((val :u64)
+                                                            (dest :address)
+                                                            (index :s16const)))
+  (str val (:@ dest (:$ index))))
+
+(define-arm64-vinsn (mem-set-doubleword :predicatable) (()
+                                                         ((val :u64)
+                                                          (dest :address)
+                                                          (index :imm)))
+  (str val (:@ dest index)))
+
+;;; --- Bit memory access ---
+
+(define-arm64-vinsn mem-ref-bit (((dest :u32))
+                                  ((src :address)
+                                   (bit-offset :imm))
+                                  ((word-offset :imm)
+                                   (bit-shift :imm)))
+  (lsr word-offset bit-offset (:$ 5))
+  (ldr dest (:@ src (:lsl word-offset 2)))
+  (and bit-shift bit-offset (:$ 31))
+  (lsr dest dest bit-shift)
+  (and dest dest (:$ 1)))
+
+(define-arm64-vinsn mem-ref-bit-fixnum (((dest :lisp))
+                                         ((src :address)
+                                          (bit-offset :imm))
+                                         ((word-offset :imm)
+                                          (bit-shift :imm)))
+  (lsr word-offset bit-offset (:$ 5))
+  (ldr dest (:@ src (:lsl word-offset 2)))
+  (and bit-shift bit-offset (:$ 31))
+  (lsr dest dest bit-shift)
+  (and dest dest (:$ 1)))
+
+(define-arm64-vinsn mem-set-bit (()
+                                  ((src :address)
+                                   (bit-offset :imm)
+                                   (val :imm))
+                                  ((word-offset :imm)
+                                   (bit-shift :imm)
+                                   (mask :u32)
+                                   (word :u32)))
+  (lsr word-offset bit-offset (:$ 5))
+  (ldr word (:@ src (:lsl word-offset 2)))
+  (and bit-shift bit-offset (:$ 31))
+  (mov mask (:$ 1))
+  (lsl mask mask bit-shift)
+  (tst val val)
+  (b.eq :clear)
+  (orr word word mask)
+  (b :store)
+  :clear
+  (bic word word mask)
+  :store
+  (str word (:@ src (:lsl word-offset 2))))
+
+;;; --- Float operations ---
+
+(define-arm64-vinsn (zero-double-float-register :predicatable) (((dest :double-float))
+                                                                 ())
+  (fmov dest (:$ 0)))
+
+(define-arm64-vinsn (zero-single-float-register :predicatable) (((dest :single-float))
+                                                                 ())
+  (fmov dest (:$ 0)))
+
+(define-arm64-vinsn (double-to-double :predicatable) (((dest :double-float))
+                                                       ((src :double-float)))
+  (fmov dest src))
+
+(define-arm64-vinsn (single-to-single :predicatable) (((dest :single-float))
+                                                       ((src :single-float)))
+  (fmov dest src))
+
+(define-arm64-vinsn load-double-float-constant-from-data (((dest :double-float))
+                                                           ((high :u32const)
+                                                            (low :u32const))
+                                                           ((temp :u64)))
+  (mov temp (:$ low))
+  (movk temp (:$ (:apply ldb (byte 16 16) low)) (:lsl 16))
+  (movk temp (:$ (:apply ldb (byte 16 0) high)) (:lsl 32))
+  (movk temp (:$ (:apply ldb (byte 16 16) high)) (:lsl 48))
+  (fmov dest temp))
+
+(define-arm64-vinsn load-single-float-constant-from-data (((dest :single-float))
+                                                            ((bits :u32const))
+                                                            ((temp :u32)))
+  (mov temp (:$ (:apply logand bits #xffff)))
+  (movk temp (:$ (:apply ldb (byte 16 16) bits)) (:lsl 16))
+  (fmov dest temp))
+
+;;; --- Complex float ---
+
+(define-arm64-vinsn complex-single-float (((dest :complex-single-float))
+                                           ((real :single-float)
+                                            (imag :single-float)))
+  (fmov dest real)
+  (ins dest (:element 1) imag (:element 0)))
+
+(define-arm64-vinsn complex-double-float (((dest :complex-double-float))
+                                           ((real :double-float)
+                                            (imag :double-float)))
+  (fmov dest real)
+  (ins dest (:element 1) imag (:element 0)))
+
+(define-arm64-vinsn complex-single-float+-2 (((dest :complex-single-float))
+                                              ((x :complex-single-float)
+                                               (y :complex-single-float)))
+  (fadd dest x y))
+
+(define-arm64-vinsn complex-single-float--2 (((dest :complex-single-float))
+                                              ((x :complex-single-float)
+                                               (y :complex-single-float)))
+  (fsub dest x y))
+
+(define-arm64-vinsn complex-double-float+-2 (((dest :complex-double-float))
+                                              ((x :complex-double-float)
+                                               (y :complex-double-float)))
+  (fadd dest x y))
+
+(define-arm64-vinsn complex-double-float--2 (((dest :complex-double-float))
+                                              ((x :complex-double-float)
+                                               (y :complex-double-float)))
+  (fsub dest x y))
+
+(define-arm64-vinsn (complex-single-float->node :call :subprim)
+    (((dest :lisp))
+     ((src :complex-single-float))
+     ((header :u64)))
+  ;; Allocate 16 bytes: header(8) + 2 single floats(8)
+  (mov header (:$ arm64::complex-single-float-header))
+  (sub allocptr allocptr (:$ arm64::dnode-size))
+  (cmp allocptr allocbase)
+  (b.hi :no-trap)
+  (hlt (:$ 0))
+  :no-trap
+  (str header (:@ allocptr (:$ 0)))
+  (str src (:@ allocptr (:$ arm64::complex-single-float.realpart)))
+  (add dest allocptr (:$ arm64::misc-bias))
+  (movk dest (:$ (:apply ash arm64::tag-misc 8)) (:lsl 48)))
+
+(define-arm64-vinsn (complex-double-float->heap :call :subprim)
+    (((dest :lisp))
+     ((src :complex-double-float))
+     ((header :u64)))
+  ;; Allocate 32 bytes: header(8) + pad(8) + 2 doubles(16)
+  (mov header (:$ arm64::complex-double-float-header))
+  (sub allocptr allocptr (:$ 32))
+  (cmp allocptr allocbase)
+  (b.hi :no-trap)
+  (hlt (:$ 0))
+  :no-trap
+  (str header (:@ allocptr (:$ 0)))
+  (str src (:@ allocptr (:$ arm64::complex-double-float.realpart)))
+  (add dest allocptr (:$ arm64::misc-bias))
+  (movk dest (:$ (:apply ash arm64::tag-misc 8)) (:lsl 48)))
+
+(define-arm64-vinsn complex-single-float-to-complex-single-float
+    (((dest :complex-single-float))
+     ((src :complex-single-float)))
+  (mov dest src))
+
+(define-arm64-vinsn complex-double-float-to-complex-double-float
+    (((dest :complex-double-float))
+     ((src :complex-double-float)))
+  (mov dest src))
+
+(define-arm64-vinsn (get-complex-double-float :predicatable)
+    (((dest :complex-double-float))
+     ((src :lisp)))
+  (ldr dest (:@ src (:$ arm64::complex-double-float.realpart))))
+
+(define-arm64-vinsn (get-complex-single-float :predicatable)
+    (((dest :complex-single-float))
+     ((src :lisp)))
+  (ldr dest (:@ src (:$ arm64::complex-single-float.realpart))))
+
+;;; --- FPU exception handling ---
+
+(define-arm64-vinsn clear-pending-fpu-exceptions (()
+                                                   ()
+                                                   ((temp :u64)))
+  (mrs temp (:$ #xDA21))
+  (and temp temp (:$ #xFFFFFFFFFFFFFF00))
+  (msr (:$ #xDA21) temp))
+
+(define-arm64-vinsn trap-if-fpu-exception (()
+                                            ()
+                                            ((temp :u64)))
+  (mrs temp (:$ #xDA21))
+  (tst temp (:$ #x1F))
+  (b.eq :ok)
+  (uuo-error-reg-not-xtype temp (:$ 0))
+  :ok)
+
+;;; --- NFP (native frame pointer) operations ---
+;;; Non-nested: offset from SP.  Nested: from tcr.nfp.
+
+(define-arm64-vinsn (nfp-load-double-float :nfp :ref) (((val :double-float))
+                                                        ((offset :u16const)))
+  (ldr val (:@ sp (:$ (:apply + 8 offset)))))
+
+(define-arm64-vinsn (nfp-load-double-float-nested :nfp :ref) (((val :double-float))
+                                                                ((offset :u16const))
+                                                                ((nfp-reg :imm)))
+  (ldr nfp-reg (:@ rcontext (:$ arm64::tcr.nfp)))
+  (ldr val (:@ nfp-reg (:$ (:apply + 8 offset)))))
+
+(define-arm64-vinsn (nfp-store-double-float :nfp :set) (()
+                                                         ((val :double-float)
+                                                          (offset :u16const)))
+  (str val (:@ sp (:$ (:apply + 8 offset)))))
+
+(define-arm64-vinsn (nfp-store-double-float-nested :nfp :set) (()
+                                                                 ((val :double-float)
+                                                                  (offset :u16const))
+                                                                 ((nfp-reg :imm)))
+  (ldr nfp-reg (:@ rcontext (:$ arm64::tcr.nfp)))
+  (str val (:@ nfp-reg (:$ (:apply + 8 offset)))))
+
+(define-arm64-vinsn (nfp-load-single-float :nfp :ref) (((val :single-float))
+                                                        ((offset :u16const)))
+  (ldr val (:@ sp (:$ (:apply + 8 offset)))))
+
+(define-arm64-vinsn (nfp-load-single-float-nested :nfp :ref) (((val :single-float))
+                                                                ((offset :u16const))
+                                                                ((nfp-reg :imm)))
+  (ldr nfp-reg (:@ rcontext (:$ arm64::tcr.nfp)))
+  (ldr val (:@ nfp-reg (:$ (:apply + 8 offset)))))
+
+(define-arm64-vinsn (nfp-store-single-float :nfp :set) (()
+                                                         ((val :single-float)
+                                                          (offset :u16const)))
+  (str val (:@ sp (:$ (:apply + 8 offset)))))
+
+(define-arm64-vinsn (nfp-store-single-float-nested :nfp :set) (()
+                                                                 ((val :single-float)
+                                                                  (offset :u16const))
+                                                                 ((nfp-reg :imm)))
+  (ldr nfp-reg (:@ rcontext (:$ arm64::tcr.nfp)))
+  (str val (:@ nfp-reg (:$ (:apply + 8 offset)))))
+
+(define-arm64-vinsn (nfp-load-unboxed-word :nfp :ref) (((val :u64))
+                                                        ((offset :u16const)))
+  (ldr val (:@ sp (:$ (:apply + 8 offset)))))
+
+(define-arm64-vinsn (nfp-load-unboxed-word-nested :nfp :ref) (((val :u64))
+                                                                ((offset :u16const))
+                                                                ((nfp-reg :imm)))
+  (ldr nfp-reg (:@ rcontext (:$ arm64::tcr.nfp)))
+  (ldr val (:@ nfp-reg (:$ (:apply + 8 offset)))))
+
+(define-arm64-vinsn (nfp-store-unboxed-word :nfp :set) (()
+                                                         ((val :u64)
+                                                          (offset :u16const)))
+  (str val (:@ sp (:$ (:apply + 8 offset)))))
+
+(define-arm64-vinsn (nfp-store-unboxed-word-nested :nfp :set) (()
+                                                                 ((val :u64)
+                                                                  (offset :u16const))
+                                                                 ((nfp-reg :imm)))
+  (ldr nfp-reg (:@ rcontext (:$ arm64::tcr.nfp)))
+  (str val (:@ nfp-reg (:$ (:apply + 8 offset)))))
+
+(define-arm64-vinsn (nfp-load-complex-double-float :nfp :ref) (((val :complex-double-float))
+                                                                 ((offset :u16const)))
+  (ldr val (:@ sp (:$ (:apply + 8 offset)))))
+
+(define-arm64-vinsn (nfp-load-complex-double-float-nested :nfp :ref) (((val :complex-double-float))
+                                                                       ((offset :u16const))
+                                                                       ((nfp-reg :imm)))
+  (ldr nfp-reg (:@ rcontext (:$ arm64::tcr.nfp)))
+  (ldr val (:@ nfp-reg (:$ (:apply + 8 offset)))))
+
+(define-arm64-vinsn (nfp-store-complex-double-float :nfp :set) (()
+                                                                  ((val :complex-double-float)
+                                                                   (offset :u16const)))
+  (str val (:@ sp (:$ (:apply + 8 offset)))))
+
+(define-arm64-vinsn (nfp-store-complex-double-float-nested :nfp :set) (()
+                                                                        ((val :complex-double-float)
+                                                                         (offset :u16const))
+                                                                        ((nfp-reg :imm)))
+  (ldr nfp-reg (:@ rcontext (:$ arm64::tcr.nfp)))
+  (str val (:@ nfp-reg (:$ (:apply + 8 offset)))))
+
+(define-arm64-vinsn (nfp-load-complex-single-float :nfp :ref) (((val :complex-single-float))
+                                                                 ((offset :u16const)))
+  (ldr val (:@ sp (:$ (:apply + 8 offset)))))
+
+(define-arm64-vinsn (nfp-load-complex-single-float-nested :nfp :ref) (((val :complex-single-float))
+                                                                       ((offset :u16const))
+                                                                       ((nfp-reg :imm)))
+  (ldr nfp-reg (:@ rcontext (:$ arm64::tcr.nfp)))
+  (ldr val (:@ nfp-reg (:$ (:apply + 8 offset)))))
+
+(define-arm64-vinsn (nfp-store-complex-single-float :nfp :set) (()
+                                                                  ((val :complex-single-float)
+                                                                   (offset :u16const)))
+  (str val (:@ sp (:$ (:apply + 8 offset)))))
+
+(define-arm64-vinsn (nfp-store-complex-single-float-nested :nfp :set) (()
+                                                                        ((val :complex-single-float)
+                                                                         (offset :u16const))
+                                                                        ((nfp-reg :imm)))
+  (ldr nfp-reg (:@ rcontext (:$ arm64::tcr.nfp)))
+  (str val (:@ nfp-reg (:$ (:apply + 8 offset)))))
+
+;;; --- NVR save/restore ---
+;;; Push/pop non-volatile registers to/from vstack.
+;;; ARM64 NVRs: save0-save7 (x16-x23).
+;;; N is the register number of the first NVR to save (save0=lowest).
+
+(define-arm64-vinsn (save-nvrs :push :node :vsp :multiple) (()
+                                                             ((n :u8const)))
+  (str save0 (:@! vsp (:$ (- arm64::node-size))))
+  ((:pred <= n 1)
+   (str save1 (:@! vsp (:$ (- arm64::node-size))))
+   ((:pred <= n 2)
+    (str save2 (:@! vsp (:$ (- arm64::node-size))))
+    ((:pred <= n 3)
+     (str save3 (:@! vsp (:$ (- arm64::node-size))))
+     ((:pred <= n 4)
+      (str save4 (:@! vsp (:$ (- arm64::node-size))))
+      ((:pred <= n 5)
+       (str save5 (:@! vsp (:$ (- arm64::node-size))))
+       ((:pred <= n 6)
+        (str save6 (:@! vsp (:$ (- arm64::node-size))))
+        ((:pred <= n 7)
+         (str save7 (:@! vsp (:$ (- arm64::node-size))))))))))))
+
+(define-arm64-vinsn (restore-nvrs :pop :node :vsp :multiple) (()
+                                                               ((n :u8const)
+                                                                (basereg :imm)))
+  ((:pred = n 8)
+   (ldr save7 (:@+ basereg (:$ arm64::node-size))))
+  ((:pred >= n 7)
+   (ldr save6 (:@+ basereg (:$ arm64::node-size))))
+  ((:pred >= n 6)
+   (ldr save5 (:@+ basereg (:$ arm64::node-size))))
+  ((:pred >= n 5)
+   (ldr save4 (:@+ basereg (:$ arm64::node-size))))
+  ((:pred >= n 4)
+   (ldr save3 (:@+ basereg (:$ arm64::node-size))))
+  ((:pred >= n 3)
+   (ldr save2 (:@+ basereg (:$ arm64::node-size))))
+  ((:pred >= n 2)
+   (ldr save1 (:@+ basereg (:$ arm64::node-size))))
+  (ldr save0 (:@+ basereg (:$ arm64::node-size))))
+
+;;; --- FPR save/restore ---
+
+(define-arm64-vinsn (push-nvfprs :push :multiple) (()
+                                                    ((n :u16const)
+                                                     (header :u16const)))
+  ;; Push a vector header followed by N double-float registers.
+  ;; The header word describes the saved block for GC.
+  ;; TODO: actual NEON push sequence for d8-d15.
+  (nop))
+
+(define-arm64-vinsn (pop-nvfprs :pop :multiple) (()
+                                                  ((n :u16const)))
+  ;; Pop N saved double-float registers.
+  ;; TODO: actual NEON pop sequence.
+  (nop))
+
+;;; --- FFI ---
+
+(define-arm64-vinsn (set-aapcs64-c-arg :predicatable) (()
+                                                        ((val :u64)
+                                                         (offset :u16const)))
+  (str val (:@ sp (:$ offset))))
+
+(define-arm64-vinsn (set-double-aapcs64-c-arg :predicatable) (()
+                                                                ((val :double-float)
+                                                                 (offset :u16const)))
+  (str val (:@ sp (:$ offset))))
+
+(define-arm64-vinsn (set-single-aapcs64-c-arg :predicatable) (()
+                                                                ((val :single-float)
+                                                                 (offset :u16const)))
+  (str val (:@ sp (:$ offset))))
+
+;;; --- Misc / forms ---
+
+(define-arm64-vinsn (forms :predicatable) (()
+                                            ((v :lisp)))
+  ;; This vinsn exists just to note that form V was evaluated for side effect.
+  (nop))
 
 
 ;;; In case arm64::*arm64-opcodes* was changed since this file was compiled.
