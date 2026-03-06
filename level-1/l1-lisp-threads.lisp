@@ -190,7 +190,7 @@
 (defun init-thread-from-tcr (tcr thread)
   (let* ((cs-area nil)
          (vs-area (%fixnum-ref tcr (- target::tcr.vs-area target::tcr-bias)))
-         #-arm-target
+         #-(or arm-target arm64-target)
          (ts-area (%fixnum-ref tcr (- target::tcr.ts-area target::tcr-bias))))
     #+(and windows-target x8632-target)
     (let ((aux (%fixnum-ref tcr (- target::tcr.aux target::tcr-bias))))
@@ -199,7 +199,7 @@
     (setq cs-area (%fixnum-ref tcr target::tcr.cs-area))
     (when (or (zerop cs-area)
               (zerop vs-area)
-              #-arm-target
+              #-(or arm-target arm64-target)
               (zerop ts-area))
       (error "Can't allocate new thread"))
     (setf (lisp-thread.tcr thread) tcr
@@ -208,8 +208,8 @@
           (lisp-thread.vs-size thread)
           (%stack-area-usable-size vs-area)
           (lisp-thread.ts-size thread)
-          #+arm-target 0
-          #-arm-target
+          #+(or arm-target arm64-target) 0
+          #-(or arm-target arm64-target)
           (%stack-area-usable-size ts-area)
           (lisp-thread.startup-function thread)
           (thread-make-startup-function thread tcr)))
@@ -617,7 +617,7 @@
                      (if xcf
                        (%%frame-backlink xcf)))
                    (%current-frame-ptr))
-  #+arm-target (or (current-fake-stack-frame)
+  #+(or arm-target arm64-target) (or (current-fake-stack-frame)
                    (%current-frame-ptr)))
 
 
@@ -784,9 +784,9 @@
 (defun temporary-cons-p (x)
   (and (consp x)
        (not (null (or (on-any-vstack x)
-                      #-arm-target
+                      #-(or arm-target arm64-target)
                       (on-any-tsp-stack x)
-                      #+arm-target
+                      #+(or arm-target arm64-target)
                       (on-any-csp-stack x))))))
 
 

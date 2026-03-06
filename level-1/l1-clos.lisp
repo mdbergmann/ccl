@@ -378,7 +378,7 @@
 				table
 				(dpb 1 $lfbits-numreq
 				     (ash -1 $lfbits-noname-bit)))
-              #+arm-target
+              #+(or arm-target arm64-target)
               (%fix-fn-entrypoint
                (gvector :function
                        0
@@ -411,7 +411,7 @@
                        #'%slot-id-ref-missing
                        (dpb 2 $lfbits-numreq
                             (ash -1 $lfbits-noname-bit)))
-              #+arm-target
+              #+(or arm-target arm64-target)
               (%fix-fn-entrypoint
                (gvector :function
                         0
@@ -449,7 +449,7 @@
                        #'%slot-id-set-missing
                        (dpb 3 $lfbits-numreq
                             (ash -1 $lfbits-noname-bit)))
-              #+arm-target
+              #+(or arm-target arm64-target)
               (%fix-fn-entrypoint
                (gvector :function
                         0
@@ -1708,7 +1708,7 @@ governs whether DEFCLASS makes that distinction or not.")
                                 0
                                 (logior (ash 1 $lfbits-gfn-bit)
                                         (ash 1 $lfbits-aok-bit)))
-           #+arm-target
+           #+(or arm-target arm64-target)
            (%fix-fn-entrypoint
             (gvector :function
                      0

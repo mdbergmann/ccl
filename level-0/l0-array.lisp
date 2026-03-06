@@ -189,6 +189,28 @@
      (complex double-float)
      bit))
 
+;;; ARM64 TBI subtag encoding: CL ivectors have subtag = #x81 + (value << 1).
+;;; Index = (subtag - min-cl-ivector-subtag) >> 1 = value.
+;;; Index 4 is a gap (xcode-vector is non-CL at that slot).
+#+arm64-target
+(defconstant arm64::*immheader-array-types*
+  '#((signed-byte 32)                  ;  0 - subtag-s32-vector
+     (unsigned-byte 32)                ;  1 - subtag-u32-vector
+     single-float                      ;  2 - subtag-single-float-vector
+     character                         ;  3 - subtag-simple-base-string
+     unused                            ;  4 - (gap: xcode-vector is not CL)
+     (signed-byte 64)                  ;  5 - subtag-s64-vector
+     (unsigned-byte 64)                ;  6 - subtag-u64-vector
+     fixnum                            ;  7 - subtag-fixnum-vector
+     double-float                      ;  8 - subtag-double-float-vector
+     (complex single-float)            ;  9 - subtag-complex-single-float-vector
+     (signed-byte 8)                   ; 10 - subtag-s8-vector
+     (unsigned-byte 8)                 ; 11 - subtag-u8-vector
+     (signed-byte 16)                  ; 12 - subtag-s16-vector
+     (unsigned-byte 16)                ; 13 - subtag-u16-vector
+     (complex double-float)            ; 14 - subtag-complex-double-float-vector
+     bit))
+
 
 (defun array-element-type (array)
   "Return the type of the elements of the array"
@@ -221,6 +243,9 @@
       #+arm-target
       (svref arm::*immheader-array-types*
              (ash (the fixnum (- subtag arm::min-cl-ivector-subtag)) -3))
+      #+arm64-target
+      (svref arm64::*immheader-array-types*
+             (ash (the fixnum (- subtag arm64::min-cl-ivector-subtag)) -1))
       )))
 
 

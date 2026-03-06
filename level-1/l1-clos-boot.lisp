@@ -2118,6 +2118,27 @@ to replace that class with ~s" name old-class new-class)
             (find-class 'complex-double-float-vector)
             (find-class 'bit-vector)))
 
+  ;;; ARM64 TBI: CL ivector subtags spaced by 2; index = (subtag - min) >> 1.
+  ;;; Index 4 is a gap (xcode-vector at that slot is non-CL).
+  #+arm64-target
+  (defparameter *ivector-vector-classes*
+    (vector (find-class 'long-vector)                    ;  0 - s32
+            (find-class 'unsigned-long-vector)           ;  1 - u32
+            (find-class 'short-float-vector)             ;  2 - single-float
+            (find-class 'base-string)                    ;  3 - simple-base-string
+            *t-class*                                    ;  4 - gap (xcode-vector)
+            (find-class 'doubleword-vector)              ;  5 - s64
+            (find-class 'unsigned-doubleword-vector)     ;  6 - u64
+            (find-class 'fixnum-vector)                  ;  7 - fixnum
+            (find-class 'double-float-vector)            ;  8 - double-float
+            (find-class 'complex-single-float-vector)    ;  9 - complex-single-float
+            (find-class 'byte-vector)                    ; 10 - s8
+            (find-class 'unsigned-byte-vector)           ; 11 - u8
+            (find-class 'word-vector)                    ; 12 - s16
+            (find-class 'unsigned-word-vector)           ; 13 - u16
+            (find-class 'complex-double-float-vector)    ; 14 - complex-double-float
+            (find-class 'bit-vector)))
+
 
 
 
@@ -2335,6 +2356,15 @@ to replace that class with ~s" name old-class new-class)
                 (%svref v (+ slice arm::fulltag-cons)) *cons-class*
                 (%svref v (+ slice arm::fulltag-nil)) *null-class*
                 (%svref v (+ slice arm::fulltag-imm)) *immediate-class*))
+        ;;; ARM64 TBI: no repeating fulltag pattern; set individual entries.
+        #+arm64-target
+        (progn
+          (setf (%svref v arm64::tag-positive-fixnum) *fixnum-class*)
+          (setf (%svref v arm64::tag-negative-fixnum) *fixnum-class*)
+          (setf (%svref v arm64::tag-nil) *null-class*)
+          (setf (%svref v arm64::tag-cons) *cons-class*)
+          (setf (%svref v arm64::tag-single-float) *immediate-class*)
+          (setf (%svref v arm64::tag-character) *immediate-class*))
 
         (macrolet ((map-subtag (subtag class-name)
                      `(setf (%svref v ,subtag) (find-class ',class-name))))
@@ -2419,6 +2449,7 @@ to replace that class with ~s" name old-class new-class)
               #'%class-of-instance)
         (setf (%svref v #+ppc-target target::subtag-symbol
                       #+arm-target target::subtag-symbol
+                      #+arm64-target target::subtag-symbol
 		      #+x8632-target target::subtag-symbol
 		      #+x8664-target target::tag-symbol)
               #-ppc64-target
@@ -2436,8 +2467,9 @@ to replace that class with ~s" name old-class new-class)
         (setf (%svref v
                       #+ppc-target target::subtag-function
                       #+arm-target target::subtag-function
+                      #+arm64-target target::subtag-function
                       #+x8632-target target::subtag-function
-                      #+x8664-target target::tag-function) 
+                      #+x8664-target target::tag-function)
               class-of-function-function)
         (setf (%svref v target::subtag-vectorH)
               #'(lambda (v)
@@ -2453,6 +2485,9 @@ to replace that class with ~s" name old-class new-class)
                               #+arm-target
                               (ash (the fixnum (- subtype arm::min-cl-ivector-subtag))
                                    (- arm::ntagbits))
+                              #+arm64-target
+                              (ash (the fixnum (- subtype arm64::min-cl-ivector-subtag))
+                                   -1)
                               #+ppc64-target
                               (ash (the fixnum (logand subtype #x7f)) (- ppc64::nlowtagbits))
 			      #+x8632-target
@@ -2622,7 +2657,7 @@ to replace that class with ~s" name old-class new-class)
    'slot-id-value
    nil				;method-function name
    (dpb 1 $lfbits-numreq (ash 1 $lfbits-method-bit)))
-  #+arm-target
+  #+(or arm-target arm64-target)
   (%fix-fn-entrypoint
    (gvector :function
            0
@@ -2650,7 +2685,7 @@ to replace that class with ~s" name old-class new-class)
      'set-slot-id-value
      nil
      (dpb 2 $lfbits-numreq (ash 1 $lfbits-method-bit)))
-    #+arm-target
+    #+(or arm-target arm64-target)
     (%fix-fn-entrypoint
      (gvector :function
              0

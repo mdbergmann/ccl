@@ -4307,7 +4307,7 @@
            function
            nil
            (dpb 1 $lfbits-numreq 0))
-  #+arm-target
+  #+(or arm-target arm64-target)
   (%fix-fn-entrypoint
    (gvector :function
            0

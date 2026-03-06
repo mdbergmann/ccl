@@ -703,7 +703,7 @@ terminate the list"
 #+arm-target
 (progn
   (defparameter array-element-subtypes
-    #(single-float 
+    #(single-float
       (unsigned-byte 32)
       (signed-byte 32)
       fixnum
@@ -716,13 +716,42 @@ terminate the list"
       (complex single-float)
       (complex double-float)
       bit))
-  
+
   ;; given uvector subtype - what is the corresponding element-type
   (defun element-subtype-type (subtype)
     (declare (fixnum subtype))
     (if  (= subtype arm::subtag-simple-vector) t
-        (svref array-element-subtypes 
+        (svref array-element-subtypes
                (ash (- subtype arm::min-cl-ivector-subtag) (- arm::ntagbits)))))
+  )
+
+;;; ARM64 TBI: CL ivector subtags are spaced by 2 (bit 0 = cl-ivector flag).
+;;; Index = (subtag - min-cl-ivector-subtag) >> 1.  Index 4 is a gap.
+#+arm64-target
+(progn
+  (defparameter array-element-subtypes
+    #((signed-byte 32)                  ;  0 - subtag-s32-vector
+      (unsigned-byte 32)                ;  1 - subtag-u32-vector
+      single-float                      ;  2 - subtag-single-float-vector
+      base-char                         ;  3 - subtag-simple-base-string
+      t                                 ;  4 - (gap: xcode-vector is not CL)
+      (signed-byte 64)                  ;  5 - subtag-s64-vector
+      (unsigned-byte 64)                ;  6 - subtag-u64-vector
+      fixnum                            ;  7 - subtag-fixnum-vector
+      double-float                      ;  8 - subtag-double-float-vector
+      (complex single-float)            ;  9 - subtag-complex-single-float-vector
+      (signed-byte 8)                   ; 10 - subtag-s8-vector
+      (unsigned-byte 8)                 ; 11 - subtag-u8-vector
+      (signed-byte 16)                  ; 12 - subtag-s16-vector
+      (unsigned-byte 16)                ; 13 - subtag-u16-vector
+      (complex double-float)            ; 14 - subtag-complex-double-float-vector
+      bit))                             ; 15 - subtag-bit-vector
+
+  (defun element-subtype-type (subtype)
+    (declare (fixnum subtype))
+    (if (= subtype arm64::subtag-simple-vector) t
+        (svref array-element-subtypes
+               (ash (- subtype arm64::min-cl-ivector-subtag) -1))))
   )
 
 

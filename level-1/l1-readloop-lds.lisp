@@ -664,7 +664,7 @@ commands but aren't")
 ;;; Each of these stack ranges defines the entire range of (control/value/temp)
 ;;; addresses; they can be used to addresses of stack-allocated objects
 ;;; for printing.
-#-arm-target
+#-(or arm-target arm64-target)
 (defun make-tsp-stack-range (tcr bt-info)
   (list (cons (%catch-tsp (bt.top-catch bt-info))
               (%fixnum-ref (%fixnum-ref tcr target::tcr.ts-area)
@@ -688,7 +688,7 @@ commands but aren't")
   (list (cons (%svref (bt.top-catch bt-info) target::catch-frame.rsp-cell)
               (%fixnum-ref (%fixnum-ref tcr target::tcr.vs-area) target::area.high))))
 
-#+arm-target 
+#+(or arm-target arm64-target)
 (defun make-vsp-stack-range (tcr bt-info)
   (list (cons (%fixnum-ref (catch-frame-sp (bt.top-catch bt-info)) target::lisp-frame.savevsp)
               (%fixnum-ref (%fixnum-ref tcr target::tcr.vs-area) target::area.high))))
@@ -714,7 +714,7 @@ commands but aren't")
   (list (cons (%svref (bt.top-catch bt-info) target::catch-frame.foreign-sp-cell)
               (%fixnum-ref (%fixnum-ref tcr target::tcr.cs-area) target::area.high))))
 
-#+arm-target
+#+(or arm-target arm64-target)
 (defun make-csp-stack-range (tcr bt-info)
   (list (cons (catch-frame-sp (bt.top-catch bt-info))
               (%fixnum-ref (%fixnum-ref tcr target::tcr.cs-area) target::area.high))))
@@ -774,7 +774,7 @@ commands but aren't")
                                       (%current-frame-ptr)
                                       #+ppc-target *fake-stack-frames*
                                       #+x86-target (%current-frame-ptr)
-                                      #+arm-target (or (current-fake-stack-frame) (%current-frame-ptr))
+                                      #+(or arm-target arm64-target) (or (current-fake-stack-frame) (%current-frame-ptr))
                                       (db-link)
                                       (1+ *break-level*)))
          (*default-integer-command* `(:c 0 ,(1- (length (cdr (bt.restarts context))))))

@@ -173,6 +173,8 @@
 	       ppc-lap-function
                #+arm-target
                arm-lap-function
+               #+arm64-target
+               arm64-lap-function
                #+x86-target
                x86-lap-function
                fbind

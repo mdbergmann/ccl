@@ -355,7 +355,7 @@
           (terpri)
           (let* ((processes (all-processes)))
             (dolist (thread-info stack-used-by-thread)
-              (destructuring-bind (thread sp-free sp-used vsp-free vsp-used #-arm-target tsp-free #-arm-target tsp-used)
+              (destructuring-bind (thread sp-free sp-used vsp-free vsp-used #-(or arm-target arm64-target) tsp-free #-(or arm-target arm64-target) tsp-used)
                   thread-info
                 (let* ((process (dolist (p processes)
                                   (when (eq (process-thread p) thread)
@@ -363,7 +363,7 @@
                   (when process
                     (let ((sp-total (+ sp-used sp-free))
                           (vsp-total (+ vsp-used vsp-free))
-                          #-arm-target
+                          #-(or arm-target arm64-target)
                           (tsp-total (+ tsp-used tsp-free)))
                       (format t "~%~a(~d)~%  cstack:~12T~10D (~DK)  ~33T~10D (~DK)  ~54T~10D (~DK)~
                                ~%  vstack:~12T~10D (~DK)  ~33T~10D (~DK)  ~54T~10D (~DK)"
@@ -371,7 +371,7 @@
                               (process-serial-number process)
                               sp-total (k sp-total) sp-free (k sp-free) sp-used (k sp-used)
                               vsp-total (k vsp-total) vsp-free (k vsp-free) vsp-used  (k vsp-used))
-                      #-arm-target
+                      #-(or arm-target arm64-target)
                       (format t
                                "~%  tstack:~12T~10D (~DK)  ~33T~10D (~DK)  ~54T~10D (~DK)"
 

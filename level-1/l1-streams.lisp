@@ -265,6 +265,10 @@
         #+arm-target
         (= (logand subtag arm::fulltagmask)
            arm::fulltag-immheader)
+        #+arm64-target
+        ;; Ivector subtag: bit 7 set (uvector-header), bit 5 not set (not gvector)
+        (= (logand subtag (logior arm64::uvector-header arm64::gvector-tag-mask))
+           arm64::uvector-header)
       (error "~s is not an ivector subtype." element-type))
     (let* ((size-in-octets (ccl::subtag-bytes subtag element-count)))
       (multiple-value-bind (vector pointer)

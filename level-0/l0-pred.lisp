@@ -225,6 +225,11 @@
     (or (= fulltag x8664::fulltag-immheader-0)
         (= fulltag x8664::fulltag-immheader-1)
         (= fulltag x8664::fulltag-immheader-2)))
+  #+arm64-target
+  ;; Ivector subtag: bit 7 set (uvector-header), bit 5 not set (not gvector)
+  (= (the fixnum (logand (the fixnum (typecode x))
+                         (logior arm64::uvector-header arm64::gvector-tag-mask)))
+     arm64::uvector-header)
   )
 
 (setf (type-predicate 'ivector) 'ivectorp)
@@ -234,6 +239,10 @@
   (= (the fixnum (lisptag x)) target::tag-misc)
   #+ppc64-target
   (= (the fixnum (fulltag x)) ppc64::fulltag-misc)
+  #+arm64-target
+  ;; Uvector reference: tag byte has bit 6 set (uvector-ref), bit 7 not set
+  (= (the fixnum (logand (the fixnum (lisptag x)) arm64::uvector-mask))
+     arm64::uvector-ref)
   )
 
 (defun simple-vector-p (x)
