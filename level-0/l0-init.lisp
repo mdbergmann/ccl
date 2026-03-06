@@ -79,6 +79,10 @@
     #+x8664-target :x8664-host
     #+arm-target :arm
     #+arm-target :arm-target
+    #+arm64-target :arm64
+    #+arm64-target :arm64-target
+    #+darwinarm64-target :darwinarm64-target
+    #+darwinarm64-target :darwinarm64-host
     #+linux-target :linux-host
     #+linux-target :linux-target
     #+linuxppc-target :linuxppc-target
