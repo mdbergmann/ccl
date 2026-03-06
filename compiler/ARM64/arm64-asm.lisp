@@ -1745,6 +1745,32 @@
                      (ash (gpr (op 1)) 5)
                      (gpr (op 0))))
 
+            ;;=== ADC / ADCS / SBC / SBCS (add/subtract with carry) ===
+            ((string-equal name "ADC")
+             ;; ADC Xd, Xn, Xm: 1 00 11010000 Rm 000000 Rn Rd
+             (logior #x9a000000
+                     (ash (gpr (op 2)) 16)
+                     (ash (gpr (op 1)) 5)
+                     (gpr (op 0))))
+            ((string-equal name "ADCS")
+             ;; ADCS Xd, Xn, Xm: 1 01 11010000 Rm 000000 Rn Rd
+             (logior #xba000000
+                     (ash (gpr (op 2)) 16)
+                     (ash (gpr (op 1)) 5)
+                     (gpr (op 0))))
+            ((string-equal name "SBC")
+             ;; SBC Xd, Xn, Xm: 1 10 11010000 Rm 000000 Rn Rd
+             (logior #xda000000
+                     (ash (gpr (op 2)) 16)
+                     (ash (gpr (op 1)) 5)
+                     (gpr (op 0))))
+            ((string-equal name "SBCS")
+             ;; SBCS Xd, Xn, Xm: 1 11 11010000 Rm 000000 Rn Rd
+             (logior #xfa000000
+                     (ash (gpr (op 2)) 16)
+                     (ash (gpr (op 1)) 5)
+                     (gpr (op 0))))
+
             ;;=== SDIV / UDIV ===
             ((string-equal name "SDIV")
              (logior #x9ac00c00
@@ -1875,6 +1901,18 @@
              (arm64-encode-load-store form name ops nil 1 #b00))
             ((string-equal name "STRH")
              (arm64-encode-load-store form name ops nil 2 #b01))
+
+            ;;=== 32-bit GPR load/store (W-register form) ===
+            ;; LDR32: zero-extending 32-bit load (LDR Wt, [addr])
+            ;; STR32: 32-bit store (STR Wt, [addr])
+            ((string-equal name "LDR32")
+             (arm64-encode-load-store form name ops #t 4 #b10))
+            ((string-equal name "STR32")
+             (arm64-encode-load-store form name ops nil 4 #b10))
+            ((string-equal name "LDUR32")
+             (arm64-encode-ldur-stur form name ops #t 4 #b10))
+            ((string-equal name "STUR32")
+             (arm64-encode-ldur-stur form name ops nil 4 #b10))
 
             ;;=== LDP / STP ===
             ((or (string-equal name "LDP") (string-equal name "STP"))

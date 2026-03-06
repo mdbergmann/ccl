@@ -186,15 +186,18 @@
 (defarm64lapmacro getvheader (dest src)
   `(ldur ,dest (:@ ,src (:$ arm64::misc-header-offset))))
 
-;;; Header size: element count in the low 56 bits of the header.
-;;; Since fixnumshift=0, the element count IS the fixnum size.
+;;; Header size: raw element count from header word.
+;;; Header format: (element_count << num-subtag-bits) | subtag.
+;;; Right-shift by num-subtag-bits to extract the element count,
+;;; discarding the subtag byte in the low 8 bits.
 (defarm64lapmacro header-size (dest vheader)
-  `(and ,dest ,vheader (:$ ,(1- (ash 1 arm64::tag-shift)))))
+  `(lsr ,dest ,vheader (:$ arm64::num-subtag-bits)))
 
 ;;; Header length: fixnum element count.
-;;; With fixnumshift=0, length = size, so same as header-size.
+;;; With fixnumshift=0, fixnum representation = raw value,
+;;; so same as header-size.
 (defarm64lapmacro header-length (dest vheader)
-  `(and ,dest ,vheader (:$ ,(1- (ash 1 arm64::tag-shift)))))
+  `(lsr ,dest ,vheader (:$ arm64::num-subtag-bits)))
 
 ;;; Extract subtag byte from a header word as a fixnum.
 ;;; Since fixnumshift=0, the subtag byte is already a fixnum.
@@ -215,15 +218,16 @@
 ;;; 32-bit element access at a variable fixnum index.
 ;;; ARM64: fixnumshift=0, so index is the raw element number.
 ;;; Scale by 4 (32-bit elements); misc-data-offset is 0.
+;;; Uses LDR32/STR32 for proper 32-bit (W-register) loads/stores.
 (defarm64lapmacro vref32 (dest miscobj index scaled-idx)
   `(progn
     (lsl ,scaled-idx ,index (:$ 2))
-    (ldr ,dest (:@ ,miscobj ,scaled-idx))))
+    (ldr32 ,dest (:@ ,miscobj ,scaled-idx))))
 
 (defarm64lapmacro vset32 (src miscobj index scaled-idx)
   `(progn
     (lsl ,scaled-idx ,index (:$ 2))
-    (str ,src (:@ ,miscobj ,scaled-idx))))
+    (str32 ,src (:@ ,miscobj ,scaled-idx))))
 
 (defarm64lapmacro extract-lowbyte (dest src)
   `(and ,dest ,src (:$ #xff)))
