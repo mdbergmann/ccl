@@ -1648,7 +1648,7 @@ printed using \"#:\" syntax.  NIL means no prefix is printed.")
 
 (defun %macptr-allocation-string (macptr)
   (if (or (on-any-csp-stack macptr)
-          #-arm-target
+          #-(or arm-target arm64-target)
           (on-any-tsp-stack macptr))
     "[stack-allocated]"
     (if (eql (uvsize macptr) target::xmacptr.element-count)

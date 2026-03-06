@@ -1662,8 +1662,8 @@
              :tcr tcr
              :context context
              :break-condition (ccl::bt.break-condition context))
-           #-arm-target
-           :tsp-range #-arm-target (ccl::make-tsp-stack-range tcr context)
+           #-(or arm-target arm64-target)
+           :tsp-range #-(or arm-target arm64-target) (ccl::make-tsp-stack-range tcr context)
            :vsp-range (ccl::make-vsp-stack-range tcr context)
            :csp-range (ccl::make-csp-stack-range tcr context)
            initargs)))

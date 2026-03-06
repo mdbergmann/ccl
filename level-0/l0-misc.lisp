@@ -278,9 +278,9 @@
 	  (multiple-value-bind (vf vu)
 	      (free-and-used (%fixnum-ref tcr (- target::tcr.vs-area
 						 target::tcr-bias)))
-            #+arm-target
+            #+(or arm-target arm64-target)
             (values cf cu vf vu)
-            #-arm-target
+            #-(or arm-target arm64-target)
 	    (multiple-value-bind (tf tu)
 		(free-and-used (%fixnum-ref tcr (- target::tcr.ts-area
 						   target::tcr-bias)))

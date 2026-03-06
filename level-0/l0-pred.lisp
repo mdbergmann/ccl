@@ -208,6 +208,13 @@
       (setq fulltag (logand (the (unsigned-byte 8) (typecode x)) x8664::fulltagmask))
       (or (= fulltag x8664::fulltag-nodeheader-0)
           (= fulltag x8664::fulltag-nodeheader-1))))
+  #+arm64-target
+  ;; Gvector subtag: bit 7 set (uvector-header), bit 5 set (gvector-tag-mask),
+  ;; bit 6 clear (excludes negative fixnum tag 0xFF).
+  ;; Mask #xE0 = bits 7,6,5; value #xA0 = 1,0,1.
+  (= (the fixnum (logand (the fixnum (typecode x))
+                         (logior arm64::uvector-mask arm64::gvector-tag-mask)))
+     (logior arm64::uvector-header arm64::gvector-tag-mask))
   )
 
 
@@ -1175,7 +1182,7 @@
 
 (defun symbolp (thing)
   "Return true if OBJECT is a SYMBOL, and NIL otherwise."
-  #+(or ppc32-target x8632-target arm-target)
+  #+(or ppc32-target x8632-target arm-target arm64-target)
   (if thing
     (= (the fixnum (typecode thing)) target::subtag-symbol)
     t)

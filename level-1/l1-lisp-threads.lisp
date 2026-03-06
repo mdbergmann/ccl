@@ -736,7 +736,7 @@
   (%ptr-in-area-p idx (%fixnum-ref tcr (- target::tcr.vs-area
 					  target::tcr-bias))))
 
-#-arm-target
+#-(or arm-target arm64-target)
 (defun %on-tsp-stack (tcr object)
   (%ptr-in-area-p object (%fixnum-ref tcr (- target::tcr.ts-area
 					     target::tcr-bias))))
@@ -767,7 +767,7 @@
     (when (object-in-range-p object r)
       (return t))))
 
-#-arm-target
+#-(or arm-target arm64-target)
 (defun on-any-tsp-stack (object)
   (or (%on-tsp-stack (%current-tcr) object)
       (object-in-some-range object *aux-tsp-ranges*)))
