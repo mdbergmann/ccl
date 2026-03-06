@@ -94,6 +94,11 @@
 (defparameter *arm-compiler-backend-modules*
   '(arm-backend arm-vinsns arm2))
 
+(defparameter *arm64-compiler-modules*
+  '(arm64-arch arm64env arm64-asm arm64-lap))
+
+(defparameter *arm64-compiler-backend-modules*
+  '(arm64-backend arm64-vinsns arm642))
 
 
 
@@ -101,12 +106,14 @@
 (defparameter *x8632-xload-modules* '(xx8632fasload xfasload heap-image ))
 (defparameter *x8664-xload-modules* '(xx8664fasload xfasload heap-image ))
 (defparameter *arm-xload-modules* '(xarmfasload xfasload heap-image ))
+(defparameter *arm64-xload-modules* '(xarm64fasload xfasload heap-image ))
 
 
 ;;; Not too OS-specific.
 (defparameter *ppc-xdev-modules* '(ppc-lapmacros ))
 (defparameter *x86-xdev-modules* '(x86-lapmacros ))
 (defparameter *arm-xdev-modules* '(arm-lapmacros ))
+(defparameter *arm64-xdev-modules* '(arm64-lapmacros ))
 
 (defmacro with-global-optimization-settings ((&key speed
                                                    space
@@ -134,7 +141,8 @@
   (case target
     ((:ppc32 :ppc64) *ppc-xdev-modules*)
     ((:x8632 :x8664) *x86-xdev-modules*)
-    (:arm *arm-xdev-modules*)))
+    (:arm *arm-xdev-modules*)
+    (:arm64 *arm64-xdev-modules*)))
 
 (defun target-xload-modules (&optional (target
 					(backend-target-arch-name *host-backend*)))
@@ -142,7 +150,8 @@
     ((:ppc32 :ppc64) *ppc-xload-modules*)
     (:x8632 *x8632-xload-modules*)
     (:x8664 *x8664-xload-modules*)
-    (:arm *arm-xload-modules*)))
+    (:arm *arm-xload-modules*)
+    (:arm64 *arm64-xload-modules*)))
 
 
 
@@ -179,7 +188,8 @@
              (:freebsdx8632 'ffi-freebsdx8632)
              (:linuxarm 'ffi-linuxarm)
              (:androidarm 'ffi-androidarm)
-             (:darwinarm 'ffi-darwinarm)))))
+             (:darwinarm 'ffi-darwinarm)
+             (:darwinarm64 'ffi-darwinarm64)))))
 
 
 (defun target-compiler-modules (&optional (target
@@ -199,7 +209,9 @@
                     *x8664-compiler-backend-modules*
                     *x86-compiler-backend-modules*))
     (:arm (append *arm-compiler-modules*
-                  *arm-compiler-backend-modules*))))
+                  *arm-compiler-backend-modules*))
+    (:arm64 (append *arm64-compiler-modules*
+                    *arm64-compiler-backend-modules*))))
 
 (defparameter *other-lib-modules*
   '(streams pathnames backtrace
@@ -216,7 +228,8 @@
 	  (case target
 	    ((:ppc32 :ppc64) '(ppc-backtrace ppc-disassemble))
             ((:x8632 :x8664) '(x86-backtrace x86-disassemble x86-watch))
-            (:arm '(arm-backtrace arm-disassemble)))))
+            (:arm '(arm-backtrace arm-disassemble))
+            (:arm64 '(arm64-backtrace arm64-disassemble)))))
 	  
 
 (defun target-lib-modules (&optional (backend-name
@@ -280,7 +293,10 @@
                x86-threads-utils x86-callback-support))
             ((:linuxarm :darwinarm :androidarm)
              '(arm-error-signal arm-trap-support
-               arm-threads-utils arm-callback-support)))))
+               arm-threads-utils arm-callback-support))
+            ((:darwinarm64)
+             '(arm64-error-signal arm64-trap-support
+               arm64-threads-utils arm64-callback-support)))))
 
 
 ;;; Needed to cross-dump an image
@@ -487,7 +503,8 @@
     (:solarisx8632 "sx86-boot32")
     (:freebsdx8632 "fx86-boot32")
     (:linuxarm "arm-boot")
-    (:androidarm "aarm-boot")))
+    (:androidarm "aarm-boot")
+    (:darwinarm64 "arm64-boot.image")))
 
 (defun standard-kernel-name (&optional (target (backend-name *host-backend*)))
   (ecase target
@@ -507,7 +524,8 @@
     (:freebsdx8632 "fx86cl")
     (:linuxarm "armcl")
     (:darwinarm "darmcl")
-    (:androidarm "aarmcl")))
+    (:androidarm "aarmcl")
+    (:darwinarm64 "darmcl64")))
 
 (defun standard-image-name (&optional (target (backend-name *host-backend*)))
   (concatenate 'string (pathname-name (standard-kernel-name target)) ".image"))
@@ -530,7 +548,8 @@
     (:freebsdx8632 "freebsdx8632")
     (:linuxarm "linuxarm")
     (:darwinarm "darwinarm")
-    (:androidarm "androidarm")))
+    (:androidarm "androidarm")
+    (:darwinarm64 "darwinarm64")))
 
 ;;; If we distribute (e.g.) 32- and 64-bit versions for the same
 ;;; machine and OS in the same svn directory, return the name of the
