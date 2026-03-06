@@ -1119,7 +1119,7 @@
 (defconstant tcr.flags-value (+ tcr.flags 4))
 
 
-(defconstant interrupt-level-binding-index (ash 1 fixnumshift))
+(defconstant interrupt-level-binding-index (ash 1 word-shift))  ; = node-size = 8
 
 
 ;;; Kernel lock structures.
