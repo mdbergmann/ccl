@@ -1636,6 +1636,18 @@
       (when (= subtype (xload-target-subtype :function))
         (locally (declare (ftype (function (t) t) xload-arm-set-entrypoint))
           (xload-arm-set-entrypoint vector)))))
+    ;; On ARM64 TBI, function gvectors need the type-specific tag
+    ;; (tag_function) rather than the generic fulltag_misc.
+    (when (and *xload-target-tbi-p*
+              (= subtype (xload-target-subtype :function)))
+      (let* ((tagged-fn (xload-apply-tag vector *xload-target-fulltag-for-functions*)))
+        ;; Update both the fasl stack entry and the final value
+        (when (faslstate.faslepush s)
+          (setf (svref (faslstate.faslevec s)
+                       (1- (the fixnum (faslstate.faslecnt s))))
+                tagged-fn))
+        (setf (faslstate.faslval s) tagged-fn)
+        (return-from xfasl-read-gvector tagged-fn)))
     (setf (faslstate.faslval s) vector)))
   
 (defxloadfaslop $fasl-vgvec (s)

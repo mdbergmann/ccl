@@ -120,9 +120,12 @@
   (xload-make-ivector *xload-static-space*
                       (xload-target-subtype :unsigned-64-bit-vector)
                       (1- (/ 4096 8)))     ; 511 u64 elements
-  ;; Make NIL — a misaligned cons straddling two doublewords.
-  (xload-make-cons *xload-target-nil* 0 *xload-static-space*)
-  (xload-make-cons 0 *xload-target-nil* *xload-static-space*))
+  ;; Make NIL — one dnode (16 bytes) at nil-base.
+  ;; CDR(NIL) at nil-base+0, CAR(NIL) at nil-base+8.
+  ;; ARM64 TBI tagging needs only one cons cell (unlike x8664 which
+  ;; needs two for its misaligned fulltag scheme).
+  ;; T's symbol header follows immediately at nil-base+16.
+  (xload-make-cons *xload-target-nil* *xload-target-nil* *xload-static-space*))
 
 
 ;;; Backend registration for darwinarm64.
