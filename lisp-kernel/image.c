@@ -29,17 +29,26 @@
 #include <time.h>
 
 
+#ifdef ARM64
+/* ARM64 TBI tags: can't use bitmask (uvector_ref=0x40, 1<<64 overflows).
+   Relocatable tags: nil, cons, and uvector references (bit 6 set, bit 7 clear). */
+#define is_relocatable_tag(t) \
+  ((t) == tag_nil || (t) == tag_cons || (((t) & uvector_mask) == uvector_ref))
+/* Strip TBI tag (top byte) for range checks — address is in low 56 bits */
+#define addr_of(w) ((w) & 0x00FFFFFFFFFFFFFFULL)
+#else
 #if defined(PPC64) || defined(X8632)
 #define RELOCATABLE_FULLTAG_MASK \
   ((1<<fulltag_cons)|(1<<fulltag_misc))
-#else
-#ifdef X8664
+#elif defined(X8664)
 #define RELOCATABLE_FULLTAG_MASK \
   ((1<<fulltag_cons)|(1<<fulltag_misc)|(1<<fulltag_symbol)|(1<<fulltag_function))
 #else
 #define RELOCATABLE_FULLTAG_MASK \
   ((1<<fulltag_cons)|(1<<fulltag_nil)|(1<<fulltag_misc))
 #endif
+#define is_relocatable_tag(t) ((1<<(t)) & RELOCATABLE_FULLTAG_MASK)
+#define addr_of(w) (w)
 #endif
 
 void
@@ -104,15 +113,15 @@ relocate_area_contents(area *a, LispObj bias)
         fixnum_after_header_is_link = true;
       }
 
-      if ((w0 >= low) && (w0 < high) &&
-	  ((1<<fulltag) & RELOCATABLE_FULLTAG_MASK)) {
+      if ((addr_of(w0) >= low) && (addr_of(w0) < high) &&
+	  is_relocatable_tag(fulltag)) {
 	*start = (w0+bias);
       }
       w1 = *++start;
       fulltag = fulltag_of(w1);
-      if ((w1 >= low) && (w1 < high) &&
+      if ((addr_of(w1) >= low) && (addr_of(w1) < high) &&
 	  (fixnum_after_header_is_link ||
-           ((1<<fulltag) & RELOCATABLE_FULLTAG_MASK))) {
+           is_relocatable_tag(fulltag))) {
 	*start = (w1+bias);
       }
       fixnum_after_header_is_link = false;
@@ -418,8 +427,8 @@ load_openmcl_image(int fd, openmcl_image_file_header *h)
 	if (bias) {
           LispObj weakvll = lisp_global(WEAKVLL);
 
-          if ((weakvll >= ((LispObj)image_base-bias)) &&
-              (weakvll < (ptr_to_lispobj(active_dynamic_area->active)-bias))) {
+          if ((addr_of(weakvll) >= ((LispObj)image_base-bias)) &&
+              (addr_of(weakvll) < (ptr_to_lispobj(active_dynamic_area->active)-bias))) {
             lisp_global(WEAKVLL) = weakvll+bias;
           }
 	  fprintf(dbgout, "  relocating static area...\n");

@@ -274,11 +274,11 @@ subtag_illegal = tag_illegal
 
 subtag_mask = 0xff
 
-misc_bias = -node_size
+misc_bias = node_size
 cons_bias = misc_bias
 function_bias = misc_bias
-t_value = (0x3000+fulltag_misc)	
-define(`t_offset',-symbol.size)
+define(`t_offset',dnode_size)
+t_value = nil_value + t_offset
 	
 misc_header_offset = node_bias
 misc_subtag_offset = (node_bias + (node_size-1))
@@ -302,7 +302,7 @@ max_1_bit_constant_index = 0
 /* Order of CAR and CDR doesn't seem to matter much - there aren't */
 /* too many tricks to be played with predecrement/preincrement addressing. */
 /* Keep them in the confusing MCL 3.0 order, to avoid confusion. */
-	_struct(cons,cons_bias)
+	_struct(cons,node_bias)
 	 _node(cdr)
 	 _node(car)
 	_ends
@@ -325,7 +325,7 @@ max_1_bit_constant_index = 0
 	_endstructf
 	
 /* Functions are of (conceptually) unlimited size. */
-	_struct(_function,function_bias)
+	_struct(_function,node_bias)
          _struct_label(entrypoint)
 	_ends
 
@@ -384,7 +384,7 @@ max_1_bit_constant_index = 0
 	 _node(padding)
 	_ends
 
-	_struct(vector,misc_bias)
+	_struct(vector,node_bias)
 	 _node(header)
 	 _struct_label(data)
 	_ends
@@ -536,7 +536,7 @@ TCR_FLAG_BIT_FOREIGN_EXCEPTION = 6
 TCR_FLAG_BIT_PENDING_SUSPEND = 7        
 
 
-nil_value = (0x200011000+node_size)
+nil_value = (tag_nil << tag_shift) | (0x200011000+node_size)
         	
 define(`RESERVATION_DISCHARGE',(0x2008+(LOWMEM_BIAS)))
 

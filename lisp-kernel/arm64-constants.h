@@ -359,7 +359,7 @@ define_gvector(simple_vector,31)
    base, so header is at offset -node_size and data starts at 0.
    ================================================================ */
 
-#define misc_bias      (-node_size)
+#define misc_bias      node_size            /* = 8, matches Lisp misc-bias */
 #define cons_bias      misc_bias
 #define function_bias  misc_bias
 

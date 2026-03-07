@@ -118,6 +118,21 @@ define(`load_voidptr',`
         __(movn $1,#(dnode_size-1))
         ')
 
+/* Load nil_value (with TBI tag) into register $1.
+   nil_value is a 64-bit constant requiring MOVZ + 3 MOVK. */
+define(`load_nil',`
+        __(movz $1,#((nil_value) & 0xFFFF))
+        __(movk $1,#((nil_value >> 16) & 0xFFFF),lsl #16)
+        __(movk $1,#((nil_value >> 32) & 0xFFFF),lsl #32)
+        __(movk $1,#((nil_value >> 48) & 0xFFFF),lsl #48)
+        ')
+
+/* Load t_value into register $1, given $2 already holds nil_value.
+   t_value = nil_value + t_offset (= dnode_size = 16). */
+define(`load_t',`
+        __(add $1,$2,#t_offset)
+        ')
+
 /* Set $1 to $2, with bit 55 sign-sextended into bits 56-63.  If
    $2 is a fixnum, $1 and $2 will be =. */        
 define(`sign_extend_value',`
