@@ -1384,14 +1384,15 @@
              (and val (<= 32 val 95))))))
 
 (defun encode-cond-keyword (kw)
-  "Map condition keyword (:eq :ne :hs :lo :mi :pl :vs :vc :hi :ls :ge :lt :gt :le) to 4-bit code."
-  (case kw
-    (:eq 0) (:ne 1)
-    (:cs 2) (:hs 2) (:cc 3) (:lo 3)
-    (:mi 4) (:pl 5) (:vs 6) (:vc 7)
-    (:hi 8) (:ls 9) (:ge 10) (:lt 11)
-    (:gt 12) (:le 13) (:al 14) (:nv 15)
-    (t (error "Unknown condition keyword: ~s" kw))))
+  "Map condition keyword or symbol to 4-bit condition code."
+  (let ((name (if (keywordp kw) kw (intern (string kw) "KEYWORD"))))
+    (case name
+      (:eq 0) (:ne 1)
+      (:cs 2) (:hs 2) (:cc 3) (:lo 3)
+      (:mi 4) (:pl 5) (:vs 6) (:vc 7)
+      (:hi 8) (:ls 9) (:ge 10) (:lt 11)
+      (:gt 12) (:le 13) (:al 14) (:nv 15)
+      (t (error "Unknown condition keyword: ~s" kw)))))
 
 (defun parse-mnemonic-condition (mnemonic)
   "If MNEMONIC is like B.EQ, return (values :B cond-code).  Otherwise NIL."
@@ -2054,28 +2055,28 @@
 
             ;;=== FCMP ===
             ((string-equal name "FCMP")
-             (let ((fn (op 0))
+             (let ((fop-n (op 0))
                    (fm (op 1)))
                (cond
                  ;; Both double FP regs
-                 ((and (arm64-dfpr-p fn) (arm64-dfpr-p fm))
+                 ((and (arm64-dfpr-p fop-n) (arm64-dfpr-p fm))
                   (logior #x1e602000
                           (ash (dfpr fm) 16)
-                          (ash (dfpr fn) 5)))
+                          (ash (dfpr fop-n) 5)))
                  ;; Both single FP regs
-                 ((and (arm64-sfpr-p fn) (arm64-sfpr-p fm))
+                 ((and (arm64-sfpr-p fop-n) (arm64-sfpr-p fm))
                   (logior #x1e202000
                           (ash (sfpr fm) 16)
-                          (ash (sfpr fn) 5)))
+                          (ash (sfpr fop-n) 5)))
                  ;; fcmp dn, #0.0
-                 ((and (arm64-dfpr-p fn)
+                 ((and (arm64-dfpr-p fop-n)
                        (or (eql fm 0) (eql fm 0.0d0)))
                   (logior #x1e602008
-                          (ash (dfpr fn) 5)))
-                 ((and (arm64-sfpr-p fn)
+                          (ash (dfpr fop-n) 5)))
+                 ((and (arm64-sfpr-p fop-n)
                        (or (eql fm 0) (eql fm 0.0)))
                   (logior #x1e202008
-                          (ash (sfpr fn) 5)))
+                          (ash (sfpr fop-n) 5)))
                  (t (error "Invalid FCMP operands: ~s" form)))))
 
             ;;=== FMOV ===

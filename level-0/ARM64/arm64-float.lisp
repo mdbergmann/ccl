@@ -23,8 +23,8 @@
 ;;; ARM64 AArch64 system register encodings for MRS/MSR.
 ;;; FPCR: op0=3, op1=3, CRn=4, CRm=4, op2=0 → 0x5A20
 ;;; FPSR: op0=3, op1=3, CRn=4, CRm=4, op2=1 → 0x5A21
-(defconstant fpcr-sysreg #x5A20)
-(defconstant fpsr-sysreg #x5A21)
+;;; Defined in arm64-arch.lisp as arm64::arm64::fpcr-sysreg and arm64::arm64::fpsr-sysreg
+;;; so they are available at LAP compile time during cross-compilation.
 
 ;;; ARM64: single-float is immediate (tag 0x10, IEEE value in bits 0-31).
 ;;; Double-float is heap-allocated (8-byte IEEE value at misc-data-offset = 0).
@@ -289,7 +289,7 @@
 ;;; Read FPSR status bits, AND with enabled exception mask from tcr.lisp-fpscr.
 (defarm64lapfunction %ffi-exception-status ()
   ;; Read FPSR (cumulative exception flags in bits 4-0)
-  (mrs imm2 (:$ fpsr-sysreg))
+  (mrs imm2 (:$ arm64::fpsr-sysreg))
   (and imm0 imm2 (:$ #x1F))            ; exception status bits (IOC,DZC,OFC,UFC,IXC)
   ;; Read enabled exceptions from TCR
   (ldr imm1 (:@ rcontext (:$ arm64::tcr.lisp-fpscr)))
@@ -304,7 +304,7 @@
   ;; Return status as fixnum, clear FPSR exception bits
   (mov arg_z imm0)                       ; fixnumshift=0, already a fixnum
   (bic imm2 imm2 (:$ #x1F))            ; clear exception bits
-  (msr (:$ fpsr-sysreg) imm2)           ; write back cleaned FPSR
+  (msr (:$ arm64::fpsr-sysreg) imm2)           ; write back cleaned FPSR
   (ret))
 
 
@@ -314,15 +314,16 @@
     (let* ((condition-name (fp-condition-name-from-fpscr-status fp-status)))
       (error (make-instance (or condition-name 'arithmetic-error)
                             :operation operation
-                            :operands (list (%copy-short-float op0 (%make-sfloat))))))))
+                            ;; ARM64: single-float is immediate, no heap copy needed
+                            :operands (list op0))))))
 
 (defun %sf-check-exception-2 (operation op0 op1 fp-status)
   (when fp-status
     (let* ((condition-name (fp-condition-name-from-fpscr-status fp-status)))
       (error (make-instance (or condition-name 'arithmetic-error)
                             :operation operation
-                            :operands (list (%copy-short-float op0 (%make-sfloat))
-                                            (%copy-short-float op1 (%make-sfloat))))))))
+                            ;; ARM64: single-float is immediate, no heap copy needed
+                            :operands (list op0 op1))))))
 
 (defun %df-check-exception-1 (operation op0 fp-status)
   (when fp-status
@@ -416,7 +417,7 @@
 
 ;;; Get rounding mode from FPCR + exception enable mask from tcr.lisp-fpscr.
 (defarm64lapfunction %get-fpscr-control ()
-  (mrs imm0 (:$ fpcr-sysreg))           ; read FPCR
+  (mrs imm0 (:$ arm64::fpcr-sysreg))           ; read FPCR
   (and imm0 imm0 (:$ (ash 3 22)))       ; rounding mode (bits 23-22)
   (ldr imm1 (:@ rcontext (:$ arm64::tcr.lisp-fpscr)))
   (and imm1 imm1 (:$ #x1F00))          ; exception enable bits (bits 12-8)
@@ -425,17 +426,17 @@
 
 ;;; Get cumulative exception status from FPSR.
 (defarm64lapfunction %get-fpscr-status ()
-  (mrs imm0 (:$ fpsr-sysreg))
+  (mrs imm0 (:$ arm64::fpsr-sysreg))
   (and arg_z imm0 (:$ #x1F))            ; exception status bits
   (ret))
 
 ;;; Set cumulative exception status in FPSR.
 (defarm64lapfunction %set-fpscr-status ((new arg_z))
-  (mrs imm1 (:$ fpsr-sysreg))           ; read current FPSR
+  (mrs imm1 (:$ arm64::fpsr-sysreg))           ; read current FPSR
   (bic imm1 imm1 (:$ #x1F))            ; clear status bits
   (and imm0 new (:$ #x1F))              ; mask new status
   (orr imm0 imm0 imm1)                  ; merge
-  (msr (:$ fpsr-sysreg) imm0)           ; write FPSR
+  (msr (:$ arm64::fpsr-sysreg) imm0)           ; write FPSR
   (ret))
 
 ;;; Set rounding mode in FPCR and exception enables in tcr.lisp-fpscr.
@@ -444,22 +445,22 @@
   (and imm0 new (:$ #x1F00))            ; enable bits
   (str imm0 (:@ rcontext (:$ arm64::tcr.lisp-fpscr)))
   ;; Update rounding mode in FPCR
-  (mrs imm1 (:$ fpcr-sysreg))           ; read current FPCR
+  (mrs imm1 (:$ arm64::fpcr-sysreg))           ; read current FPCR
   (bic imm1 imm1 (:$ (ash 3 22)))       ; clear rounding mode
   (and imm0 new (:$ (ash 3 22)))        ; new rounding mode
   (orr imm0 imm1 imm0)                  ; merge
-  (msr (:$ fpcr-sysreg) imm0)           ; write FPCR
+  (msr (:$ arm64::fpcr-sysreg) imm0)           ; write FPCR
   (ret))
 
 ;;; Get combined FPSR status + tcr.lisp-fpscr enables.
 (defarm64lapfunction %get-fpscr ()
-  (mrs imm0 (:$ fpsr-sysreg))           ; FPSR (status in low bits)
+  (mrs imm0 (:$ arm64::fpsr-sysreg))           ; FPSR (status in low bits)
   (and imm0 imm0 (:$ #x1F))            ; status bits only
   (ldr imm1 (:@ rcontext (:$ arm64::tcr.lisp-fpscr)))
   (and imm1 imm1 (:$ #x1F00))          ; enable bits
   (orr arg_z imm1 imm0)                 ; combine
   ;; Also include rounding mode from FPCR
-  (mrs imm0 (:$ fpcr-sysreg))
+  (mrs imm0 (:$ arm64::fpcr-sysreg))
   (and imm0 imm0 (:$ (ash 3 22)))
   (orr arg_z arg_z imm0)
   (ret))
@@ -569,9 +570,9 @@
   (build-lisp-frame)
   (get-single-float s0 src)
   ;; Clear FPSR exception bits
-  (mrs imm0 (:$ fpsr-sysreg))
+  (mrs imm0 (:$ arm64::fpsr-sysreg))
   (bic imm0 imm0 (:$ #x1F))
-  (msr (:$ fpsr-sysreg) imm0)
+  (msr (:$ arm64::fpsr-sysreg) imm0)
   (fsqrt s1 s0)
   ;; Check for FPU exceptions
   (spcall .SPcheck-fpu-exception)
@@ -586,9 +587,9 @@
   (build-lisp-frame)
   (get-double-float d0 src)
   ;; Clear FPSR exception bits
-  (mrs imm0 (:$ fpsr-sysreg))
+  (mrs imm0 (:$ arm64::fpsr-sysreg))
   (bic imm0 imm0 (:$ #x1F))
-  (msr (:$ fpsr-sysreg) imm0)
+  (msr (:$ arm64::fpsr-sysreg) imm0)
   (fsqrt d1 d0)
   ;; Check for FPU exceptions
   (spcall .SPcheck-fpu-exception)

@@ -63,6 +63,8 @@
 (defparameter *xload-target-fulltag-for-symbols* nil)
 (defparameter *xload-target-fulltag-for-functions* nil)
 (defparameter *xload-target-char-code-limit* nil)
+(defparameter *xload-target-tbi-p* nil
+  "When true, target uses Top Byte Ignore tagging (tags in bits 56-63).")
 
 
 (defvar *xload-backends* nil)
@@ -126,7 +128,7 @@
     (setq *xload-target-misc-subtag-offset*
           (arch::target-misc-subtag-offset arch))
     (setq *xload-target-fixnumshift*
-          (arch::target-word-shift arch))
+          (arch::target-fixnum-shift arch))
     (setq *xload-target-fulltag-cons*
           (arch::target-cons-tag arch))
     (setq *xload-target-car-offset*
@@ -161,12 +163,33 @@
             (arch::target-fulltag-misc arch)
             (arch::target-function-tag arch)))
     (setq *xload-target-char-code-limit*
-          (arch::target-char-code-limit arch))))
+          (arch::target-char-code-limit arch))
+    (setq *xload-target-tbi-p*
+          (= (arch::target-ntagbits arch) 8))))
 
 
+
+;;; TBI tag helpers — extract, apply, and strip tags for both TBI and traditional
+(defun xload-extract-tag (addr)
+  "Extract the fulltag from a tagged address."
+  (if *xload-target-tbi-p*
+    (ldb (byte 8 56) addr)
+    (logand addr *xload-target-fulltagmask*)))
+
+(defun xload-apply-tag (base-addr tag)
+  "Apply a fulltag to a base (untagged) address."
+  (if *xload-target-tbi-p*
+    (dpb tag (byte 8 56) base-addr)
+    (logior tag (logandc2 base-addr *xload-target-fulltagmask*))))
+
+(defun xload-strip-tag (addr)
+  "Remove the fulltag from a tagged address."
+  (if *xload-target-tbi-p*
+    (dpb 0 (byte 8 56) addr)
+    (logandc2 addr *xload-target-fulltagmask*)))
 
 (defun xload-target-consp (addr)
-  (and (= *xload-target-fulltag-cons* (logand addr *xload-target-fulltagmask*))
+  (and (= *xload-target-fulltag-cons* (xload-extract-tag addr))
        (not (= addr *xload-target-nil*))))
 
 
@@ -340,7 +363,7 @@
 
 
 (defun  %xload-unbound-function% ()
-  (+ *xload-dynamic-space-address* *xload-target-fulltag-misc*))
+  (xload-apply-tag *xload-dynamic-space-address* *xload-target-fulltag-misc*))
 
 (defparameter *xload-dynamic-space* nil)
 (defparameter *xload-readonly-space* nil)
@@ -377,11 +400,12 @@
   (setf (gethash addr *xload-symbol-addresses*) sym))
 
 (defun xload-lookup-address (address)
-  (dolist (space *xload-spaces* (error "Address #x~8,'0x not found in defined address spaces ." address))
-    (let* ((vaddr (xload-space-vaddr space)))
-      (if (and (<= vaddr address)
-               (< address (+ vaddr (the fixnum (xload-space-size space)))))
-        (return (values (xload-space-data space) (- address vaddr)))))))
+  (let* ((addr (xload-strip-tag address)))
+    (dolist (space *xload-spaces* (error "Address #x~8,'0x not found in defined address spaces ." address))
+      (let* ((vaddr (xload-space-vaddr space)))
+        (if (and (<= vaddr addr)
+                 (< addr (+ vaddr (the fixnum (xload-space-size space)))))
+          (return (values (xload-space-data space) (- addr vaddr))))))))
 
 (defun xload-u32-at-address (address)
   (multiple-value-bind (v o) (xload-lookup-address address)
@@ -462,10 +486,17 @@
     (if (> nbytes (the fixnum (- (the fixnum (xload-space-size space)) free)))
       (xload-more-space space (the fixnum (+ nbytes (ash 1 16)))))
     (setf (xload-space-lowptr space) (the fixnum (+ free nbytes)))
-    (let* ((offset (+ free tag)))
+    (let* ((offset (if *xload-target-tbi-p*
+                     ;; TBI: offset points to data start (past header word)
+                     (+ free (arch::target-lisp-node-size
+                              (backend-target-arch *target-backend*)))
+                     (+ free tag)))
+           (base-addr (+ (xload-space-vaddr space) offset)))
       (declare (fixnum offset))
-      (values 
-       (the fixnum (+ (xload-space-vaddr space) offset))
+      (values
+       (if *xload-target-tbi-p*
+         (dpb tag (byte 8 56) base-addr)
+         base-addr)
        (xload-space-data space)
        offset))))
 
@@ -533,8 +564,7 @@
           (target-word-size-case
            (32 (xload-alloc-fullwords space *xload-target-fulltag-for-symbols* target::symbol.element-count))
            (64 (xload-alloc-doublewords space *xload-target-fulltag-for-symbols* target::symbol.element-count))))
-         (sv (logior *xload-target-fulltag-misc*
-                     (logandc2 sym *xload-target-fulltagmask*))))
+         (sv (xload-apply-tag sym *xload-target-fulltag-misc*)))
     (setf (xload-%svref sv -1)  (xload-symbol-header))
     (setf (xload-%svref sv target::symbol.flags-cell) 0)
     ;; On PPC64, NIL's pname must be NIL.
@@ -626,12 +656,12 @@
       (declare (fixnum subtag nelements))
     (multiple-value-bind (addr v o) (xload-alloc space *xload-target-fulltag-misc* (xload-dnode-align (xload-subtag-bytes subtag nelements)))
       (declare (fixnum o))
-      (setf (natural-ref v (the fixnum (- o *xload-target-fulltag-misc*))) (make-xload-header nelements subtag))
+      (setf (natural-ref v (the fixnum (+ o *xload-target-misc-header-offset*))) (make-xload-header nelements subtag))
       (values addr v o))))
 
 (defun xload-%svref (addr i)
   (declare (fixnum i))
-  (if (= (the fixnum (logand addr *xload-target-fulltagmask*)) *xload-target-fulltag-misc*)
+  (if (= (xload-extract-tag addr) *xload-target-fulltag-misc*)
     (target-word-size-case
      (32
       (multiple-value-bind (v offset) (xload-lookup-address addr)
@@ -641,11 +671,11 @@
       (multiple-value-bind (v offset) (xload-lookup-address addr)
         (declare (fixnum offset))
         (natural-ref v (the fixnum (+ offset (the fixnum (+ *xload-target-misc-data-offset* (the fixnum (ash i 3))))))))))
-    (error "Not a vector: #x~x" addr)))   
+    (error "Not a vector: #x~x" addr)))
 
 (defun (setf xload-%svref) (new addr i)
   (declare (fixnum i))
-  (if (= (the fixnum (logand addr *xload-target-fulltagmask*)) *xload-target-fulltag-misc*)
+  (if (= (xload-extract-tag addr) *xload-target-fulltag-misc*)
     (target-word-size-case
      (32
       (multiple-value-bind (v offset) (xload-lookup-address addr)
@@ -660,7 +690,7 @@
 
 (defun xload-%fullword-ref (addr i)
   (declare (fixnum i))
-  (if (= (the fixnum (logand addr *xload-target-fulltagmask*))
+  (if (= (xload-extract-tag addr)
            *xload-target-fulltag-misc*)
       (multiple-value-bind (v offset) (xload-lookup-address addr)
         (declare (fixnum offset))
@@ -669,7 +699,7 @@
 
 (defun (setf xload-%fullword-ref) (new addr i)
   (declare (fixnum i))
-  (if (= (the fixnum (logand addr *xload-target-fulltagmask*))
+  (if (= (xload-extract-tag addr)
          *xload-target-fulltag-misc*)
     (multiple-value-bind (v offset) (xload-lookup-address addr)
       (declare (fixnum offset))
@@ -718,10 +748,9 @@
 
 (defun xload-symbol-value (addr)
   (unless (= *xload-target-fulltag-for-symbols*
-             (logand addr *xload-target-fulltagmask*))
+             (xload-extract-tag addr))
     (error "~& Not a symbol address: #x~x" addr))
-  (setq addr (logior *xload-target-fulltag-misc*
-                     (logandc2 addr *xload-target-fulltagmask*)))
+  (setq addr (xload-apply-tag addr *xload-target-fulltag-misc*))
   (if (= (xload-%svref addr -1) (xload-symbol-header))
     (xload-%svref addr target::symbol.vcell-cell)
     (error "Not a symbol: #x~x" addr)))
@@ -729,10 +758,9 @@
 
 (defun (setf xload-symbol-value) (new addr)
   (unless (= *xload-target-fulltag-for-symbols*
-             (logand addr *xload-target-fulltagmask*))
+             (xload-extract-tag addr))
     (error "~& Not a symbol address: #x~x" addr))
-  (setq addr (logior *xload-target-fulltag-misc*
-                     (logandc2 addr *xload-target-fulltagmask*)))
+  (setq addr (xload-apply-tag addr *xload-target-fulltag-misc*))
   (if (= (xload-%svref addr -1) (xload-symbol-header))
     (setf (xload-%svref addr target::symbol.vcell-cell) new)
     (error "Not a symbol: #x~x" addr)))
@@ -746,20 +774,18 @@
 
 (defun xload-fset (addr def)
   (unless (= *xload-target-fulltag-for-symbols*
-             (logand addr *xload-target-fulltagmask*))
+             (xload-extract-tag addr))
     (error "~& Not a symbol address: #x~x" addr))
-  (setq addr (logior *xload-target-fulltag-misc*
-                     (logandc2 addr *xload-target-fulltagmask*)))
+  (setq addr (xload-apply-tag addr *xload-target-fulltag-misc*))
   (if (= (xload-%svref addr -1) (xload-symbol-header))
     (setf (xload-%svref addr target::symbol.fcell-cell) def)
     (error "Not a symbol: #x~x" addr)))
 
 (defun (setf xload-symbol-plist) (new addr)
   (unless (= *xload-target-fulltag-for-symbols*
-             (logand addr *xload-target-fulltagmask*))
+             (xload-extract-tag addr))
     (error "~& Not a symbol address: #x~x" addr))
-  (setq addr (logior *xload-target-fulltag-misc*
-                     (logandc2 addr *xload-target-fulltagmask*)))
+  (setq addr (xload-apply-tag addr *xload-target-fulltag-misc*))
   (let* ((plist (xload-%svref addr target::symbol.plist-cell)))
     (if (xload-target-consp plist)
       (let* ((str (xload-get-string (xload-%svref addr target::symbol.pname-cell))))
@@ -798,8 +824,7 @@
                                         (xload-package->addr home-package)
                                         *xload-target-nil*)
                                       space))
-             (svaddr (logior *xload-target-fulltag-misc*
-                             (logandc2 addr *xload-target-fulltagmask*))))
+             (svaddr (xload-apply-tag addr *xload-target-fulltag-misc*)))
         (xload-intern symbol)
         (let* ((bits (logandc2 (%symbol-bits symbol)
                                (ash 1 $sym_vbit_typeppred))))
@@ -947,7 +972,7 @@
                 (if (symbolp s)
                   (or (xload-lookup-symbol s) deleted-marker)
                   0)
-                (if (= (logand *xload-target-nil* *xload-target-fulltagmask*)
+                (if (= (xload-extract-tag *xload-target-nil*)
                        *xload-target-fulltag-for-symbols*)
                   *xload-target-nil*
                   (+ *xload-target-nil*
@@ -1288,11 +1313,10 @@
 
 (defun xload-set-binding-address (symbol-address idx)
   (unless (= *xload-target-fulltag-for-symbols*
-             (logand symbol-address *xload-target-fulltagmask*))
+             (xload-extract-tag symbol-address))
     (error "~& Not a symbol address: #x~x" symbol-address))
   (setq symbol-address
-        (logior *xload-target-fulltag-misc*
-                (logandc2 symbol-address *xload-target-fulltagmask*)))
+        (xload-apply-tag symbol-address *xload-target-fulltag-misc*))
   (setf (xload-%svref symbol-address target::symbol.binding-index-cell)
         (ash idx *xload-target-fixnumshift*))
   (setf (gethash symbol-address *xload-special-binding-indices*) idx))
@@ -1464,7 +1488,7 @@
   (let* ((symaddr (%fasl-expr-preserve-epush s))
          (fnobj (xload-%svref symaddr target::symbol.fcell-cell)))
     (if (and (= *xload-target-fulltag-misc*
-                (logand fnobj *xload-target-fulltagmask*))
+                (xload-extract-tag fnobj))
              (= (type-keyword-code :function) (xload-u8-at-address (+ fnobj *xload-target-misc-subtag-offset*))))
       (%epushval s fnobj)
       (error "symbol at #x~x is unfbound . " symaddr))))
@@ -1652,8 +1676,7 @@
   (xfasl-read-gvector s (xload-target-subtype :istruct)))
 
 (defun xload-lfun-name (lf)
-  (let* ((lfv (logior *xload-target-fulltag-misc*
-                      (logandc2 lf *xload-target-fulltagmask*)))
+  (let* ((lfv (xload-apply-tag lf *xload-target-fulltag-misc*))
          (header (xload-%svref lfv -1)))
     (unless (= (type-keyword-code :function)
                (logand header (1- (ash 1 target::num-subtag-bits))))
@@ -1690,7 +1713,7 @@
   ;; Should maybe check further that it's a string
   ;; and it would hurt for whatever processes *xload-cold-load-documentation*
   ;; to do some checking there as well.
-  (when (= (the fixnum (logand doc *xload-target-fulltagmask*))
+  (when (= (xload-extract-tag doc)
            *xload-target-fulltag-misc*)
     (push (xload-save-list
            (list symaddr
@@ -1732,12 +1755,11 @@
       (xload-set-documentation sym 'variable doc))
     (xload-record-source-file sym 'variable)
     (setf (xload-symbol-value sym) val)
-    (let* ((sv (logior *xload-target-fulltag-misc*
-                       (logandc2 sym *xload-target-fulltagmask*))))
+    (let* ((sv (xload-apply-tag sym *xload-target-fulltag-misc*)))
       (setf (xload-%svref sv target::symbol.flags-cell)
-            (ash 
-             (logior (ash 1 $sym_vbit_special) 
-                     (ash 1 $sym_vbit_const) 
+            (ash
+             (logior (ash 1 $sym_vbit_special)
+                     (ash 1 $sym_vbit_const)
                      (ash (xload-%svref sv target::symbol.flags-cell)
                         (- *xload-target-fixnumshift*)))
              *xload-target-fixnumshift*)))))
@@ -1751,11 +1773,10 @@
       (xload-set-documentation sym 'variable doc))
     (xload-record-source-file sym 'variable)
     (setf (xload-symbol-value sym) val)
-    (let* ((sv (logior *xload-target-fulltag-misc*
-                       (logandc2 sym *xload-target-fulltagmask*))))
+    (let* ((sv (xload-apply-tag sym *xload-target-fulltag-misc*)))
       (setf (xload-%svref sv target::symbol.flags-cell)
-            (ash 
-             (logior (ash 1 $sym_vbit_special) 
+            (ash
+             (logior (ash 1 $sym_vbit_special)
                      (ash (xload-%svref sv target::symbol.flags-cell)
                           (- *xload-target-fixnumshift*)))
              *xload-target-fixnumshift*)))))
@@ -1764,8 +1785,7 @@
   (%cant-epush s)
   (let* ((sym (%fasl-expr s)))
     (xload-record-source-file sym 'variable)
-    (let* ((sv (logior *xload-target-fulltag-misc*
-                       (logandc2 sym *xload-target-fulltagmask*))))
+    (let* ((sv (xload-apply-tag sym *xload-target-fulltag-misc*)))
       (setf (xload-%svref sv target::symbol.flags-cell)
             (ash 
              (logior (ash 1 $sym_vbit_special) 
@@ -1784,11 +1804,10 @@
              (xload-symbol-value sym))
       (setf (xload-symbol-value sym) val))
     (xload-record-source-file sym 'variable)
-    (let* ((sv (logior *xload-target-fulltag-misc*
-                       (logandc2 sym *xload-target-fulltagmask*))))
+    (let* ((sv (xload-apply-tag sym *xload-target-fulltag-misc*)))
       (setf (xload-%svref sv target::symbol.flags-cell)
-            (ash 
-             (logior (ash 1 $sym_vbit_special) 
+            (ash
+             (logior (ash 1 $sym_vbit_special)
                      (ash (xload-%svref sv target::symbol.flags-cell)
                           (- *xload-target-fixnumshift*)))
              *xload-target-fixnumshift*)))))
@@ -1852,8 +1871,7 @@
       (declare (fixnum o))
       (setf (natural-ref v (+ o *xload-target-misc-header-offset*))
             (make-xload-header size-in-elements (xload-target-subtype :function)))
-      (let* ((function (logior *xload-target-fulltag-for-functions*
-                               (logandc2 vector *xload-target-fulltagmask*))))
+      (let* ((function (xload-apply-tag vector *xload-target-fulltag-for-functions*)))
         (%epushval s function)
         (%fasl-read-n-bytes s v (+ o *xload-target-misc-data-offset*)
                             (ash size-of-code *xload-target-fixnumshift*))
@@ -1945,7 +1963,8 @@
             (*xload-target-fulltag-for-functions* *xload-target-fulltag-for-functions*)
             (*xload-target-char-code-limit* *xload-target-char-code-limit*)
             (*xload-purespace-reserve* *xload-purespace-reserve*)
-            (*xload-static-space-address* *xload-static-space-address*))
+            (*xload-static-space-address* *xload-static-space-address*)
+            (*xload-target-tbi-p* *xload-target-tbi-p*))
        (setup-xload-target-parameters)
        (let* ((*load-verbose* t)
               (compiler-backend (find-backend

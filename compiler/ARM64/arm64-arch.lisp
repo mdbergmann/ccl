@@ -114,6 +114,7 @@
 (defarm64gpr fname temp3)
 (defarm64gpr temp2 x10)
 (defarm64gpr nfn temp2)
+(defarm64gpr fn nfn)                           ; fn = nfn on ARM64 (no separate fn register)
 (defarm64gpr temp1 x11)
 ;;; next-method-context uses the same register as temp1 (like ARM32)
 (defarm64gpr next-method-context temp1)
@@ -502,6 +503,7 @@
 (defconstant dnode-size 16)
 (defconstant dnode-align-bits 4)               ; log2(16)
 (defconstant dnode-shift dnode-align-bits)
+(defconstant dnode-mask (1- dnode-size))        ; #xF — alignment mask
 (defconstant bitmap-shift 6)                   ; log2(64) — bits per word for bitmap
 
 (defconstant fixnumone (ash 1 fixnumshift))    ; = 1 (no shift in TBI scheme)
@@ -1815,5 +1817,9 @@
 (defconstant fasl-max-version #x68)
 (defconstant fasl-min-version #x68)
 (defparameter *image-abi-version* 1046)
+
+;;; AArch64 system register encodings for MRS/MSR instructions.
+(defconstant fpcr-sysreg #x5A20)   ; FPCR: op0=3,op1=3,CRn=4,CRm=4,op2=0
+(defconstant fpsr-sysreg #x5A21)   ; FPSR: op0=3,op1=3,CRn=4,CRm=4,op2=1
 
 (provide "ARM64-ARCH")
