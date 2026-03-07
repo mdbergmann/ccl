@@ -52,6 +52,23 @@
       (values form nil))))
 
 
+;;; Add a non-fixnum constant to the LAP function's constant vector.
+;;; Stores sequential slot index in the CDR (for arm64-lap-generate-code).
+;;; Returns the byte offset from the function object to the constant slot
+;;; (for use as an LDR immediate).
+(defun arm64-lap-constant-offset (x)
+  (let* ((existing (assoc x arm64::*arm64-constants* :test #'equal)))
+    (if existing
+      ;; Convert stored index to byte offset
+      (let ((idx (cdr existing)))
+        (+ (arch::target-misc-data-offset (backend-target-arch *target-backend*))
+           (ash (+ idx 2) (arch::target-word-shift (backend-target-arch *target-backend*)))))
+      ;; New constant: index = current count
+      (let* ((idx (length arm64::*arm64-constants*)))
+        (push (cons x idx) arm64::*arm64-constants*)
+        (+ (arch::target-misc-data-offset (backend-target-arch *target-backend*))
+           (ash (+ idx 2) (arch::target-word-shift (backend-target-arch *target-backend*))))))))
+
 ;;; ARM64: no constant pool, no data section needed.
 ;;; Instructions are encoded as s-expressions and stored in lap-instruction
 ;;; source slots.  arm64-finalize handles encoding and label resolution.
@@ -179,10 +196,65 @@
         (arm64-lap-form form current))))))
 
 
-;;; ARM64 assemble-instruction for LAP: store the s-expression form in
-;;; the lap-instruction source slot.  arm64-finalize encodes + resolves labels.
+;;; Resolve symbolic register names and constant expressions in a LAP
+;;; instruction form.  Register names from *arm64-register-names* are
+;;; replaced with their numeric encodings.  (:$ expr) immediates where
+;;; expr is not already a number are evaluated.  Labels (@foo) and
+;;; mnemonics are left as-is.
+(defun arm64-resolve-lap-operands (form)
+  "Walk FORM and replace symbolic register names with numbers, eval constant immediates.
+   Quoted fixnums ('N) become (:$ N) since fixnumshift=0 on ARM64.
+   Quoted NIL/T become (:$ nil-value) / (:$ t-value)."
+  (if (atom form)
+    (if (and (symbolp form)
+             (not (null form))
+             (not (keywordp form))
+             (let ((name (symbol-name form)))
+               (not (and (> (length name) 0) (char= (char name 0) #\@)))))
+      (let ((reg (arm64::get-arm64-register form)))
+        (or reg form))
+      form)
+    (let ((car (car form)))
+      (cond
+        ;; (QUOTE val) — tagged Lisp constant
+        ((eq car 'quote)
+         (let ((val (cadr form)))
+           (cond ((null val)
+                  (list :$ (arch::target-nil-value
+                            (backend-target-arch *target-backend*))))
+                 ((eq val t)
+                  (list :$ (+ (arch::target-nil-value
+                               (backend-target-arch *target-backend*))
+                              (arch::target-t-offset
+                               (backend-target-arch *target-backend*)))))
+                 ((typep val 'fixnum)
+                  ;; fixnumshift=0: tagged fixnum = raw value
+                  (list :$ (ash val (arch::target-fixnum-shift
+                                     (backend-target-arch *target-backend*)))))
+                 (t
+                  ;; Non-fixnum constant: add to constants vector
+                  (let* ((offset (arm64-lap-constant-offset val)))
+                    (list :$ offset))))))
+        ;; (:$ expr) — evaluate constant expression if needed
+        ((and (eq car :$) (cdr form) (null (cddr form)))
+         (let ((v (cadr form)))
+           (if (typep v 'integer)
+             form
+             (list :$ (eval v)))))
+        ;; (:@ ...), (:@! ...), (:@+ ...) — recurse into address forms
+        ((member car '(:@ :@! :@+))
+         (cons car (mapcar #'arm64-resolve-lap-operands (cdr form))))
+        ;; (:lsl expr), (:lsr expr), etc. — shift forms
+        ((member car '(:lsl :lsr :asr :ror :uxtw :uxtx :sxtw :sxtx :+ :sxtb :sxth))
+         (cons car (mapcar #'arm64-resolve-lap-operands (cdr form))))
+        ;; Default: mnemonic + operands — resolve operands but not the mnemonic
+        (t (cons car (mapcar #'arm64-resolve-lap-operands (cdr form))))))))
+
+;;; ARM64 assemble-instruction for LAP: resolve register names and
+;;; store the s-expression form.  arm64-finalize encodes + resolves labels.
 (defun arm64::assemble-instruction (seg form)
-  (let* ((insn (arm64::make-lap-instruction form)))
+  (let* ((resolved (arm64-resolve-lap-operands form))
+         (insn (arm64::make-lap-instruction resolved)))
     (arm64::emit-lap-instruction-element insn seg)))
 
 

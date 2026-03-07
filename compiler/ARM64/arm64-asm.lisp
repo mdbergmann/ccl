@@ -1303,25 +1303,44 @@
 
 ;;; ---- Instruction encoder helpers ----
 
+(defun arm64-resolve-register (x)
+  "If X is a symbol, look it up in the ARM64 register name table.
+   Returns the internal register number or NIL."
+  (and (symbolp x) (arm64::get-arm64-register x)))
+
 (defun need-arm64-gpr-encoding (x)
-  "Return hardware GPR number 0-31.  Accepts integer 0-30, or symbol SP → 31."
+  "Return hardware GPR number 0-31.  Accepts integer 0-30, symbol SP/ZR → 31,
+   or symbolic register name from the register name table."
   (cond ((and (typep x 'fixnum) (<= 0 x 30)) x)
         ((eq x 31) 31)
         ((and (symbolp x)
               (or (string-equal x "SP") (string-equal x "ZR")))
          31)
+        ((and (symbolp x)
+              (let ((val (arm64-resolve-register x)))
+                (and val (typep val 'fixnum) (<= 0 val 30) val))))
         (t (error "Not a valid ARM64 GPR encoding: ~s" x))))
 
 (defun need-arm64-dfpr-encoding (x)
   "Double-float register: internal number 32-63 → hardware 0-31."
   (cond ((and (typep x 'fixnum) (<= 32 x 63)) (- x 32))
         ((and (typep x 'fixnum) (<= 0 x 31)) x)
+        ((symbolp x)
+         (let ((val (arm64-resolve-register x)))
+           (cond ((and val (<= 32 val 63)) (- val 32))
+                 ((and val (<= 0 val 31)) val)
+                 (t (error "Not a valid ARM64 double-float register: ~s" x)))))
         (t (error "Not a valid ARM64 double-float register: ~s" x))))
 
 (defun need-arm64-sfpr-encoding (x)
   "Single-float register: internal number 64-95 → hardware 0-31."
   (cond ((and (typep x 'fixnum) (<= 64 x 95)) (- x 64))
         ((and (typep x 'fixnum) (<= 0 x 31)) x)
+        ((symbolp x)
+         (let ((val (arm64-resolve-register x)))
+           (cond ((and val (<= 64 val 95)) (- val 64))
+                 ((and val (<= 0 val 31)) val)
+                 (t (error "Not a valid ARM64 single-float register: ~s" x)))))
         (t (error "Not a valid ARM64 single-float register: ~s" x))))
 
 (defun need-arm64-fpr-encoding (x)
@@ -1329,23 +1348,40 @@
   (cond ((and (typep x 'fixnum) (<= 32 x 63)) (- x 32))
         ((and (typep x 'fixnum) (<= 64 x 95)) (- x 64))
         ((and (typep x 'fixnum) (<= 0 x 31)) x)
+        ((symbolp x)
+         (let ((val (arm64-resolve-register x)))
+           (cond ((and val (<= 32 val 63)) (- val 32))
+                 ((and val (<= 64 val 95)) (- val 64))
+                 ((and val (<= 0 val 31)) val)
+                 (t (error "Not a valid ARM64 FPR encoding: ~s" x)))))
         (t (error "Not a valid ARM64 FPR encoding: ~s" x))))
 
 (defun arm64-gpr-p (x)
-  "True if x is a GPR number (0-30) or sp symbol."
+  "True if x is a GPR number (0-30), sp symbol, or a symbolic GPR name."
   (or (and (typep x 'fixnum) (<= 0 x 30))
       (eql x 31)
       (and (symbolp x)
-           (or (string-equal x "SP") (string-equal x "ZR")))))
+           (or (string-equal x "SP") (string-equal x "ZR")
+               (let ((val (arm64-resolve-register x)))
+                 (and val (typep val 'fixnum) (<= 0 val 30)))))))
 
 (defun arm64-dfpr-p (x)
-  (and (typep x 'fixnum) (<= 32 x 63)))
+  (or (and (typep x 'fixnum) (<= 32 x 63))
+      (and (symbolp x)
+           (let ((val (arm64-resolve-register x)))
+             (and val (<= 32 val 63))))))
 
 (defun arm64-sfpr-p (x)
-  (and (typep x 'fixnum) (<= 64 x 95)))
+  (or (and (typep x 'fixnum) (<= 64 x 95))
+      (and (symbolp x)
+           (let ((val (arm64-resolve-register x)))
+             (and val (<= 64 val 95))))))
 
 (defun arm64-fpr-p (x)
-  (and (typep x 'fixnum) (<= 32 x 95)))
+  (or (and (typep x 'fixnum) (<= 32 x 95))
+      (and (symbolp x)
+           (let ((val (arm64-resolve-register x)))
+             (and val (<= 32 val 95))))))
 
 (defun encode-cond-keyword (kw)
   "Map condition keyword (:eq :ne :hs :lo :mi :pl :vs :vc :hi :ls :ge :lt :gt :le) to 4-bit code."
@@ -1394,7 +1430,8 @@
              (fpr (x) (need-arm64-fpr-encoding x))
              (imm-val (x)
                (if (and (consp x) (eq (car x) :$))
-                 (cadr x)
+                 (let ((v (cadr x)))
+                   (if (typep v 'integer) v (eval v)))
                  (error "Expected (:$ val), got ~s" x))))
         (declare (inline op gpr dfpr sfpr fpr))
         (macrolet ((is-imm (x) `(and (consp ,x) (eq (car ,x) :$)))
@@ -1683,10 +1720,26 @@
                       ;; Logical immediate
                       (let* ((imm (imm-val src2))
                              (enc (encode-logical-immediate imm))
-                             (base (cond ((string-equal name "AND")  #x92000000)
-                                         ((string-equal name "ORR")  #xb2000000)
-                                         ((string-equal name "EOR")  #xd2000000)
-                                         ((string-equal name "ANDS") #xf2000000)
+                             ;; BIC Rd, Rn, #imm = AND Rd, Rn, #~imm
+                             ;; ORN Rd, Rn, #imm = ORR Rd, Rn, #~imm
+                             ;; EON Rd, Rn, #imm = EOR Rd, Rn, #~imm
+                             ;; BICS Rd, Rn, #imm = ANDS Rd, Rn, #~imm
+                             (is-inverted (or (string-equal name "BIC")
+                                              (string-equal name "ORN")
+                                              (string-equal name "EON")
+                                              (string-equal name "BICS")))
+                             (actual-imm (if is-inverted
+                                           (logand (lognot imm) #xFFFFFFFFFFFFFFFF)
+                                           imm))
+                             (enc (encode-logical-immediate actual-imm))
+                             (base (cond ((or (string-equal name "AND")
+                                              (string-equal name "BIC"))  #x92000000)
+                                         ((or (string-equal name "ORR")
+                                              (string-equal name "ORN"))  #xb2000000)
+                                         ((or (string-equal name "EOR")
+                                              (string-equal name "EON"))  #xd2000000)
+                                         ((or (string-equal name "ANDS")
+                                              (string-equal name "BICS")) #xf2000000)
                                          (t (error "~s does not support logical immediate" name)))))
                         (unless enc
                           (error "Cannot encode logical immediate ~s for ~s" imm name))
@@ -2236,6 +2289,78 @@
                    (rn (gpr (op 1))))
                (logior #xD5100000 (ash (logand sysreg #x7FFF) 5) rn)))
 
+            ;;=== CLZ: Count Leading Zeros ===
+            ;; (clz Xd Xn) — 64-bit: 1 10 11010110 00000 00010 0 Rn Rd
+            ((string-equal name "CLZ")
+             (logior #xdac01000
+                     (ash (gpr (op 1)) 5)
+                     (gpr (op 0))))
+
+            ;;=== RBIT: Reverse Bits ===
+            ;; (rbit Xd Xn) — 64-bit: 1 10 11010110 00000 00000 0 Rn Rd
+            ((string-equal name "RBIT")
+             (logior #xdac00000
+                     (ash (gpr (op 1)) 5)
+                     (gpr (op 0))))
+
+            ;;=== FCVTNS: Float Convert to signed integer, rounding to Nearest ===
+            ;; (fcvtns Xd Dn) — double→s64: 1 00 11110 01 1 00 000 000000 Rn Rd
+            ((string-equal name "FCVTNS")
+             (let* ((rd (gpr (op 0)))
+                    (rn-raw (op 1))
+                    (is-single (arm64-sfpr-p rn-raw))
+                    (rn (if is-single (sfpr rn-raw) (dfpr rn-raw)))
+                    (ftype (if is-single 0 1)))
+               (logior #x9e200000
+                       (ash ftype 22)
+                       (ash rn 5) rd)))
+
+            ;;=== Unscaled byte/halfword load/store ===
+            ((string-equal name "LDURB")
+             (arm64-encode-ldur-stur form name ops t 1 #b00))
+            ((string-equal name "LDURH")
+             (arm64-encode-ldur-stur form name ops t 2 #b01))
+            ((string-equal name "STURB")
+             (arm64-encode-ldur-stur form name ops nil 1 #b00))
+            ((string-equal name "STURH")
+             (arm64-encode-ldur-stur form name ops nil 2 #b01))
+
+            ;;=== Exclusive load/store ===
+            ;; LDXR Xt, [Xn] — size=11 o2=0 L=1 o1=0 Rs=11111 o0=0 Rt2=11111 Rn Rt
+            ((string-equal name "LDXR")
+             (let ((dest (gpr (op 0)))
+                   (addr (op 1)))
+               (logior #xc85f7c00
+                       (ash (gpr (cadr addr)) 5) dest)))
+            ;; STXR Ws, Xt, [Xn] — size=11 o2=0 L=0 o1=0 Rs o0=0 Rt2=11111 Rn Rt
+            ((string-equal name "STXR")
+             (let ((rs (gpr (op 0)))
+                   (src (gpr (op 1)))
+                   (addr (op 2)))
+               (logior #xc8007c00
+                       (ash rs 16)
+                       (ash (gpr (cadr addr)) 5) src)))
+            ;; LDAXR Xt, [Xn] — size=11 o2=0 L=1 o1=0 Rs=11111 o0=1 Rt2=11111 Rn Rt
+            ((string-equal name "LDAXR")
+             (let ((dest (gpr (op 0)))
+                   (addr (op 1)))
+               (logior #xc85ffc00
+                       (ash (gpr (cadr addr)) 5) dest)))
+            ;; STLXR Ws, Xt, [Xn] — size=11 o2=0 L=0 o1=0 Rs o0=1 Rt2=11111 Rn Rt
+            ((string-equal name "STLXR")
+             (let ((rs (gpr (op 0)))
+                   (src (gpr (op 1)))
+                   (addr (op 2)))
+               (logior #xc800fc00
+                       (ash rs 16)
+                       (ash (gpr (cadr addr)) 5) src)))
+
+            ;;=== CLREX: Clear Exclusive Monitor ===
+            ;; CLREX #imm4 or CLREX (default imm=15)
+            ((string-equal name "CLREX")
+             (let ((imm (if ops (imm-val (op 0)) 15)))
+               (logior #xd503305f (ash (logand imm #xf) 8))))
+
             (t
              (error "Unknown ARM64 instruction: ~s" form))))))))
 
@@ -2568,6 +2693,51 @@
                     (setq prev movk-insn))))))
           t)))))
 
+(defun arm64-expand-non-encodable-logical (element seg)
+  "If ELEMENT is a logical op (AND/ORR/EOR/BIC/ORN/EON/TST/ANDS/BICS) with
+   an immediate that can't be encoded as an ARM64 bitmask immediate,
+   expand it into MOV temp + register-form. Returns T if expanded."
+  (let* ((source (lap-instruction-source element)))
+    (when (and (consp source)
+               (>= (length source) 4)
+               (let ((name (string (car source))))
+                 (member name '("AND" "ORR" "EOR" "BIC" "ORN" "EON"
+                                "TST" "ANDS" "BICS")
+                         :test #'string-equal)))
+      (let* ((name (car source))
+             (rd (cadr source))
+             (rn (caddr source))
+             (src2 (cadddr source)))
+        (when (and (consp src2) (eq (car src2) :$))
+          (let* ((imm (cadr src2)))
+            (when (and (typep imm 'integer)
+                       (null (encode-logical-immediate imm))
+                       ;; Also check inverted forms for BIC/ORN/EON/BICS
+                       (null (let ((name-str (string name)))
+                               (when (member name-str '("BIC" "ORN" "EON" "BICS")
+                                             :test #'string-equal)
+                                 (encode-logical-immediate
+                                  (logand (lognot imm) #xFFFFFFFFFFFFFFFF))))))
+              ;; Use rd as temp if rd != rn, else use a different scratch
+              (let* ((is-tst (string-equal (string name) "TST"))
+                     (temp-reg (cond (is-tst
+                                      ;; TST has no rd; use x0 or x1 as scratch
+                                      (if (eql rn 0) 1 0))
+                                     ((eql rd rn)
+                                      ;; Same: use x0 or x1 as scratch
+                                      (if (eql rd 0) 1 0))
+                                     (t rd))))
+                ;; Replace this instruction with MOV temp, #imm
+                (setf (lap-instruction-source element)
+                      `(mov ,temp-reg (:$ ,imm)))
+                ;; Insert the register-form logical op after
+                (let* ((new-source (if is-tst
+                                     `(,name ,rn ,temp-reg)
+                                     `(,name ,rd ,rn ,temp-reg)))
+                       (new-insn (make-lap-instruction new-source)))
+                  (ccl::insert-dll-node-after new-insn element))
+                t))))))))
+
 (defun arm64-finalize (seg)
   "Encode all instructions in SEG, resolve labels.
    Returns the number of 32-bit words."
@@ -2577,6 +2747,15 @@
       (ccl::do-dll-nodes (element seg)
         (when (typep element 'lap-instruction)
           (when (arm64-expand-large-mov element seg)
+            (setq expanded t))))
+      (when expanded
+        (set-element-addresses 0 seg)))
+
+    ;; Pass 0.5: expand logical ops with non-encodable bitmask immediates
+    (let ((expanded nil))
+      (ccl::do-dll-nodes (element seg)
+        (when (typep element 'lap-instruction)
+          (when (arm64-expand-non-encodable-logical element seg)
             (setq expanded t))))
       (when expanded
         (set-element-addresses 0 seg)))

@@ -35,6 +35,10 @@
   (cl "ccl:compiler;ARM64;arm64-lapmacros.lisp")
   (provide "ARM64-LAPMACROS"))
 
+;;; Step 2a: Recompile nx1.lisp to pick up arm64-lap-function handler
+(let ((*warn-if-redefine-kernel* nil))
+  (compile-file "ccl:compiler;nx1.lisp" :output-file "ccl:compiler;nx1.dx64fsl" :verbose nil :load t))
+
 ;;; Step 2b: Patch host NX1-FF-CALL for ARM64
 (let ((orig-fn (gethash '%ff-call *nx1-alphatizers*)))
   (when orig-fn
