@@ -140,7 +140,7 @@
   "Return a 13 bit encoding of n, or NIL if it can't be encoded."
   (let* ((u64 (ldb (byte 64 0) n))
          (u64-inverted (ldb (byte 64 0) (lognot u64))))
-    (if (or (/= n u64)                  ;n too big
+    (if (or (> (integer-length n) 64)   ;n too big (more than 64 bits)
             (zerop u64)                 ;can't encode all zeros...
             (zerop u64-inverted))       ;...or all ones
       nil
@@ -2538,10 +2538,49 @@
 
 ;;; ---- arm64-finalize ----
 
+(defun arm64-expand-large-mov (element seg)
+  "If ELEMENT is a MOV with an immediate too large for a single instruction,
+   expand it into MOVZ + MOVK sequence in-place. Returns T if expanded."
+  (let* ((source (lap-instruction-source element)))
+    (when (and (consp source)
+               (string-equal (car source) "MOV")
+               (consp (cdr source))
+               (consp (cddr source))
+               (let ((src (caddr source)))
+                 (and (consp src) (eq (car src) :$))))
+      (let* ((rd (cadr source))
+             (val (cadr (caddr source)))
+             (u64 (if (typep val 'integer) (ldb (byte 64 0) val))))
+        (when (and u64 (> (integer-length u64) 16)
+                   ;; Only expand if not encodable as logical immediate
+                   (null (encode-logical-immediate val)))
+          ;; Replace this instruction's source with MOVZ for low 16 bits
+          (setf (lap-instruction-source element)
+                `(movz ,rd (:$ ,(logand u64 #xffff))))
+          ;; Insert MOVK instructions for higher halfwords
+          (let ((prev element))
+            (dolist (shift '(16 32 48))
+              (let ((hw (ldb (byte 16 shift) u64)))
+                (when (/= hw 0)
+                  (let* ((movk-source `(movk ,rd (:$ ,hw) (:lsl ,shift)))
+                         (movk-insn (make-lap-instruction movk-source)))
+                    (ccl::insert-dll-node-after movk-insn prev)
+                    (setq prev movk-insn))))))
+          t)))))
+
 (defun arm64-finalize (seg)
   "Encode all instructions in SEG, resolve labels.
    Returns the number of 32-bit words."
   (let* ((branch-refs nil))
+    ;; Pass 0: expand MOV with large immediates into MOVZ+MOVK sequences
+    (let ((expanded nil))
+      (ccl::do-dll-nodes (element seg)
+        (when (typep element 'lap-instruction)
+          (when (arm64-expand-large-mov element seg)
+            (setq expanded t))))
+      (when expanded
+        (set-element-addresses 0 seg)))
+
     ;; Pass 1: encode all instructions, collecting branch label references
     (ccl::do-dll-nodes (element seg)
       (when (typep element 'lap-instruction)

@@ -1112,7 +1112,8 @@
   tlb-limit
   tlb-pointer
   shutdown-count
-  safe-ref-address)
+  safe-ref-address
+  nfp)
 
 ;;; Sub-word offsets for fields that are pairs of _word (4-byte)
 ;;; entries in the assembly TCR.  AArch64 is little-endian, so

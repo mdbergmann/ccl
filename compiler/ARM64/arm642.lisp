@@ -2114,9 +2114,10 @@
            acc)
           ((null vreg)
            (cond (is-64-bit
-                  (ecase type-keyword
+                  (case type-keyword
                     (:double-float-vector (available-fp-temp *available-backend-fp-temps* :double-float))
-                    (:complex-single-float-vector (available-fp-temp *available-backend-fp-temps* :complex-single-float))))
+                    (:complex-single-float-vector (available-fp-temp *available-backend-fp-temps* :complex-single-float))
+                    (t (make-unwired-lreg next-imm-target :mode (if is-signed hard-reg-class-gpr-mode-s64 hard-reg-class-gpr-mode-u64)))))
                  (is-128-bit
                   (available-fp-temp *available-backend-fp-temps* :complex-double-float))
                  (is-32-bit
@@ -2134,9 +2135,16 @@
              (if
                (cond
                  (is-64-bit
-                  (if (eq type-keyword :double-float-vector)
-                    (and (eql vreg-class hard-reg-class-fpr)
-                         (eql vreg-mode hard-reg-class-fpr-mode-double))))
+                  (cond ((eq type-keyword :double-float-vector)
+                         (and (eql vreg-class hard-reg-class-fpr)
+                              (eql vreg-mode hard-reg-class-fpr-mode-double)))
+                        (t (and (eql vreg-class hard-reg-class-gpr)
+                                (if is-signed
+                                  (or (eql vreg-mode hard-reg-class-gpr-mode-s64)
+                                      (eql vreg-mode hard-reg-class-gpr-mode-s32))
+                                  (or (eql vreg-mode hard-reg-class-gpr-mode-u64)
+                                      (eql vreg-mode hard-reg-class-gpr-mode-u32)
+                                      (eql vreg-mode hard-reg-class-gpr-mode-s64)))))))
                  (is-32-bit
                   (if (eq type-keyword :single-float-vector)
                     (and (eql vreg-class hard-reg-class-fpr)
@@ -4481,20 +4489,49 @@
     ;; Resolve lregs in variable parts to their assigned values.
     ;; For FPR lregs, add offset (32 for double, 64 for single) so the
     ;; encoder can distinguish FPRs from GPRs (both use hardware regs 0-31).
-    (dotimes (i nvp)
-      (let* ((val (svref vp i)))
-        (when (typep val 'lreg)
-          (let ((hw-reg (lreg-value val)))
-            (setf (svref vp i)
-                  (if (eql (lreg-class val) hard-reg-class-fpr)
-                    (ecase (lreg-mode val)
-                      ((#.hard-reg-class-fpr-mode-double
-                        #.hard-reg-class-fpr-mode-complex-double-float)
-                       (+ hw-reg 32))
-                      ((#.hard-reg-class-fpr-mode-single
-                        #.hard-reg-class-fpr-mode-complex-single-float)
-                       (+ hw-reg 64)))
-                    hw-reg))))))
+    ;; Also handle fixnum entries that were pre-replaced by the register
+    ;; allocator's replace-vinsn-operands (interval splitting) — these lost
+    ;; their lreg class info, so we recover FPR type from the template specs.
+    (let* ((res-specs (vinsn-template-result-vreg-specs template))
+           (arg-specs (vinsn-template-argument-vreg-specs template))
+           (tmp-specs (vinsn-template-temp-vreg-specs template))
+           (nhybrids (vinsn-template-nhybrids template))
+           (nres (length res-specs))
+           (nargs (length arg-specs)))
+      (dotimes (i nvp)
+        (let* ((val (svref vp i)))
+          (cond
+            ((typep val 'lreg)
+             (let ((hw-reg (lreg-value val)))
+               (setf (svref vp i)
+                     (if (eql (lreg-class val) hard-reg-class-fpr)
+                       (ecase (lreg-mode val)
+                         ((#.hard-reg-class-fpr-mode-double
+                           #.hard-reg-class-fpr-mode-complex-double-float)
+                          (+ hw-reg 32))
+                         ((#.hard-reg-class-fpr-mode-single
+                           #.hard-reg-class-fpr-mode-complex-single-float)
+                          (+ hw-reg 64)))
+                       hw-reg))))
+            ;; Fixnum in GPR range (0-31) that might be a pre-replaced FPR.
+            ;; Check the template's vreg spec to determine the storage class.
+            ((and (typep val 'fixnum) (<= 0 val 31))
+             (let* ((spec-entry
+                      (cond
+                        ((< i nres)
+                         (nth i res-specs))
+                        ((< i (+ nres (- nargs nhybrids)))
+                         (nth (+ (- i nres) nhybrids) arg-specs))
+                        (t
+                         (nth (- i (+ nres (- nargs nhybrids))) tmp-specs))))
+                    (spec-class (when spec-entry
+                                  (let ((s (cadr spec-entry)))
+                                    (if (consp s) (car s) s)))))
+               (case spec-class
+                 ((:double-float :complex-double-float)
+                  (setf (svref vp i) (+ val 32)))
+                 ((:single-float :complex-single-float)
+                  (setf (svref vp i) (+ val 64))))))))))
     ;; Create unique labels for template-local labels
     (dolist (name (vinsn-template-local-labels template))
       (let* ((unique (cons name nil)))

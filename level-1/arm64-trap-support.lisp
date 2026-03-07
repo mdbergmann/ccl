@@ -52,8 +52,10 @@
 ;;; Offset of __cpsr relative to __x[0]:
 ;;;   29*8 + 8 + 8 + 8 + 8 = 264 bytes
 ;;; CPSR is a 32-bit field.
-(defconstant cpsr-offset-in-register-context
-  (get-field-offset :__darwin_arm_thread_state64.__cpsr))
+;;; __darwin_arm_thread_state64 layout:
+;;;   __x[29] at offset 0, each 8 bytes → __fp at 232, __lr at 240,
+;;;   __sp at 248, __pc at 256, __cpsr at 264.
+(defconstant cpsr-offset-in-register-context 264)
 
 (defun xp-cpsr (xp)
   "Read the CPSR (condition flags) from the exception context."
@@ -105,11 +107,9 @@
       (%get-ptr regs machine-state-offset))))
 
 ;;; LR and PC offsets within the __darwin_arm_thread_state64 structure.
-(defconstant lr-offset-in-register-context
-  (get-field-offset :__darwin_arm_thread_state64.__lr))
+(defconstant lr-offset-in-register-context 240)
 
-(defconstant pc-offset-in-register-context
-  (get-field-offset :__darwin_arm_thread_state64.__pc))
+(defconstant pc-offset-in-register-context 256)
 
 ;;; Set the PC in the exception context (for UDF call restarts, etc.)
 (defun set-xp-pc (xp new-pc)

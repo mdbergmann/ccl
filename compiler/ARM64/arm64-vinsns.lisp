@@ -2677,7 +2677,9 @@
 (define-arm64-vinsn (load-character-constant :predicatable)
     (((dest :lisp))
      ((code :u32const)))
-  (mov dest (:$ (:apply ash code arm64::charcode-shift)))
+  (movz dest (:$ (:apply logand #xffff (:apply ash code arm64::charcode-shift))))
+  ((:pred /= (:apply logand #xffff (:apply ash code (:apply - arm64::charcode-shift 16))) 0)
+   (movk dest (:$ (:apply logand #xffff (:apply ash code (:apply - arm64::charcode-shift 16)))) (:lsl 16)))
   (movk dest (:$ (:apply ash arm64::tag-character 8)) (:lsl 48)))
 
 ;;; lri: load register immediate (arbitrary 64-bit value).

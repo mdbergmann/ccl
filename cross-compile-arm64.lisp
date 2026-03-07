@@ -56,8 +56,9 @@
                                       (%nx1-operator eabi-ff-call)))
               (funcall orig-fn context whole env))))))
 
-;;; Step 3: Load compile-ccl support
-(require "COMPILE-CCL")
+;;; Step 3: Load compile-ccl support (recompile to include :darwinarm64)
+(let ((*warn-if-redefine-kernel* nil))
+  (compile-file "ccl:lib;compile-ccl.lisp" :output-file "ccl:bin;compile-ccl.dx64fsl" :verbose nil :load t))
 
 ;;; Step 4: Cross-compile
 (format t "~%=== Starting cross-compile ===~%")

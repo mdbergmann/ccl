@@ -60,7 +60,9 @@
 (defconstant arm64-imm-regs (make-mask
                             arm64::imm0
                             arm64::imm1
-                            arm64::imm2))
+                            arm64::imm2
+                            arm64::imm3
+                            arm64::imm4))
 
 (defconstant arm64-temp-fp-regs (1- (ash 1 30)))
 
