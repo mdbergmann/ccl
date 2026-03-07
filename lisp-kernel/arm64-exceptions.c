@@ -68,10 +68,10 @@ Boolean
 did_gc_notification_since_last_full_gc = false;
 
 int
-page_size = 4096;
+page_size = 16384;
 
 int
-log2_page_size = 12;
+log2_page_size = 14;
 
 TCR *gc_tcr = NULL;
 

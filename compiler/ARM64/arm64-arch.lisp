@@ -848,9 +848,9 @@
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
 
-;;; Base address — arbitrary dnode-aligned address in low memory.
-;;; The kernel maps this region during initialization.
-(defconstant nil-base-address #x13000)
+;;; Base address — dnode-aligned address above 4GB (macOS ARM64
+;;; has a 4GB __PAGEZERO, so we can't map low addresses).
+(defconstant nil-base-address #x200011000)
 
 ;;; Canonical NIL value — the full tagged 64-bit representation.
 ;;; Tag byte (tag-nil = #x02) in bits 56-63, effective address in

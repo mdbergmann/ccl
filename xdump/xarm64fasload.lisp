@@ -127,11 +127,11 @@
 
 ;;; Backend registration for darwinarm64.
 ;;;
-;;; Address computation:
-;;;   nil-value = #x0200000000013008  (tag-nil=2 in top byte, effective addr = #x13008)
-;;;   untagged-nil = nil-value - (ash tag-nil tag-shift) = #x13008
-;;;   static-space-address = untagged-nil - node-size - 4096 = #x12000
-;;;   image-base-address = untagged-nil - node-size + 4096 = #x14000
+;;; Address computation (16KB-page-aligned for macOS ARM64):
+;;;   nil-value = #x0200000200011008  (tag-nil=2 in top byte, effective addr = #x200011008)
+;;;   untagged-nil = nil-value - (ash tag-nil tag-shift) = #x200011008
+;;;   static-space-address = untagged-nil - node-size - 4096 = #x200010000 (16KB-aligned)
+;;;   image-base-address = untagged-nil - node-size + 4096 = #x200012000
 
 (defparameter *darwinarm64-xload-backend*
   (make-backend-xload-info

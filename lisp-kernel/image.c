@@ -197,6 +197,8 @@ find_openmcl_image_file_header(int fd, openmcl_image_file_header *header)
     return false;
   }
   flags = header->flags;
+  fprintf(dbgout, "Image flags=%u, PLATFORM=%u, nsections=%u, abi_version=%u\n",
+          flags, PLATFORM, header->nsections, header->abi_version & 0xffff);
   if (flags != PLATFORM) {
     fprintf(dbgout, "Heap image was saved for another platform.\n");
     return false;
@@ -216,13 +218,20 @@ load_image_section(int fd, openmcl_image_section_header *sect)
   area *a;
 
   advance = mem_size;
+  fprintf(dbgout, "load_image_section: code=%ld, mem_size=%ld (0x%lx), pos=%lld\n",
+          (long)sect->code, (long)mem_size, (long)mem_size, (long long)pos);
   switch(sect->code) {
   case AREA_READONLY:
+    fprintf(dbgout, "  READONLY: mapping at %p, size=%ld\n", pure_space_active, (long)mem_size);
     if (mem_size != 0) {
       if (!MapFile(pure_space_active,
                    pos,
                    align_to_power_of_2(mem_size,log2_page_size),
+#ifdef ARM64
+                   MEMPROTECT_RW,  /* map as RW first, mprotect to RX after */
+#else
                    MEMPROTECT_RX,
+#endif
                    fd)) {
         return;
       }
@@ -234,6 +243,7 @@ load_image_section(int fd, openmcl_image_section_header *sect)
     break;
 
   case AREA_STATIC:
+    fprintf(dbgout, "  STATIC: mapping at %p, size=%ld\n", static_space_active, (long)mem_size);
     if (!MapFile(static_space_active,
 		 pos,
 		 align_to_power_of_2(mem_size,log2_page_size),
@@ -249,6 +259,7 @@ load_image_section(int fd, openmcl_image_section_header *sect)
 
   case AREA_DYNAMIC:
     a = allocate_dynamic_area(mem_size);
+    fprintf(dbgout, "  DYNAMIC: mapping at %p, size=%ld\n", a ? a->low : NULL, (long)mem_size);
     if (!MapFile(a->low,
 		 pos,
 		 align_to_power_of_2(mem_size,log2_page_size),
@@ -262,6 +273,7 @@ load_image_section(int fd, openmcl_image_section_header *sect)
     break;
 
   case AREA_MANAGED_STATIC:
+    fprintf(dbgout, "  MANAGED_STATIC: size=%ld\n", (long)mem_size);
     a = new_area(pure_space_limit, pure_space_limit+align_to_power_of_2(mem_size,log2_page_size), AREA_MANAGED_STATIC);
     a->active = a->low+mem_size;
     if (mem_size) {
@@ -314,11 +326,12 @@ load_image_section(int fd, openmcl_image_section_header *sect)
 
 
   case AREA_STATIC_CONS:
+    fprintf(dbgout, "  STATIC_CONS: size=%ld\n", (long)mem_size);
     addr = (char *) lisp_global(HEAP_START);
     tenured_area = new_area(addr, addr, AREA_STATIC);
 
     a = new_area(addr-align_to_power_of_2(mem_size,log2_page_size), addr, AREA_STATIC_CONS);
-    if (mem_size) {      
+    if (mem_size) {
       if (!MapFile(a->low,
                    pos,
                    align_to_power_of_2(mem_size,log2_page_size),
@@ -347,10 +360,13 @@ load_openmcl_image(int fd, openmcl_image_file_header *h)
 {
   LispObj image_nil = 0;
   area *a;
+  fprintf(dbgout, "load_openmcl_image: image_base=0x%lx\n", (unsigned long)image_base);
   if (find_openmcl_image_file_header(fd, h)) {
     int i, nsections = h->nsections;
     openmcl_image_section_header sections[nsections], *sect=sections;
     LispObj bias = image_base - ACTUAL_IMAGE_BASE(h);
+    fprintf(dbgout, "  ACTUAL_IMAGE_BASE=0x%lx, bias=0x%lx\n",
+            (unsigned long)ACTUAL_IMAGE_BASE(h), (unsigned long)bias);
 #if (WORD_SIZE== 64)
     signed_natural section_data_delta = 
       ((signed_natural)(h->section_data_offset_high) << 32L) | h->section_data_offset_low;
@@ -393,7 +409,12 @@ load_openmcl_image(int fd, openmcl_image_file_header *h)
 #ifdef ARM
 	image_nil = (LispObj)(a->low) + (1024*4) + fulltag_nil;
 #endif
+#ifdef ARM64
+	image_nil = nil_value;
+#endif
+	fprintf(dbgout, "  image_nil = 0x%lx\n", (unsigned long)image_nil);
 	set_nil(image_nil);
+	fprintf(dbgout, "  set_nil done, bias=0x%lx\n", (unsigned long)bias);
 	if (bias) {
           LispObj weakvll = lisp_global(WEAKVLL);
 
@@ -401,12 +422,16 @@ load_openmcl_image(int fd, openmcl_image_file_header *h)
               (weakvll < (ptr_to_lispobj(active_dynamic_area->active)-bias))) {
             lisp_global(WEAKVLL) = weakvll+bias;
           }
+	  fprintf(dbgout, "  relocating static area...\n");
 	  relocate_area_contents(a, bias);
+	  fprintf(dbgout, "  static relocation done\n");
 	}
 	make_dynamic_heap_executable(a->low, a->active);
+	fprintf(dbgout, "  AREA_STATIC processing done\n");
         add_area_holding_area_lock(a);
+	fprintf(dbgout, "  AREA_STATIC added\n");
         break;
-        
+
       case AREA_READONLY:
         if (bias && 
             (managed_static_area->active != managed_static_area->low)) {
@@ -416,9 +441,11 @@ load_openmcl_image(int fd, openmcl_image_file_header *h)
         }
         readonly_area = a;
 	add_area_holding_area_lock(a);
+	fprintf(dbgout, "  AREA_READONLY done\n");
 	break;
       }
     }
+    fprintf(dbgout, "  Starting pass 3 (managed_static, static_cons, dynamic)\n");
     for (i = 0, sect = sections; i < nsections; i++, sect++) {
       a = sect->area;
       switch(sect->code) {
@@ -441,15 +468,19 @@ load_openmcl_image(int fd, openmcl_image_file_header *h)
         */
         break;
       case AREA_DYNAMIC:
+        fprintf(dbgout, "  relocating dynamic area...\n");
         if (bias) {
           relocate_area_contents(a, bias);
         }
+        fprintf(dbgout, "  dynamic relocation done, resizing heap\n");
 	resize_dynamic_heap(a->active, lisp_heap_gc_threshold);
 	xMakeDataExecutable(a->low, a->active - a->low);
+        fprintf(dbgout, "  AREA_DYNAMIC done\n");
 	break;
       }
     }
   }
+  fprintf(dbgout, "  load_openmcl_image returning image_nil=0x%lx\n", (unsigned long)image_nil);
   return image_nil;
 }
  

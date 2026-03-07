@@ -56,7 +56,7 @@
 
 (defparameter *image-section-size* ())
 
-
+(defparameter *image-page-size* 4096)
 
 (defparameter *image-header-size* nil)
 
@@ -64,7 +64,14 @@
   (setq *image-header-size* (* 4 16))
   (setq *image-section-size* (* 4 (target-word-size-case
                                    (32 4)
-                                   (64 8)))))
+                                   (64 8))))
+  ;; Apple Silicon uses 16KB pages; mmap requires file offsets to be
+  ;; page-aligned, so the image must use 16KB alignment.
+  (setq *image-page-size*
+        (if (member :darwinarm64-target
+                    (backend-target-specific-features *target-backend*))
+          16384
+          4096)))
 
 (defun image-write-fullword (w f &optional force-big-endian)
   (cond ((or force-big-endian *xload-target-big-endian*)
@@ -92,8 +99,9 @@
    (64 (image-write-doubleword n f))))
 
 (defun image-align-output-position (f)
-  (file-position f (logand (lognot 4095)
-			   (+ 4095 (file-position f)))))
+  (let ((mask (1- *image-page-size*)))
+    (file-position f (logand (lognot mask)
+                             (+ mask (file-position f))))))
 
 
 (defun target-image-abi-version ()
@@ -112,7 +120,7 @@
                        :if-exists :supersede
                        :element-type '(unsigned-byte 8))
       (let* ((nsections (length spaces))
-             (header-pos (- 4096 (+ *image-header-size*
+             (header-pos (- *image-page-size* (+ *image-header-size*
                                     (* nsections *image-section-size*)))))
         (file-position f header-pos)
         (image-write-fullword image-sig0 f)

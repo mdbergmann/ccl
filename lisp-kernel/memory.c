@@ -254,20 +254,32 @@ ProtectMemory(LogicalAddress addr, natural nbytes)
   }
   return status;
 #else
-  int status = mprotect(addr, nbytes, PROT_READ | PROT_EXEC);
-  
-  if (status) {
-    status = errno;
-    
-    if (status == ENOMEM) {
-      void *mapaddr = mmap(addr,nbytes, PROT_READ | PROT_EXEC, MAP_ANON|MAP_PRIVATE|MAP_FIXED,-1,0);
-      if (mapaddr != MAP_FAILED) {
-        return 0;
+  {
+#ifdef ARM64
+    /* On macOS ARM64:
+       1. W^X prevents mprotect to RX on anonymous mappings — use PROT_READ
+       2. mprotect requires 16KB-aligned addresses — align down and extend */
+    natural pgsz = 16384;
+    natural aligned_addr = ((natural)addr) & ~(pgsz - 1);
+    natural aligned_end = (((natural)addr) + nbytes + pgsz - 1) & ~(pgsz - 1);
+    int status = mprotect((void *)aligned_addr, aligned_end - aligned_addr, PROT_READ);
+#else
+    int status = mprotect(addr, nbytes, PROT_READ | PROT_EXEC);
+#endif
+    if (status) {
+      status = errno;
+#ifndef ARM64
+      if (status == ENOMEM) {
+        void *mapaddr = mmap(addr,nbytes, PROT_READ | PROT_EXEC, MAP_ANON|MAP_PRIVATE|MAP_FIXED,-1,0);
+        if (mapaddr != MAP_FAILED) {
+          return 0;
+        }
       }
+#endif
+      Bug(NULL, "couldn't protect " DECIMAL " bytes at " LISP ", errno = %d", nbytes, addr, status);
     }
-    Bug(NULL, "couldn't protect " DECIMAL " bytes at " LISP ", errno = %d", nbytes, addr, status);
+    return status;
   }
-  return status;
 #endif
 }
 
@@ -281,7 +293,16 @@ UnProtectMemory(LogicalAddress addr, natural nbytes)
   DWORD oldProtect;
   return VirtualProtect(addr, nbytes, MEMPROTECT_RWX, &oldProtect);
 #else
-  return mprotect(addr, nbytes, PROT_READ|PROT_WRITE|PROT_EXEC);
+#ifdef ARM64
+  {
+    natural pgsz = 16384;
+    natural aligned_addr = ((natural)addr) & ~(pgsz - 1);
+    natural aligned_end = (((natural)addr) + nbytes + pgsz - 1) & ~(pgsz - 1);
+    return mprotect((void *)aligned_addr, aligned_end - aligned_addr, MEMPROTECT_RWX);
+  }
+#else
+  return mprotect(addr, nbytes, MEMPROTECT_RWX);
+#endif
 #endif
 }
 
@@ -338,7 +359,14 @@ MapFile(LogicalAddress addr, natural pos, natural nbytes, int permissions, int f
   return true;
 #endif
 #else
-  return mmap(addr, nbytes, permissions, MAP_PRIVATE|MAP_FIXED, fd, pos) != MAP_FAILED;
+  {
+    void *result = mmap(addr, nbytes, permissions, MAP_PRIVATE|MAP_FIXED, fd, pos);
+    if (result == MAP_FAILED) {
+      fprintf(dbgout, "  mmap FAILED: addr=%p nbytes=%ld perm=0x%x pos=%lld errno=%d (%s)\n",
+              addr, (long)nbytes, permissions, (long long)pos, errno, strerror(errno));
+    }
+    return result != MAP_FAILED;
+  }
 #endif
 }
 
