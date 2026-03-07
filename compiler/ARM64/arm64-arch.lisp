@@ -1050,6 +1050,8 @@
 (define-header symbol-header symbol.element-count subtag-symbol)
 (define-header value-cell-header value-cell.element-count subtag-value-cell)
 (define-header macptr-header macptr.element-count subtag-macptr)
+(define-header complex-single-float-header complex-single-float.element-count subtag-complex-single-float)
+(define-header complex-double-float-header complex-double-float.element-count subtag-complex-double-float)
 
 
 ;;; TCR (Thread Context Record) layout.
@@ -1277,6 +1279,7 @@
     (:complex-double-float . ,subtag-complex-double-float)
     (:symbol . ,subtag-symbol)
     (:function . ,subtag-function)
+    (:code-vector . ,subtag-xcode-vector)
     (:xcode-vector . ,subtag-xcode-vector)
     (:macptr . ,subtag-macptr)
     (:catch-frame . ,subtag-catch-frame)

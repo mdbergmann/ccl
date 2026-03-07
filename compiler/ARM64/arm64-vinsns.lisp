@@ -4132,12 +4132,18 @@
 ;;; --- Float operations ---
 
 (define-arm64-vinsn (zero-double-float-register :predicatable) (((dest :double-float))
-                                                                 ())
-  (fmov dest (:$ 0)))
+                                                                 ()
+                                                                 ((temp :u64)))
+  ;; FMOV Dd, XZR — zero the double-float register via zero GPR
+  (mov temp (:$ 0))
+  (fmov dest temp))
 
 (define-arm64-vinsn (zero-single-float-register :predicatable) (((dest :single-float))
-                                                                 ())
-  (fmov dest (:$ 0)))
+                                                                 ()
+                                                                 ((temp :u32)))
+  ;; FMOV Sn, Wtemp — zero the single-float register via zero GPR
+  (mov temp (:$ 0))
+  (fmov dest temp))
 
 (define-arm64-vinsn (double-to-double :predicatable) (((dest :double-float))
                                                        ((src :double-float)))
@@ -4212,7 +4218,7 @@
   (str header (:@ allocptr (:$ 0)))
   (str src (:@ allocptr (:$ arm64::complex-single-float.realpart)))
   (add dest allocptr (:$ arm64::misc-bias))
-  (movk dest (:$ (:apply ash arm64::tag-misc 8)) (:lsl 48)))
+  (movk dest (:$ (:apply ash arm64::tag-complex-single-float 8)) (:lsl 48)))
 
 (define-arm64-vinsn (complex-double-float->heap :call :subprim)
     (((dest :lisp))
@@ -4228,7 +4234,7 @@
   (str header (:@ allocptr (:$ 0)))
   (str src (:@ allocptr (:$ arm64::complex-double-float.realpart)))
   (add dest allocptr (:$ arm64::misc-bias))
-  (movk dest (:$ (:apply ash arm64::tag-misc 8)) (:lsl 48)))
+  (movk dest (:$ (:apply ash arm64::tag-complex-double-float 8)) (:lsl 48)))
 
 (define-arm64-vinsn complex-single-float-to-complex-single-float
     (((dest :complex-single-float))

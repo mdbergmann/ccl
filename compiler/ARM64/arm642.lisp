@@ -1298,13 +1298,8 @@
                  (and (eql (hard-regspec-class ea) hard-reg-class-fpr)
                       (eql (get-regspec-mode ea) (get-regspec-mode hint))
                       ea)))
-             (let* ((val (acode-constant-p form)))
-               (if (and (= (get-regspec-mode hint) hard-reg-class-fpr-mode-single)
-                        (eql val 0.0f0))
-                 (make-hard-fp-reg (hard-regspec-value arm64::single-float-zero) hard-reg-class-fpr-mode-single)
-                 (if (and (= (get-regspec-mode hint) hard-reg-class-fpr-mode-double)
-                          (eql val 0.0d0))
-                   (make-hard-fp-reg (hard-regspec-value arm64::double-float-zero))))))))))
+             ;; ARM64 has no dedicated FP zero register; use FMOV Dd, XZR at use site
+             nil)))))
 
 (defun arm642-stack-to-register (seg memspec reg)
   (with-arm64-local-vinsn-macros (seg)
@@ -8113,8 +8108,9 @@
       (when (and (= (hard-regspec-class vreg) hard-reg-class-fpr)
                  (= (get-regspec-mode vreg) hard-reg-class-fpr-mode-double))
         (setq target vreg))
-      (with-fp-target (target) (val :complex-double-float)
-        (! %complex-double-float-realpart target (arm642-one-untargeted-reg-form seg arg val))
+      ;; arg is a boxed node (heap pointer) — must compile into a GPR, not the FPR val
+      (let ((node-reg (arm642-one-untargeted-reg-form seg arg arm64::arg_z)))
+        (! %complex-double-float-realpart target node-reg)
         (<- target)
         (^)))))
 
@@ -8125,8 +8121,8 @@
       (when (and (= (hard-regspec-class vreg) hard-reg-class-fpr)
                  (= (get-regspec-mode vreg) hard-reg-class-fpr-mode-double))
         (setq target vreg))
-      (with-fp-target (target) (val :complex-double-float)
-        (! %complex-double-float-imagpart target (arm642-one-untargeted-reg-form seg arg val))
+      (let ((node-reg (arm642-one-untargeted-reg-form seg arg arm64::arg_z)))
+        (! %complex-double-float-imagpart target node-reg)
         (<- target)
         (^)))))
 
@@ -8137,8 +8133,9 @@
       (when (and (= (hard-regspec-class vreg) hard-reg-class-fpr)
                  (= (get-regspec-mode vreg) hard-reg-class-fpr-mode-single))
         (setq target vreg))
-      (with-fp-target (target) (val :complex-single-float)
-        (! %complex-single-float-realpart target (arm642-one-untargeted-reg-form seg arg val))
+      ;; arg is a boxed node (heap pointer) — must compile into a GPR, not an FPR
+      (let ((node-reg (arm642-one-untargeted-reg-form seg arg arm64::arg_z)))
+        (! %complex-single-float-realpart target node-reg)
         (<- target)
         (^)))))
 
@@ -8149,8 +8146,8 @@
       (when (and (= (hard-regspec-class vreg) hard-reg-class-fpr)
                  (= (get-regspec-mode vreg) hard-reg-class-fpr-mode-single))
         (setq target vreg))
-      (with-fp-target (target) (val :complex-single-float)
-        (! %complex-single-float-imagpart target (arm642-one-untargeted-reg-form seg arg val))
+      (let ((node-reg (arm642-one-untargeted-reg-form seg arg arm64::arg_z)))
+        (! %complex-single-float-imagpart target node-reg)
         (<- target)
         (^)))))
 
