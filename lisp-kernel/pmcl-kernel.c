@@ -26,6 +26,9 @@
 #ifndef WINDOWS
 #include <sys/mman.h>
 #endif
+#if defined(DARWIN) && defined(ARM64)
+#include <libkern/OSCacheControl.h>
+#endif
 #include <fcntl.h>
 #include <signal.h>
 #include <errno.h>
@@ -2203,6 +2206,40 @@ main
   lisp_global(MANAGED_STATIC_REFBITS) = (LispObj)managed_static_refbits;
   lisp_global(MANAGED_STATIC_REFIDX) = (LispObj)managed_static_refidx;
   lisp_global(MANAGED_STATIC_DNODES) = (LispObj)managed_static_area->ndnodes;
+#if defined(DARWIN) && defined(ARM64)
+  /* macOS ARM64 W^X: make heap areas executable before entering Lisp.
+     Pages start as RW after image loading.  mprotect to RX so code
+     can execute.  Write faults will toggle individual pages back to
+     RW as needed (handled in handle_protection_violation). */
+  {
+    area *a = active_dynamic_area;
+    /* Use HEAP_START (set before egc_control moved a->low) as the true
+       base of loaded code.  a->high is the end of the dynamic region. */
+    BytePtr heap_start = (BytePtr)(natural)lisp_global(HEAP_START);
+    fprintf(dbgout, "W^X: dynamic area=%p, low=%p, active=%p, high=%p, HEAP_START=%p\n",
+            a, a ? a->low : NULL, a ? a->active : NULL, a ? a->high : NULL, heap_start);
+    if (a && heap_start && a->active >= heap_start) {
+      natural base = truncate_to_power_of_2((natural)heap_start, log2_page_size);
+      natural limit = align_to_power_of_2((natural)a->active, log2_page_size);
+      fprintf(dbgout, "W^X: mprotect dynamic area RX: 0x%lx - 0x%lx (%ld bytes)\n",
+              base, limit, limit - base);
+      sys_icache_invalidate((void *)base, limit - base);
+      if (mprotect((void *)base, limit - base, PROT_READ | PROT_EXEC) != 0) {
+        perror("W^X: mprotect dynamic area to RX failed");
+      }
+    }
+    if (static_space_start && static_space_active > static_space_start) {
+      natural base = truncate_to_power_of_2((natural)static_space_start, log2_page_size);
+      natural limit = align_to_power_of_2((natural)static_space_active, log2_page_size);
+      fprintf(dbgout, "W^X: mprotect static area RX: 0x%lx - 0x%lx (%ld bytes)\n",
+              base, limit, limit - base);
+      sys_icache_invalidate((void *)base, limit - base);
+      if (mprotect((void *)base, limit - base, PROT_READ | PROT_EXEC) != 0) {
+        perror("W^X: mprotect static area to RX failed");
+      }
+    }
+  }
+#endif
   fprintf(dbgout, "DEBUG: about to start_lisp()\n");
 #ifdef ARM
 #ifdef LINUX

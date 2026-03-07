@@ -35,6 +35,9 @@
 #define SA_NODEFER 0
 #endif
 #include <sysexits.h>
+#if defined(ARM64)
+#include <libkern/OSCacheControl.h>
+#endif
 
 /* a distinguished UUO at a distinguished address */
 extern void pseudo_sigreturn(ExceptionInformation *);
@@ -780,6 +783,38 @@ handle_protection_violation(ExceptionInformation *xp, siginfo_t *info,
     xpPC(xp) = (pc)touch_page_end;
     return true;
   }
+
+#if defined(DARWIN) && defined(ARM64)
+  /* W^X page toggle for macOS ARM64.
+     Pages cannot be simultaneously writable and executable.
+     Heap pages start as RX (after make_heap_executable).
+     Write faults toggle individual pages to RW.
+     Execute faults toggle pages back to RX.
+     Note: use 'struct area' to avoid shadowing by local 'area' variable. */
+  {
+    uint32_t esr = UC_MCONTEXT(xp)->__es.__esr;
+    uint32_t ec = (esr >> 26) & 0x3F;
+    struct area *dyn = (struct area *)((struct area *)all_areas)->succ;
+    Boolean in_heap = ((addr >= dyn->low && addr < dyn->high) ||
+                       (addr >= static_space_start &&
+                        addr < static_space_limit));
+
+    if (in_heap) {
+      natural page_start = truncate_to_power_of_2((natural)addr, log2_page_size);
+
+      if (ec == 0x20 || ec == 0x21) {
+        /* Instruction Abort: page is RW, needs RX for code execution */
+        sys_icache_invalidate((void *)page_start, page_size);
+        mprotect((void *)page_start, page_size, PROT_READ | PROT_EXEC);
+        return true;
+      } else if ((ec == 0x24 || ec == 0x25) && (esr & (1 << 6))) {
+        /* Data Abort with WnR=1: write fault, page needs RW */
+        mprotect((void *)page_start, page_size, PROT_READ | PROT_WRITE);
+        return true;
+      }
+    }
+  }
+#endif
 
   if (is_write_fault(xp, info)) {
     area = find_protected_area(addr);
