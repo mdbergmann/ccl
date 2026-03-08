@@ -1028,9 +1028,13 @@
 
 
 ;;; Lisp stack frame.  0-based (no header or tag bias).
+;;; ARM64: must save fn (nfn) because fn=nfn=x10 is clobbered by calls.
+;;; 32 bytes total (4 nodes), matching arm64-constants.s lisp_frame.
 (define-storage-layout lisp-frame 0
   savevsp
-  savelr)
+  savelr
+  savefn
+  padding)
 
 ;;; Special-variable binding record.  0-based, on the value stack.
 (define-storage-layout binding 0

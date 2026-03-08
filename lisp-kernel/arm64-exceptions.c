@@ -741,8 +741,8 @@ tcr_frame_ptr(TCR *tcr)
 }
 
 
-/* On ARM64, lisp_frame has only savevsp and savelr (no marker).
-   A frame is a lisp frame if savelr looks like a tagged return address. */
+/* On ARM64, lisp_frame has savevsp, savelr, savefn, and padding (32 bytes).
+   No marker word (unlike ARM32). */
 Boolean
 lisp_frame_p(lisp_frame *spPtr)
 {

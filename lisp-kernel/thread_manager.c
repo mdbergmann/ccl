@@ -1251,7 +1251,23 @@ init_arm_tcr_sptab(TCR *tcr)
     *q = *p;
   }
 }
-#endif       
+#endif
+
+#ifdef ARM64
+void
+init_arm64_tcr_sptab(TCR *tcr)
+{
+  extern LispObj *sptab;
+  extern LispObj *sptab_end;
+  LispObj *p, *q;
+
+  for (p=sptab,q = tcr->sptab;
+       p<sptab_end;
+       p++,q++) {
+    *q = *p;
+  }
+}
+#endif
   
   
 
@@ -1284,6 +1300,9 @@ new_tcr(natural vstack_size, natural tstack_size)
 #ifdef ARM
   init_arm_tcr_sptab(tcr);
   tcr->architecture_version = (arm_architecture_version-ARM_ARCHITECTURE_v7) << fixnumshift;
+#endif
+#ifdef ARM64
+  init_arm64_tcr_sptab(tcr);
 #endif
 #ifdef X86
   setup_tcr_extra_segment(tcr);

@@ -44,10 +44,12 @@
 ;;; ======================================================================
 
 ;;; Save lisp context when VSP is current (no extra values pushed).
-;;; ARM32 saved (marker, vsp, fn, lr) via stmdb; ARM64 saves (vsp, lr) via stp.
+;;; ARM64: save vsp, lr, and nfn (fn=nfn on ARM64, must be preserved across calls).
+;;; Frame is 32 bytes: [sp+0]=vsp, [sp+8]=lr, [sp+16]=nfn, [sp+24]=padding.
 (define-arm64-vinsn save-lisp-context-vsp (()
                                            ())
-  (stp vsp lr (:@! sp (:$ (- arm64::lisp-frame.size)))))
+  (stp vsp lr (:@! sp (:$ (- arm64::lisp-frame.size))))
+  (str nfn (:@ sp (:$ arm64::lisp-frame.savefn))))
 
 ;;; Save lisp context when some number of bytes have been vpushed
 ;;; beyond what the compiler expects.
@@ -55,7 +57,8 @@
                                               ((nbytes-vpushed :u16const))
                                               ((imm (:u64 #.arm64::imm1))))
   (add imm vsp (:$ nbytes-vpushed))
-  (stp imm lr (:@! sp (:$ (- arm64::lisp-frame.size)))))
+  (stp imm lr (:@! sp (:$ (- arm64::lisp-frame.size))))
+  (str nfn (:@ sp (:$ arm64::lisp-frame.savefn))))
 
 ;;; Save lisp context with variable number of args already vpushed.
 ;;; Compute the effective vsp: vsp + max(0, nargs - #arg-regs) * node-size.
@@ -69,7 +72,8 @@
   (mov imm (:$ 0))
   :have-extra
   (add imm imm vsp)
-  (stp imm lr (:@! sp (:$ (- arm64::lisp-frame.size)))))
+  (stp imm lr (:@! sp (:$ (- arm64::lisp-frame.size))))
+  (str nfn (:@ sp (:$ arm64::lisp-frame.savefn))))
 
 ;;; Save cleanup (unwind-protect) context.
 ;;; Store 0 for savevsp to mark this as a cleanup frame.
@@ -77,7 +81,8 @@
                                           ()
                                           ((temp (:u64 #.arm64::imm0))))
   (mov temp (:$ 0))
-  (stp temp lr (:@! sp (:$ (- arm64::lisp-frame.size)))))
+  (stp temp lr (:@! sp (:$ (- arm64::lisp-frame.size))))
+  (str nfn (:@ sp (:$ arm64::lisp-frame.savefn))))
 
 ;;; Save NFP (non-volatile FPR pointer).
 ;;; On ARM64 with no GPR NVRs, this is essentially a no-op placeholder.
@@ -90,16 +95,18 @@
 (define-arm64-vinsn (restore-nfp :predicatable) (()())
   )
 
-;;; Restore full lisp context (load vsp and lr from frame, pop frame).
+;;; Restore full lisp context (load vsp, lr, and nfn from frame, pop frame).
 (define-arm64-vinsn (restore-full-lisp-context :lispcontext :pop :lrRestore :predicatable)
     (()
      ())
+  (ldr nfn (:@ sp (:$ arm64::lisp-frame.savefn)))
   (ldp vsp lr (:@+ sp (:$ arm64::lisp-frame.size))))
 
 ;;; Return from function: restore context and return.
 (define-arm64-vinsn (popj :lispcontext :pop :lrRestore :jumpLR :predicatable)
     (()
      ())
+  (ldr nfn (:@ sp (:$ arm64::lisp-frame.savefn)))
   (ldp vsp lr (:@+ sp (:$ arm64::lisp-frame.size)))
   (ret))
 
@@ -109,11 +116,17 @@
      ())
   (ret))
 
-;;; Restore cleanup context: just restore lr and deallocate the frame.
+;;; Restore cleanup context: just restore lr and nfn, deallocate the frame.
 (define-arm64-vinsn restore-cleanup-context (()
                                              ())
+  (ldr nfn (:@ sp (:$ arm64::lisp-frame.savefn)))
   (ldr lr (:@ sp (:$ arm64::lisp-frame.savelr)))
   (add sp sp (:$ arm64::lisp-frame.size)))
+
+;;; Reload nfn from the lisp frame after a non-tail call.
+;;; ARM64-specific: fn=nfn=x10 is clobbered by calls; must reload.
+(define-arm64-vinsn (reload-self :predicatable) (()())
+  (ldr nfn (:@ sp (:$ arm64::lisp-frame.savefn))))
 
 
 ;;; ======================================================================
@@ -2402,11 +2415,13 @@
   (cmp other-temp lr)
   ;; Save lisp frame
   (stp entry-vsp lr (:@! sp (:$ (- arm64::lisp-frame.size))))
+  (str nfn (:@ sp (:$ arm64::lisp-frame.savefn)))
   (b.ne :not-multiple)
   ;; lr == ret1valaddr: multi-value lexpr return
   (sub arg-temp rnil (:$ (- (arm64::%kernel-global 'arm64::lexpr-return))))
   (ldr arg-temp (:@ arg-temp (:$ 0)))
   (stp entry-vsp arg-temp (:@! sp (:$ (- arm64::lisp-frame.size))))
+  (str nfn (:@ sp (:$ arm64::lisp-frame.savefn)))
   (mov lr other-temp)
   (b :done-lexpr)
   :not-multiple

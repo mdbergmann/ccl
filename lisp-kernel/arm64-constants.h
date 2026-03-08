@@ -408,10 +408,13 @@ typedef struct double_float {
   unsigned int value_high;
 } double_float;
 
-/* Lisp stack frame — 0-based, no marker word (unlike ARM32). */
+/* Lisp stack frame — 0-based, no marker word (unlike ARM32).
+   32 bytes: savevsp, savelr, savefn (nfn=fn on ARM64), padding. */
 typedef struct lisp_frame {
   LispObj savevsp;
   LispObj savelr;
+  LispObj savefn;
+  LispObj padding;
 } lisp_frame;
 
 /* Catch frame — a gvector allocated on the temp stack.
@@ -449,7 +452,8 @@ typedef struct xframe_list {
    Section 10: TCR (Thread Context Record)
    Must exactly match arm64-constants.s lines 371-416 and
    arm64-arch.lisp lines 1062-1103.
-   41 node-sized slots, 328 bytes total.
+   43 node-sized slots (0x000-0x150), then padding to 0x180,
+   then 256-entry subprims dispatch table (sptab) at 0x180.
    ================================================================ */
 
 #define TCR_BIAS 0
@@ -504,6 +508,8 @@ typedef struct tcr {
   void *safe_ref_address;               /* 0x140 */
   LispObj last_lisp_frame;              /* 0x148 when in foreign code */
   void *io_datum;                       /* 0x150 exception port datum (Darwin) */
+  LispObj spare[5];                     /* 0x158-0x17F reserved/padding */
+  LispObj sptab[256];                   /* 0x180 subprims dispatch table */
 } TCR;
 
 /* ================================================================

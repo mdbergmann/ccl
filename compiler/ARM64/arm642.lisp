@@ -438,6 +438,7 @@
               (arm642-lri seg idxreg (+ arm64::misc-data-offset (ash (+ idx 2) arm64::word-shift)))
               (! ref-indexed-constant ($ arm64::fname) idxreg))))
         (! call-known-symbol arg)
+        (! reload-self)
         (arm642-do-lexical-setq seg nil ea result)))))
 
 
@@ -3200,11 +3201,11 @@
                   (arm642-store-immediate seg func call-reg)))
               (if symp
                 (! pass-multiple-values-symbol)
-                (! pass-multiple-values)))
+                (! pass-multiple-values))
+              (! reload-self))
             (progn
               (if label-p
                 (progn
-                  ;; ARM64: no fn register, use nfn→nfn (identity, but keep for clarity)
                   (arm642-copy-register seg ($ arm64::nfn) ($ arm64::nfn))
                   (! call-label (aref *backend-labels* label)))
                 (progn
@@ -3213,7 +3214,8 @@
                     (arm642-store-immediate seg func destreg))
                   (if symp
                     (arm642-call-symbol seg nil)
-                    (! call-known-function))))))
+                    (! call-known-function))))
+              (! reload-self)))
           (progn
             (arm642-unwind-stack seg xfer 0 0 #x7fffff)
             (if (and (not spread-p) nargs (%i<= nargs $numarm64argregs))
@@ -3255,9 +3257,11 @@
           (unless (or (fixnump fn) (typep fn 'lreg))
             (arm642-one-targeted-reg-form seg fn destreg))
           (if (not tail-p)
-            (if (arm642-mvpass-p xfer)
-              (! pass-multiple-values)
-              (! funcall))
+            (progn
+              (if (arm642-mvpass-p xfer)
+                (! pass-multiple-values)
+                (! funcall))
+              (! reload-self))
             (cond ((or (null nargs) spread-p)
                    (! tail-funcall-gen))
                   ((%i> nargs $numarm64argregs)
@@ -5490,6 +5494,7 @@
             (arm642-set-nargs seg 2)
             (arm642-vpush-register seg ($ arm64::arg_y))
             (! call-known-symbol ($ arm64::arg_z))
+            (! reload-self)
             (with-crf-target () crf
                (! compare-to-nil crf ($ arm64::arg_z))
                (arm642-vpop-register seg ($ arm64::arg_y))
