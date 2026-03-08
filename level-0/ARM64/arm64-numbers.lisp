@@ -210,10 +210,10 @@
   ;; Load real and imaginary double-float values
   (get-double-float d0 r)               ; d0 = real part
   (get-double-float d1 i)               ; d1 = imaginary part
-  ;; Build header: (element-count << 8) | subtag
-  (lri imm0 (logior (ash arm64::complex-double-float.element-count
-                          arm64::num-subtag-bits)
-                     arm64::subtag-complex-double-float))
+  ;; Build header: (subtag << 56) | element-count
+  (lri imm0 (logior (ash arm64::subtag-complex-double-float
+                          arm64::subtag-shift)
+                     arm64::complex-double-float.element-count))
   ;; Allocate: complex-double-float.size bytes
   ;; sub allocptr by (size - node-size) since tagged ptr = raw + node-size
   (sub allocptr allocptr (:$ (- arm64::complex-double-float.size arm64::node-size)))
@@ -247,9 +247,9 @@
   ;; Pack: real in low 32 bits, imaginary in high 32 bits
   (orr imm1 imm1 (:lsl imm2 (:$ 32)))
   ;; Build header
-  (lri imm0 (logior (ash arm64::complex-single-float.element-count
-                          arm64::num-subtag-bits)
-                     arm64::subtag-complex-single-float))
+  (lri imm0 (logior (ash arm64::subtag-complex-single-float
+                          arm64::subtag-shift)
+                     arm64::complex-single-float.element-count))
   ;; Allocate: complex-single-float.size = 16 bytes (header + data)
   (sub allocptr allocptr (:$ (- arm64::complex-single-float.size arm64::node-size)))
   (ldr temp0 (:@ rcontext (:$ arm64::tcr.save-allocbase)))

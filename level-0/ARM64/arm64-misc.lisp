@@ -705,10 +705,10 @@
   (bic imm0 imm0 (:$ 7))                ; align to 8 bytes
   (sub imm1 imm0 imm1)                  ; delta = aligned - raw
   (sturh imm1 (:@ imm0 (:$ -2)))        ; save delta halfword
-  ;; Construct header: (len << num-subtag-bits) | subtag
+  ;; Construct header: (subtag << subtag-shift) | len
   ;; fixnumshift=0: subtype and len are already raw
-  (mov imm1 subtype)
-  (orr imm1 imm1 (:lsl len (:$ arm64::num-subtag-bits)))
+  (lsl imm1 subtype (:$ arm64::subtag-shift))
+  (orr imm1 imm1 len)
   (str imm1 (:@ imm0 (:$ 0)))           ; store header
   ;; Tagged pointer = aligned + misc-bias (8), with reference tag in bits 56-63
   (add arg_z imm0 (:$ arm64::misc-bias))

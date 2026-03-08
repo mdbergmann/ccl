@@ -865,7 +865,7 @@
 (defun arm642-save-non-volatile-fprs (seg n)
   (unless (eql n 0)
     (with-arm64-local-vinsn-macros (seg)
-      (! push-nvfprs n (logior (ash n arm64::num-subtag-bits) arm64::subtag-double-float-vector)))
+      (! push-nvfprs n (logior (ash arm64::subtag-double-float-vector arm64::subtag-shift) n)))
     (setq *arm642-non-volatile-fpr-count* n)))
 
 (defun arm642-restore-non-volatile-fprs (seg)

@@ -489,7 +489,8 @@
 (defconstant nbits-in-byte 8)
 (defconstant tag-shift 56)                     ; tags occupy bits 56-63
 
-(defconstant num-subtag-bits 8)                ; low byte of uvector header is subtag
+(defconstant num-subtag-bits 8)                ; subtag is 8 bits wide
+(defconstant subtag-shift tag-shift)           ; subtag occupies bits 56-63 of header
 
 (defconstant fixnumshift 0)                    ; fixnums are NOT shifted (tags in high byte)
 (defconstant fixnum-shift fixnumshift)
@@ -810,7 +811,7 @@
 ;;; TBI causes the hardware to ignore the tag byte in the top 8 bits.
 
 (defconstant misc-header-offset (- node-size))     ; = -8; header word
-(defconstant misc-subtag-offset misc-header-offset) ; subtag = low byte of header
+(defconstant misc-subtag-offset (+ misc-header-offset (1- node-size))) ; subtag = high byte of header (LE)
 (defconstant misc-data-offset 0)                   ; first data element
 (defconstant misc-dfloat-offset misc-data-offset)  ; double-float value (8-byte aligned)
 
@@ -1041,7 +1042,7 @@
 ;;; Header construction macro and common headers.
 
 (defmacro define-header (name element-count subtag)
-  `(defconstant ,name (logior (ash ,element-count num-subtag-bits) ,subtag)))
+  `(defconstant ,name (logior (ash ,subtag subtag-shift) ,element-count)))
 
 (define-header double-float-header double-float.element-count subtag-double-float)
 (define-header one-digit-bignum-header 1 subtag-bignum)

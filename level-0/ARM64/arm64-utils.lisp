@@ -146,8 +146,8 @@
     ;; Compute size of this misc object and advance obj.
     ;; Reload header (may have moved, but we saved obj).
     (ldr header (:@ obj (:$ 0)))
-    (and subtag header (:$ #xFF))           ; extract subtag
-    (lsr header header (:$ arm64::num-subtag-bits))  ; element count
+    (lsr subtag header (:$ arm64::subtag-shift))     ; extract subtag
+    (ubfx header header (:$ 0) (:$ arm64::subtag-shift))  ; element count
     ;; Determine byte size from subtag range.
     ;; Default: assume gvector (node-size per element) → bytes = count << 3
     (tst subtag (:$ arm64::gvector-tag-mask))  ; bit 5 set = gvector
@@ -283,8 +283,8 @@
     (sub obj obj (:$ arm64::misc-bias))
     ;; Compute size and advance (same as walk-static-area)
     (ldr header (:@ obj (:$ 0)))
-    (and subtag header (:$ #xFF))
-    (lsr header header (:$ arm64::num-subtag-bits))
+    (lsr subtag header (:$ arm64::subtag-shift))
+    (ubfx header header (:$ 0) (:$ arm64::subtag-shift))
     (tst subtag (:$ arm64::gvector-tag-mask))
     (b.eq @div-size)
     (lsl header header (:$ arm64::word-shift))

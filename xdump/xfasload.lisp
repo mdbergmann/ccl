@@ -208,8 +208,31 @@
     (push b *xload-backends*)))
 
 
+(defun xload-target-subtag-shift ()
+  "Bit position of subtag in headers: 56 for ARM64 (high byte), 0 for others."
+  (let* ((pkg (find-package "TARGET"))
+         (sym (and pkg (find-symbol "SUBTAG-SHIFT" pkg))))
+    (if (and sym (boundp sym))
+      (symbol-value sym)
+      0)))
+
 (defun make-xload-header (element-count subtag)
-  (logior (ash element-count target::num-subtag-bits) subtag))
+  (let ((ss (xload-target-subtag-shift)))
+    (if (> ss 0)
+      (logior (ash subtag ss) element-count)
+      (logior (ash element-count target::num-subtag-bits) subtag))))
+
+(defun xload-header-element-count (header)
+  (let ((ss (xload-target-subtag-shift)))
+    (if (> ss 0)
+      (logand header (1- (ash 1 ss)))
+      (ash header (- target::num-subtag-bits)))))
+
+(defun xload-header-subtag (header)
+  (let ((ss (xload-target-subtag-shift)))
+    (if (> ss 0)
+      (ash header (- ss))
+      (logand header (1- (ash 1 target::num-subtag-bits))))))
 
 
 (defparameter *xload-record-source-file-p* t)
@@ -995,7 +1018,7 @@
 (defun xload-get-string (address)
   (multiple-value-bind (v o) (xload-lookup-address address)
     (let* ((header (natural-ref v (+ o *xload-target-misc-header-offset*)))
-           (len (ash header (- target::num-subtag-bits)))
+           (len (xload-header-element-count header))
            (str (make-string len))
            (p (+ o *xload-target-misc-data-offset*)))
       (case *xload-target-char-code-limit*
@@ -1691,9 +1714,9 @@
   (let* ((lfv (xload-apply-tag lf *xload-target-fulltag-misc*))
          (header (xload-%svref lfv -1)))
     (unless (= (type-keyword-code :function)
-               (logand header (1- (ash 1 target::num-subtag-bits))))
+               (xload-header-subtag header))
       (error "Not a function address: ~x" lf))
-    (let* ((n (ash header (- target::num-subtag-bits))))
+    (let* ((n (xload-header-element-count header)))
       (if (> n 2)
         (let* ((bits (ash (xload-%svref lfv (1- n))
                           (- *xload-target-fixnumshift*))))
@@ -1846,7 +1869,7 @@
     (when (logbitp 15 imm-word-count)
       (let* ((header (xload-natural-at-address
 		      (+ addr *xload-target-misc-header-offset*)))
-	     (len (ash header (- target::num-subtag-bits))))
+	     (len (xload-header-element-count header)))
 	(setq imm-word-count (- len (ldb (byte 15 0) imm-word-count)))))
     (do* ((i (- imm-word-count 2) (1- i))
 	  (offset (xload-%fullword-ref addr i) (xload-%fullword-ref addr i)))

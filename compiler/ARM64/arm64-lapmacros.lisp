@@ -187,17 +187,16 @@
   `(ldur ,dest (:@ ,src (:$ arm64::misc-header-offset))))
 
 ;;; Header size: raw element count from header word.
-;;; Header format: (element_count << num-subtag-bits) | subtag.
-;;; Right-shift by num-subtag-bits to extract the element count,
-;;; discarding the subtag byte in the low 8 bits.
+;;; Header format: (subtag << subtag-shift) | element_count.
+;;; Extract bits 0-55 (the element count), discarding the subtag in the high byte.
 (defarm64lapmacro header-size (dest vheader)
-  `(lsr ,dest ,vheader (:$ arm64::num-subtag-bits)))
+  `(ubfx ,dest ,vheader (:$ 0) (:$ arm64::subtag-shift)))
 
 ;;; Header length: fixnum element count.
 ;;; With fixnumshift=0, fixnum representation = raw value,
 ;;; so same as header-size.
 (defarm64lapmacro header-length (dest vheader)
-  `(lsr ,dest ,vheader (:$ arm64::num-subtag-bits)))
+  `(ubfx ,dest ,vheader (:$ 0) (:$ arm64::subtag-shift)))
 
 ;;; Extract subtag byte from a header word as a fixnum.
 ;;; Since fixnumshift=0, the subtag byte is already a fixnum.

@@ -1904,6 +1904,20 @@
                            (ash (gpr rn) 5)
                            (gpr rd))))))
 
+            ;;=== UBFX: Unsigned Bitfield Extract ===
+            ;; (ubfx Xd Xn (:$ lsb) (:$ width))
+            ;; Alias for UBFM Xd, Xn, #lsb, #(lsb+width-1)
+            ((string-equal name "UBFX")
+             (let ((rd (gpr (op 0)))
+                   (rn (gpr (op 1)))
+                   (lsb (imm-val (op 2)))
+                   (width (imm-val (op 3))))
+               (logior #xd3400000
+                       (ash (logand lsb #x3f) 16)
+                       (ash (logand (+ lsb width -1) #x3f) 10)
+                       (ash rn 5)
+                       rd)))
+
             ;;=== ROR (rotate right — immediate and register) ===
             ((string-equal name "ROR")
              (let ((rd (op 0))

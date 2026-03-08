@@ -2235,12 +2235,28 @@ main
       while (start < end) {
         LispObj w0 = *start;
         natural subtag = header_subtag(w0);
+        int total = ivecs + gvecs + conses;
+
+        if (total < 15) {
+          fprintf(dbgout, "  [%d] @%p: w0=%016lx subtag=0x%lx imm=%d node=%d",
+                  total, start, w0, subtag,
+                  immheader_tag_p(subtag), nodeheader_tag_p(subtag));
+        }
 
         if (immheader_tag_p(subtag)) {
+          natural count = header_element_count(w0);
+          LispObj *next = (LispObj *)skip_over_ivector((natural)start, w0);
+          if (total < 15) {
+            fprintf(dbgout, " IVEC count=%ld skip_to=%p\n", count, next);
+          }
           ivecs++;
-          start = (LispObj *)skip_over_ivector((natural)start, w0);
+          start = next;
         } else if (nodeheader_tag_p(subtag)) {
           natural count = header_element_count(w0);
+          if (total < 15) {
+            fprintf(dbgout, " GVEC count=%ld subtag=0x%lx func=%d\n",
+                    count, subtag, (subtag == subtag_function));
+          }
           gvecs++;
           if (subtag == subtag_function && count >= 2) {
             start[1] = start[2];
@@ -2252,6 +2268,9 @@ main
             start++;
           }
         } else {
+          if (total < 15) {
+            fprintf(dbgout, " CONS\n");
+          }
           conses++;
           start += 2;
         }

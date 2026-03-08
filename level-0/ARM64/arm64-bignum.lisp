@@ -241,10 +241,9 @@
 ;;; zeroed by the caller.
 (defarm64lapfunction %set-bignum-length ((newlen arg_y) (bignum arg_z))
   (check-nargs 2)
-  ;; Header = (newlen << num-subtag-bits) | subtag-bignum
-  ;; On ARM64: num-subtag-bits = 8, fixnumshift = 0
-  (lsl imm0 newlen (:$ arm64::num-subtag-bits))
-  (orr imm0 imm0 (:$ arm64::subtag-bignum))
+  ;; Header = (subtag-bignum << subtag-shift) | newlen
+  (mov imm0 newlen)
+  (movk imm0 (:$ (:apply ash arm64::subtag-bignum 8)) (:lsl 48))
   (stur imm0 (:@ bignum (:$ arm64::misc-header-offset)))
   (ret))
 

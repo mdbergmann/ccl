@@ -68,6 +68,7 @@ bitmap_shift = 6
 fixnumshift = 0
 fixnum_shift = 0
 num_subtag_bits = 8
+subtag_shift = 56
 node_shift = word_shift
 node_bias = -node_size
 fulltagmask = 0xff
@@ -435,7 +436,7 @@ lisp_globals_limit = -node_size
 	
 
 define(`def_header',`
-$1 = ($2<<num_subtag_bits)|$3')
+$1 = ($3<<subtag_shift)|$2')
 
 	def_header(two_digit_bignum_header,2,bignum_header)
 	def_header(three_digit_bignum_header,3,bignum_header)

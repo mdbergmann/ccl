@@ -364,7 +364,7 @@ define_gvector(simple_vector,31)
 #define function_bias  misc_bias
 
 #define misc_header_offset  (-node_size)        /* = -8 */
-#define misc_subtag_offset  misc_header_offset  /* low byte of header, little-endian */
+#define misc_subtag_offset  (misc_header_offset + (node_size - 1))  /* high byte of header, little-endian */
 #define misc_data_offset    0                   /* first data element */
 #define misc_dfloat_offset  0                   /* double-floats are 8-byte aligned */
 

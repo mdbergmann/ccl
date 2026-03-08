@@ -24,7 +24,8 @@ define(`gpr64',``x'gprval($1)')
 ')
 
 define(`make_header',`
-        __(mov $1,#(($2 << num_subtag_bits) | $3))
+        __(movz $1,#$2)
+        __(movk $1,#($3 << 8),lsl #48)
         ')
         
 /* Load a 16-bit constant into $1 */

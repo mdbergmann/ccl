@@ -274,7 +274,7 @@
      ((v :lisp))
      ((temp :u64)))
   (ldur temp (:@ v (:$ arm64::misc-header-offset)))
-  (lsr dest temp (:$ arm64::num-subtag-bits)))
+  (ubfx dest temp (:$ 0) (:$ arm64::subtag-shift)))
 
 ;;; Trap if fixnum index >= element count.
 (define-arm64-vinsn check-misc-bound (()
@@ -282,7 +282,7 @@
                                        (v :lisp))
                                       ((temp :u64)))
   (ldur temp (:@ v (:$ arm64::misc-header-offset)))
-  (lsr temp temp (:$ arm64::num-subtag-bits))
+  (ubfx temp temp (:$ 0) (:$ arm64::subtag-shift))
   (cmp idx temp)
   (b.lo :ok)
   (uuo-error-vector-bounds idx v)
@@ -1079,10 +1079,10 @@
   (tst tag (:$ arm64::uvector-ref))
   (b.eq :bad)
   (ldur header (:@ src (:$ arm64::misc-header-offset)))
-  (and tag header (:$ #xff))
+  (lsr tag header (:$ arm64::subtag-shift))
   (cmp tag (:$ arm64::subtag-bignum))
   (b.ne :bad)
-  (lsr header header (:$ arm64::num-subtag-bits))
+  (ubfx header header (:$ 0) (:$ arm64::subtag-shift))
   (cmp header (:$ 1))
   (b.eq :got-it)
   :bad
@@ -1124,10 +1124,10 @@
   (tst tag (:$ arm64::uvector-ref))
   (b.eq :bad)
   (ldur header (:@ src (:$ arm64::misc-header-offset)))
-  (and tag header (:$ #xff))
+  (lsr tag header (:$ arm64::subtag-shift))
   (cmp tag (:$ arm64::subtag-bignum))
   (b.ne :bad)
-  (lsr header header (:$ arm64::num-subtag-bits))
+  (ubfx header header (:$ 0) (:$ arm64::subtag-shift))
   (cmp header (:$ 1))
   (b.eq :got-it)
   :bad
@@ -1146,10 +1146,10 @@
   (tst temp (:$ arm64::uvector-ref))
   (b.eq :bad)
   (ldur header (:@ src (:$ arm64::misc-header-offset)))
-  (and temp header (:$ #xff))
+  (lsr temp header (:$ arm64::subtag-shift))
   (cmp temp (:$ arm64::subtag-bignum))
   (b.ne :bad)
-  (lsr header header (:$ arm64::num-subtag-bits))
+  (ubfx header header (:$ 0) (:$ arm64::subtag-shift))
   (cmp header (:$ 2))
   (b.eq :two)
   (cmp header (:$ 1))
@@ -1275,10 +1275,10 @@
   (tst tag (:$ arm64::uvector-ref))
   (b.eq :bad)
   (ldur header (:@ src (:$ arm64::misc-header-offset)))
-  (and tag header (:$ #xff))
+  (lsr tag header (:$ arm64::subtag-shift))
   (cmp tag (:$ arm64::subtag-bignum))
   (b.ne :bad)
-  (lsr header header (:$ arm64::num-subtag-bits))
+  (ubfx header header (:$ 0) (:$ arm64::subtag-shift))
   (cmp header (:$ 1))
   (b.ne :bad)
   (ldr dest (:@ src (:$ arm64::misc-data-offset)))
@@ -1901,9 +1901,8 @@
     (((dest :lisp))
      ((car :lisp) (cdr :lisp))
      ((header :u64)))
-  (mov header (:$ (:apply logior
-                          (:apply ash 3 arm64::num-subtag-bits)
-                          arm64::subtag-value-cell)))
+  (movz header (:$ 3))
+  (movk header (:$ (:apply ash arm64::subtag-value-cell 8)) (:lsl 48))
   (sub sp sp (:$ 32))
   (str header (:@ sp (:$ 0)))
   (str rnil (:@ sp (:$ 8)))
@@ -2026,11 +2025,8 @@
      ((n-c-args :u16const))
      ((header :u64)
       (prevsp :imm)))
-  (mov header (:$ (:apply logior
-                          (:apply ash
-                                  (:apply logandc2 (:apply + 2 n-c-args) 1)
-                                  arm64::num-subtag-bits)
-                          arm64::subtag-u64-vector)))
+  (movz header (:$ (:apply logandc2 (:apply + 2 n-c-args) 1)))
+  (movk header (:$ (:apply ash arm64::subtag-u64-vector 8)) (:lsl 48))
   (mov prevsp sp)
   (sub sp sp (:$ (:apply + 8
                          (:apply ash
@@ -2053,9 +2049,9 @@
   (add size n-c-args (:$ 2))
   (bic size size (:$ 1))
   (mov prevsp sp)
-  ;; header = (element-count << 8) | subtag-u64-vector
-  (lsl header size (:$ arm64::num-subtag-bits))
-  (orr header header (:$ arm64::subtag-u64-vector))
+  ;; header = (subtag-u64-vector << 56) | element-count
+  (mov header size)
+  (movk header (:$ (:apply ash arm64::subtag-u64-vector 8)) (:lsl 48))
   ;; frame-size = (element-count + 1) * 8
   (add size size (:$ 1))
   (lsl size size (:$ arm64::word-shift))

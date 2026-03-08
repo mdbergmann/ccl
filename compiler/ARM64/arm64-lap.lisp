@@ -196,6 +196,17 @@
         (arm64-lap-form form current))))))
 
 
+;;; Convert LAP :apply forms to standard Lisp function call forms.
+;;; (:apply fn arg1 arg2) → (fn arg1 arg2)
+;;; Nested :apply forms and (:$ ...) wrappers are handled recursively.
+(defun arm64-lap-apply-to-lisp (form)
+  (cond ((atom form) form)
+        ((eq (car form) :apply)
+         (cons (cadr form)
+               (mapcar #'arm64-lap-apply-to-lisp (cddr form))))
+        (t (cons (arm64-lap-apply-to-lisp (car form))
+                 (mapcar #'arm64-lap-apply-to-lisp (cdr form))))))
+
 ;;; Resolve symbolic register names and constant expressions in a LAP
 ;;; instruction form.  Register names from *arm64-register-names* are
 ;;; replaced with their numeric encodings.  (:$ expr) immediates where
@@ -240,7 +251,7 @@
          (let ((v (cadr form)))
            (if (typep v 'integer)
              form
-             (list :$ (eval v)))))
+             (list :$ (eval (arm64-lap-apply-to-lisp v))))))
         ;; (:@ ...), (:@! ...), (:@+ ...) — recurse into address forms
         ((member car '(:@ :@! :@+))
          (cons car (mapcar #'arm64-resolve-lap-operands (cdr form))))
