@@ -709,6 +709,9 @@ new_recursive_lock()
 #endif
   if (p) {
     m = (RECURSIVE_LOCK) ((((natural)p)+cache_block_size-1) & (~(cache_block_size-1)));
+    /* Explicitly zero the lock struct — calloc may not suffice if the
+       malloc heap has been corrupted by stray writes. */
+    memset(m, 0, sizeof(_recursive_lock));
     m->malloced_ptr = p;
   }
 

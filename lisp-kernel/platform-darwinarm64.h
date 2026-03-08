@@ -49,6 +49,7 @@ typedef ucontext_t ExceptionInformation;
 #define xpFaultAddress(x) (UC_MCONTEXT(x)->__es.__far)
 #define xpFaultStatus(x) (UC_MCONTEXT(x)->__es.__esr)
 
+#define DARWIN_USE_PSEUDO_SIGRETURN 1
 #define SIGNUM_FOR_INTN_TRAP SIGTRAP
 #define IS_PAGE_FAULT(info,xp) ((info)->si_signo == SIGSEGV || (info)->si_signo == SIGBUS)
 

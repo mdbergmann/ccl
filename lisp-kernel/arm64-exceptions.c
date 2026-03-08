@@ -1704,9 +1704,15 @@ raise_pending_interrupt(TCR *tcr)
 
 /* ----------------------------------------------------------------
    exit_signal_handler: restore TCR state after exception handling.
-   Unmask all signals so the thread can receive them again, then
-   restore the old valence and last_lisp_frame.
+   On Darwin, this is empty because pseudo_sigreturn handles cleanup.
+   On other platforms, unmask signals and restore old valence/frame.
    ---------------------------------------------------------------- */
+#ifdef DARWIN
+void
+exit_signal_handler(TCR *tcr, int old_valence, natural old_last_lisp_frame)
+{
+}
+#else
 void
 exit_signal_handler(TCR *tcr, int old_valence, natural old_last_lisp_frame)
 {
@@ -1718,37 +1724,43 @@ exit_signal_handler(TCR *tcr, int old_valence, natural old_last_lisp_frame)
   tcr->pending_exception_context = NULL;
   tcr->last_lisp_frame = old_last_lisp_frame;
 }
+#endif
 
 
 /* ----------------------------------------------------------------
    signal_handler: the main signal handler for SIGILL, SIGSEGV,
    SIGBUS.  Acquires the exception lock, calls handle_exception,
    and cleans up.
+
+   On Darwin, this is called via Mach pseudo-signal: setup_signal_frame
+   already called prepare_to_wait (set valence=EXCEPTION_WAIT), and
+   passes TCR and old_valence as extra parameters in x3/x4.
+   On other platforms, called as a Unix signal handler with 3 args.
    ---------------------------------------------------------------- */
 void
-signal_handler(int signum, siginfo_t *info, ExceptionInformation *context)
+signal_handler(int signum, siginfo_t *info, ExceptionInformation *context
+#ifdef DARWIN
+               , TCR *tcr, int old_valence
+#endif
+)
 {
   xframe_list xframe_link;
-  fprintf(dbgout, "SIGNAL: signum=%d pc=0x%lx\n", signum, (unsigned long)xpPC(context));
-  TCR *tcr = (TCR *)get_interrupt_tcr(false);
-  fprintf(dbgout, "SIGNAL: tcr=%p\n", tcr);
-  natural old_last_lisp_frame = tcr->last_lisp_frame;
+#ifndef DARWIN
+  TCR *tcr = get_interrupt_tcr(false);
   int old_valence;
+  natural old_last_lisp_frame = tcr->last_lisp_frame;
 
   /* On ARM64, SP is not a GPR.  Save it via xpSP(). */
   tcr->last_lisp_frame = xpSP(context);
-  fprintf(dbgout, "SIGNAL: about to prepare_to_wait\n");
   old_valence = prepare_to_wait_for_exception_lock(tcr, context);
-  fprintf(dbgout, "SIGNAL: old_valence=%d\n", old_valence);
+#endif
 
   if (tcr->flags & (1 << TCR_FLAG_BIT_PENDING_SUSPEND)) {
     CLR_TCR_FLAG(tcr, TCR_FLAG_BIT_PENDING_SUSPEND);
     pthread_kill(pthread_self(), thread_suspend_signal);
   }
 
-  fprintf(dbgout, "SIGNAL: about to wait_for_exception_lock\n");
   wait_for_exception_lock_in_handler(tcr, context, &xframe_link);
-  fprintf(dbgout, "SIGNAL: got exception lock\n");
 
   if (!handle_exception(signum, context, tcr, info, old_valence)) {
     char msg[512];
@@ -1764,8 +1776,13 @@ signal_handler(int signum, siginfo_t *info, ExceptionInformation *context)
   }
 
   unlock_exception_lock_in_handler(tcr);
+#ifndef DARWIN_USE_PSEUDO_SIGRETURN
   exit_signal_handler(tcr, old_valence, old_last_lisp_frame);
-  raise_pending_interrupt(tcr);
+#endif
+  /* raise_pending_interrupt is called by do_pseudo_sigreturn on Darwin */
+#ifndef DARWIN_USE_PSEUDO_SIGRETURN
+  SIGRETURN(context);
+#endif
 }
 
 
@@ -2314,9 +2331,11 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
   mach_port_t thread = (mach_port_t)((natural)tcr->native_thread_id);
   kern_return_t kret;
 
+#ifdef DEBUG_MACH_EXCEPTIONS
   fprintf(dbgout, "MACH_EXC: exception=%d code0=0x%llx pc=0x%lx tcr=%p\n",
           exception, (long long)code0,
           (unsigned long)((native_thread_state_t *)in_state)->__pc, tcr);
+#endif
 
   native_thread_state_t
     *ts = (native_thread_state_t *)in_state,
@@ -2326,8 +2345,10 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
     CLR_TCR_FLAG(tcr, TCR_FLAG_BIT_PENDING_EXCEPTION);
   }
 
-  /* Check for pseudo-sigreturn: EXC_BREAKPOINT with PC at pseudo_sigreturn */
-  if ((exception == EXC_BREAKPOINT) &&
+  /* Check for pseudo-sigreturn: HLT generates EXC_BAD_INSTRUCTION on ARM64.
+     When signal_handler returns, lr = pseudo_sigreturn, the HLT executes,
+     and we get EXC_BAD_INSTRUCTION with PC at pseudo_sigreturn. */
+  if ((exception == EXC_BAD_INSTRUCTION) &&
       ((natural)(ts->__pc) == (natural)pseudo_sigreturn)) {
     kret = do_pseudo_sigreturn(thread, tcr, out_ts);
   } else if (tcr->flags & (1<<TCR_FLAG_BIT_PROPAGATE_EXCEPTION)) {
@@ -2352,7 +2373,8 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
       break;
 
     case EXC_BREAKPOINT:
-      /* HLT instructions generate EXC_BREAKPOINT on ARM64 */
+      /* BRK instructions generate EXC_BREAKPOINT on ARM64.
+         HLT generates EXC_BAD_INSTRUCTION (handled above). */
       signum = SIGTRAP;
       break;
 
@@ -2405,15 +2427,13 @@ static mach_port_t mach_exception_thread = (mach_port_t)0;
 void *
 exception_handler_proc(void *arg)
 {
-  extern boolean_t mach_exc_server();
+  extern boolean_t mach_exc_server(mach_msg_header_t *, mach_msg_header_t *);
   mach_port_t p = (mach_port_t)((natural)arg);
 
   mach_exception_thread = pthread_mach_thread_np(pthread_self());
-  fprintf(dbgout, "DEBUG: exception_handler_proc running, port=%d mach_thread=%d\n",
-          p, mach_exception_thread);
-  /* ARM64: use 8192 buffer for large thread state messages. */
+  /* ARM64: use 8192 buffer for large thread state messages.
+     Custom mach_msg loop replaces mach_msg_server which was unreliable. */
   {
-    extern boolean_t mach_exc_server(mach_msg_header_t *, mach_msg_header_t *);
     kern_return_t kr;
     for (;;) {
       char buf[8192];
@@ -2425,23 +2445,15 @@ exception_handler_proc(void *arg)
                     0, sizeof(buf), p,
                     MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
       if (kr != KERN_SUCCESS) {
-        fprintf(dbgout, "DEBUG: exc handler mach_msg recv failed: %d\n", kr);
         continue;
       }
-      fprintf(dbgout, "DEBUG: exc handler got msg id=%d size=%d\n",
-              msg->msgh_id, msg->msgh_size);
 
       boolean_t handled = mach_exc_server(msg, reply);
-      fprintf(dbgout, "DEBUG: mach_exc_server returned %d, reply id=%d\n",
-              handled, reply->msgh_id);
 
       if (handled) {
         kr = mach_msg(reply, MACH_SEND_MSG,
                       reply->msgh_size, 0, MACH_PORT_NULL,
                       MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-        if (kr != KERN_SUCCESS) {
-          fprintf(dbgout, "DEBUG: exc handler mach_msg send reply failed: %d\n", kr);
-        }
       }
     }
   }
@@ -2473,12 +2485,10 @@ mach_exception_port_set()
                               MACH_PORT_RIGHT_PORT_SET,
                               &__exception_port_set);
     MACH_CHECK_ERROR("allocating thread exception_ports", kret);
-    fprintf(dbgout, "DEBUG: exception port set allocated: %d\n", __exception_port_set);
     create_system_thread(0,
                          NULL,
                          exception_handler_proc,
                          (void *)((natural)__exception_port_set));
-    fprintf(dbgout, "DEBUG: exception handler thread created\n");
   }
   return __exception_port_set;
 }
@@ -2575,8 +2585,6 @@ setup_mach_exception_handling(TCR *tcr)
                                  thread_exception_port,
                                  exception_port_set);
     MACH_CHECK_ERROR("moving exception port to port set", kret);
-    fprintf(dbgout, "DEBUG: mach_port_move_member: port=%d set=%d kret=%d\n",
-            thread_exception_port, exception_port_set, kret);
   }
   return kret;
 }
@@ -2591,15 +2599,11 @@ darwin_exception_init(TCR *tcr)
 
   tcr->native_thread_info = (void *) fxs;
 
-  fprintf(dbgout, "DEBUG: darwin_exception_init: tcr=%p io_datum=%p thread_id=%p\n",
-          tcr, tcr->io_datum, (void*)(natural)tcr->native_thread_id);
-
   if ((kret = setup_mach_exception_handling(tcr))
       != KERN_SUCCESS) {
     fprintf(dbgout, "Couldn't setup exception handler - error = %d\n", kret);
     terminate_lisp();
   }
-  fprintf(dbgout, "DEBUG: darwin_exception_init: setup done, kret=%d\n", kret);
 }
 
 

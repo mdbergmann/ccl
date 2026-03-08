@@ -2079,9 +2079,7 @@ main
 
   gc_init();
 
-  fprintf(dbgout, "DEBUG: about to load_image\n");
   set_nil(load_image(image_name));
-  fprintf(dbgout, "DEBUG: set_nil done, lisp_nil=0x%lx\n", (unsigned long)lisp_nil);
   lisp_heap_notify_threshold = lisp_global(GC_NOTIFY_THRESHOLD);
   lisp_heap_threshold_from_image = lisp_global(LISP_HEAP_THRESHOLD);
   
@@ -2099,7 +2097,6 @@ main
     egc_enabled = lisp_global(EGC_ENABLED);
   }
 
-  fprintf(dbgout, "DEBUG: about to set TCR_AREA_LOCK\n");
   lisp_global(TCR_AREA_LOCK) = ptr_to_lispobj(tcr_area_lock);
 
 #ifdef X86
@@ -2115,7 +2112,6 @@ main
   lisp_global(SUBPRIMS_BASE) = 0;
 #endif
 
-  fprintf(dbgout, "DEBUG: about to set RET1VALN etc.\n");
   lisp_global(RET1VALN) = (LispObj)&ret1valn;
   lisp_global(LEXPR_RETURN) = (LispObj)&nvalret;
   lisp_global(LEXPR_RETURN1V) = (LispObj)&popj;
@@ -2124,9 +2120,7 @@ main
   lisp_global(STACK_SIZE) = thread_stack_size<<fixnumshift;
 
 
-  fprintf(dbgout, "DEBUG: about to call exception_init()\n");
   exception_init();
-  fprintf(dbgout, "DEBUG: exception_init() done\n");
 
 #ifdef WINDOWS
   lisp_global(IMAGE_NAME) = ptr_to_lispobj(utf_16_to_utf_8(ensure_real_path(image_name)));
@@ -2146,26 +2140,18 @@ main
 
   lisp_global(BATCH_FLAG) = (batch_flag << fixnumshift);
 
-  fprintf(dbgout, "DEBUG: about to init_consing_areas()\n");
   init_consing_areas();
-  fprintf(dbgout, "DEBUG: about to new_tcr()\n");
   tcr = new_tcr(initial_stack_size, MIN_TSTACK_SIZE);
-  fprintf(dbgout, "DEBUG: new_tcr done, tcr=%p\n", tcr);
   stack_base = initial_stack_bottom()-xStackSpace();
-  fprintf(dbgout, "DEBUG: about to init_threads()\n");
   init_threads((void *)(stack_base), tcr);
-  fprintf(dbgout, "DEBUG: about to thread_init_tcr()\n");
   thread_init_tcr(tcr, current_sp, current_sp-stack_base);
-  fprintf(dbgout, "DEBUG: thread_init_tcr done\n");
 
   if (lisp_global(STATIC_CONSES) == 0) {
     lisp_global(STATIC_CONSES) = lisp_nil;
   }
 
   lisp_global(EXCEPTION_LOCK) = ptr_to_lispobj(new_recursive_lock());
-  fprintf(dbgout, "DEBUG: about to enable_fp_exceptions()\n");
   enable_fp_exceptions();
-  fprintf(dbgout, "DEBUG: about to register_user_signal_handler()\n");
   register_user_signal_handler();
 
 #ifdef PPC
@@ -2187,10 +2173,6 @@ main
   lisp_global(INTERRUPT_SIGNAL) = (LispObj) box_fixnum(SIGNAL_FOR_PROCESS_INTERRUPT);
 #endif
   tcr->vs_area->active -= node_size;
-  fprintf(dbgout, "DEBUG: nrs_TOPLFUNC addr=%p, vcell=0x%lx\n",
-          &nrs_TOPLFUNC, (unsigned long)nrs_TOPLFUNC.vcell);
-  fprintf(dbgout, "DEBUG: nil_base=0x%lx, nrs_T addr=%p, T.vcell=0x%lx\n",
-          (unsigned long)nil_base_address, &nrs_T, (unsigned long)nrs_T.vcell);
   *(--tcr->save_vsp) = nrs_TOPLFUNC.vcell;
   nrs_TOPLFUNC.vcell = lisp_nil;
 #ifdef GC_INTEGRITY_CHECKING
@@ -2362,7 +2344,6 @@ main
     }
   }
 #endif
-  fprintf(dbgout, "DEBUG: about to start_lisp()\n");
 #ifdef ARM
 #ifdef LINUX
 #ifdef SET_INITIAL_THREAD_AFFINITY
