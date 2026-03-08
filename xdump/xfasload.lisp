@@ -1640,11 +1640,11 @@
   (let* ((element-count (%fasl-read-count s))
          (subtag (xload-target-subtype :code-vector)))
     (multiple-value-bind (vector v o)
-                         (xload-make-ivector 
+                         (xload-make-ivector
                           (if (not *xload-pure-code-p*)
-                            *xload-dynamic-space* 
+                            *xload-dynamic-space*
                             *xload-readonly-space*)
-                          subtag 
+                          subtag
                           element-count)
       (%epushval s vector)
       (%fasl-read-n-bytes s v (+ o
@@ -1914,7 +1914,7 @@
       (let* ((function (xload-apply-tag vector *xload-target-fulltag-for-functions*)))
         (%epushval s function)
         (%fasl-read-n-bytes s v (+ o *xload-target-misc-data-offset*)
-                            (ash size-of-code *xload-target-fixnumshift*))
+                            (ash size-of-code (arch::target-word-shift (backend-target-arch *target-backend*))))
 	(target-arch-case
 	 (:x8632 (xload-fixup-self-references vector)))
         (do* ((numconst (- size-in-elements size-of-code))
