@@ -2259,7 +2259,9 @@ main
           }
           gvecs++;
           if (subtag == subtag_function && count >= 2) {
-            start[1] = start[2];
+            /* Copy code-vector ref (slot 2) to entrypoint (slot 1),
+               stripping TBI tag since br/blr don't honor TBI. */
+            start[1] = untag(start[2]);
             fixed++;
             funcs++;
           }
@@ -2296,7 +2298,8 @@ main
           } else if (nodeheader_tag_p(subtag)) {
             natural count = header_element_count(w0);
             if (subtag == subtag_function && count >= 2) {
-              rostart[1] = rostart[2];
+              /* Strip TBI tag: br/blr need untagged code address */
+              rostart[1] = untag(rostart[2]);
               ro_fixed++;
             }
             rostart += 1 + count;

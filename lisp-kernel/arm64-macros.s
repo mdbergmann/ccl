@@ -416,18 +416,19 @@ macro_label(ok):
         
 /* "jump" to the code-vector of the function in nfn.
    Load the entrypoint from slot 0 of the function object,
-   then branch to it.  The entrypoint is a tagged pointer to
-   the code-vector; TBI strips the tag byte so we branch to
-   the first instruction in the code-vector's data. */
+   then branch to it.  The entrypoint is an UNTAGGED code address
+   (TBI tag stripped by %fix-fn-entrypoint / kernel walker)
+   because ARM64 TBI only applies to data accesses, not br/blr.
+   Use temp1 (x11) for the branch target to preserve nfn (x10). */
 define(`jump_nfn',`
-        __(ldr temp2,[nfn,#_function.entrypoint])
-        __(br temp2)
+        __(ldr temp1,[nfn,#_function.entrypoint])
+        __(br temp1)
 ')
 
-/* "call" the function in nfn. */
+/* "call" the function in nfn, preserving nfn (x10). */
 define(`call_nfn',`
-        __(ldr temp2,[nfn,#_function.entrypoint])
-        __(blr temp2)
+        __(ldr temp1,[nfn,#_function.entrypoint])
+        __(blr temp1)
 ')
 	
 

@@ -3877,6 +3877,7 @@ _exportfn(C(start_lisp))
         __(mov imm0,#TCR_STATE_LISP)
         __(str imm0,[rcontext,#tcr.valence])
         __(ldr allocptr,[rcontext,#tcr.save_allocptr])
+        __(ldr allocbase,[rcontext,#tcr.save_allocbase])
         __(bl toplevel_loop)
         __(ldr imm1,[sp,#(10*8)+node_size]) /* past FPR vector + header */
         __(mov imm0,#TCR_STATE_FOREIGN)

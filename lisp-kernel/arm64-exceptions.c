@@ -718,6 +718,7 @@ platform_new_heap_segment(ExceptionInformation *xp, TCR *tcr, BytePtr low, ByteP
 {
   tcr->last_allocptr = (void *)high;
   xpGPR(xp, allocptr) = (LispObj) high;
+  xpGPR(xp, allocbase) = (LispObj) low;
   tcr->save_allocbase = (void *)low;
 }
 
@@ -1728,20 +1729,26 @@ void
 signal_handler(int signum, siginfo_t *info, ExceptionInformation *context)
 {
   xframe_list xframe_link;
+  fprintf(dbgout, "SIGNAL: signum=%d pc=0x%lx\n", signum, (unsigned long)xpPC(context));
   TCR *tcr = (TCR *)get_interrupt_tcr(false);
+  fprintf(dbgout, "SIGNAL: tcr=%p\n", tcr);
   natural old_last_lisp_frame = tcr->last_lisp_frame;
   int old_valence;
 
   /* On ARM64, SP is not a GPR.  Save it via xpSP(). */
   tcr->last_lisp_frame = xpSP(context);
+  fprintf(dbgout, "SIGNAL: about to prepare_to_wait\n");
   old_valence = prepare_to_wait_for_exception_lock(tcr, context);
+  fprintf(dbgout, "SIGNAL: old_valence=%d\n", old_valence);
 
   if (tcr->flags & (1 << TCR_FLAG_BIT_PENDING_SUSPEND)) {
     CLR_TCR_FLAG(tcr, TCR_FLAG_BIT_PENDING_SUSPEND);
     pthread_kill(pthread_self(), thread_suspend_signal);
   }
 
+  fprintf(dbgout, "SIGNAL: about to wait_for_exception_lock\n");
   wait_for_exception_lock_in_handler(tcr, context, &xframe_link);
+  fprintf(dbgout, "SIGNAL: got exception lock\n");
 
   if (!handle_exception(signum, context, tcr, info, old_valence)) {
     char msg[512];
@@ -2075,9 +2082,9 @@ exception_init()
    ================================================================ */
 
 #define LISP_EXCEPTIONS_HANDLED_MASK \
- (EXC_MASK_SOFTWARE | EXC_MASK_BAD_ACCESS | EXC_MASK_BAD_INSTRUCTION | EXC_MASK_ARITHMETIC)
+ (EXC_MASK_SOFTWARE | EXC_MASK_BAD_ACCESS | EXC_MASK_BAD_INSTRUCTION | EXC_MASK_ARITHMETIC | EXC_MASK_BREAKPOINT)
 
-#define NUM_LISP_EXCEPTIONS_HANDLED 4
+#define NUM_LISP_EXCEPTIONS_HANDLED 5
 
 typedef struct {
   int foreign_exception_port_count;
@@ -2307,6 +2314,10 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
   mach_port_t thread = (mach_port_t)((natural)tcr->native_thread_id);
   kern_return_t kret;
 
+  fprintf(dbgout, "MACH_EXC: exception=%d code0=0x%llx pc=0x%lx tcr=%p\n",
+          exception, (long long)code0,
+          (unsigned long)((native_thread_state_t *)in_state)->__pc, tcr);
+
   native_thread_state_t
     *ts = (native_thread_state_t *)in_state,
     *out_ts = (native_thread_state_t *)out_state;
@@ -2398,7 +2409,42 @@ exception_handler_proc(void *arg)
   mach_port_t p = (mach_port_t)((natural)arg);
 
   mach_exception_thread = pthread_mach_thread_np(pthread_self());
-  mach_msg_server(mach_exc_server, 256, p, 0);
+  fprintf(dbgout, "DEBUG: exception_handler_proc running, port=%d mach_thread=%d\n",
+          p, mach_exception_thread);
+  /* ARM64: use 8192 buffer for large thread state messages. */
+  {
+    extern boolean_t mach_exc_server(mach_msg_header_t *, mach_msg_header_t *);
+    kern_return_t kr;
+    for (;;) {
+      char buf[8192];
+      char reply_buf[8192];
+      mach_msg_header_t *msg = (mach_msg_header_t *)buf;
+      mach_msg_header_t *reply = (mach_msg_header_t *)reply_buf;
+
+      kr = mach_msg(msg, MACH_RCV_MSG | MACH_RCV_LARGE,
+                    0, sizeof(buf), p,
+                    MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+      if (kr != KERN_SUCCESS) {
+        fprintf(dbgout, "DEBUG: exc handler mach_msg recv failed: %d\n", kr);
+        continue;
+      }
+      fprintf(dbgout, "DEBUG: exc handler got msg id=%d size=%d\n",
+              msg->msgh_id, msg->msgh_size);
+
+      boolean_t handled = mach_exc_server(msg, reply);
+      fprintf(dbgout, "DEBUG: mach_exc_server returned %d, reply id=%d\n",
+              handled, reply->msgh_id);
+
+      if (handled) {
+        kr = mach_msg(reply, MACH_SEND_MSG,
+                      reply->msgh_size, 0, MACH_PORT_NULL,
+                      MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+        if (kr != KERN_SUCCESS) {
+          fprintf(dbgout, "DEBUG: exc handler mach_msg send reply failed: %d\n", kr);
+        }
+      }
+    }
+  }
   /* Should never return. */
   abort();
 }
@@ -2427,10 +2473,12 @@ mach_exception_port_set()
                               MACH_PORT_RIGHT_PORT_SET,
                               &__exception_port_set);
     MACH_CHECK_ERROR("allocating thread exception_ports", kret);
+    fprintf(dbgout, "DEBUG: exception port set allocated: %d\n", __exception_port_set);
     create_system_thread(0,
                          NULL,
                          exception_handler_proc,
                          (void *)((natural)__exception_port_set));
+    fprintf(dbgout, "DEBUG: exception handler thread created\n");
   }
   return __exception_port_set;
 }
@@ -2526,6 +2574,9 @@ setup_mach_exception_handling(TCR *tcr)
     kret = mach_port_move_member(task_self,
                                  thread_exception_port,
                                  exception_port_set);
+    MACH_CHECK_ERROR("moving exception port to port set", kret);
+    fprintf(dbgout, "DEBUG: mach_port_move_member: port=%d set=%d kret=%d\n",
+            thread_exception_port, exception_port_set, kret);
   }
   return kret;
 }
@@ -2540,11 +2591,15 @@ darwin_exception_init(TCR *tcr)
 
   tcr->native_thread_info = (void *) fxs;
 
+  fprintf(dbgout, "DEBUG: darwin_exception_init: tcr=%p io_datum=%p thread_id=%p\n",
+          tcr, tcr->io_datum, (void*)(natural)tcr->native_thread_id);
+
   if ((kret = setup_mach_exception_handling(tcr))
       != KERN_SUCCESS) {
     fprintf(dbgout, "Couldn't setup exception handler - error = %d\n", kret);
     terminate_lisp();
   }
+  fprintf(dbgout, "DEBUG: darwin_exception_init: setup done, kret=%d\n", kret);
 }
 
 

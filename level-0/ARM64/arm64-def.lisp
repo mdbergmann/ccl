@@ -18,10 +18,12 @@
 
 ;;; ARM64: function layout has only entrypoint as fixed field.
 ;;; The code vector is element 1 (at offset node-size from tagged ptr).
-;;; With TBI, the tagged code vector pointer IS the code entry address
-;;; since misc-data-offset = 0 and hardware ignores the tag byte.
+;;; The entrypoint must be an UNTAGGED code address because ARM64
+;;; TBI only applies to data accesses (ldr/str), NOT to instruction
+;;; fetches (br/blr).  Strip the TBI tag byte before storing.
 (defarm64lapfunction %fix-fn-entrypoint ((func arg_z))
-  (ldr temp0 (:@ func (:$ arm64::node-size)))    ; element 1 = code vector
+  (ldr temp0 (:@ func (:$ arm64::node-size)))    ; element 1 = code vector (tagged)
+  (and temp0 temp0 (:$ #x00FFFFFFFFFFFFFF))      ; strip TBI tag for branch target
   (str temp0 (:@ func (:$ arm64::function.entrypoint)))
   (ret))
 
