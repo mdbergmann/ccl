@@ -237,8 +237,12 @@
 
 (defparameter *xload-record-source-file-p* t)
 
+(defvar *xload-cached-symbol-header* nil)
+
 (defun xload-symbol-header ()
-  (make-xload-header target::symbol.element-count (xload-target-subtype :symbol)))
+  (or *xload-cached-symbol-header*
+      (setq *xload-cached-symbol-header*
+            (make-xload-header target::symbol.element-count (xload-target-subtype :symbol)))))
 
 (defparameter *xload-fasl-dispatch-table* (make-array (length *fasl-dispatch-table*)
                                                      :initial-element #'%bad-fasl))
@@ -1070,6 +1074,7 @@
 
 
 (defun xfasload (output-file &rest pathnames)
+  (setq *xload-cached-symbol-header* nil)
   (let* ((*xload-symbols* (make-hash-table :test #'eq))
          (*xload-symbol-addresses* (make-hash-table :test #'eql))
          (*xload-spaces* nil)

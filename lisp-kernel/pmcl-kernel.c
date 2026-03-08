@@ -2344,6 +2344,19 @@ main
         perror("W^X: mprotect static area to RX failed");
       }
     }
+    {
+      area *ro = readonly_area;
+      if (ro && ro->low < ro->active) {
+        natural base = truncate_to_power_of_2((natural)ro->low, log2_page_size);
+        natural limit = align_to_power_of_2((natural)ro->active, log2_page_size);
+        fprintf(dbgout, "W^X: mprotect readonly area RX: 0x%lx - 0x%lx (%ld bytes)\n",
+                base, limit, limit - base);
+        sys_icache_invalidate((void *)base, limit - base);
+        if (mprotect((void *)base, limit - base, PROT_READ | PROT_EXEC) != 0) {
+          perror("W^X: mprotect readonly area to RX failed");
+        }
+      }
+    }
   }
 #endif
   fprintf(dbgout, "DEBUG: about to start_lisp()\n");
