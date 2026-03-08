@@ -2206,6 +2206,93 @@ main
   lisp_global(MANAGED_STATIC_REFBITS) = (LispObj)managed_static_refbits;
   lisp_global(MANAGED_STATIC_REFIDX) = (LispObj)managed_static_refidx;
   lisp_global(MANAGED_STATIC_DNODES) = (LispObj)managed_static_area->ndnodes;
+#if defined(ARM64)
+  /* ARM64: Fix function entrypoints after image loading.
+     The cross-compiler creates function objects with slot 0 = 0 (entrypoint
+     unset) and slot 1 = code-vector.  The Lisp function %fix-fn-entrypoint
+     copies slot 1 into slot 0 at runtime, but it can't run until we can
+     call functions.  So we fix all entrypoints here in the kernel.
+
+     Walk the dynamic area dnode-by-dnode, find function headers, and
+     copy the code-vector pointer from slot 1 into slot 0. */
+  {
+    BytePtr heap_start = (BytePtr)(natural)lisp_global(HEAP_START);
+    LispObj *start = (LispObj *)heap_start;
+    LispObj *end = (LispObj *)active_dynamic_area->active;
+    int fixed = 0;
+
+    fprintf(dbgout, "Entrypoint fix: scanning dynamic area %p - %p (%ld bytes)\n",
+            start, end, (long)((char*)end - (char*)start));
+    {
+      int ivecs = 0, gvecs = 0, conses = 0, funcs = 0;
+      /* Show first few words for debugging */
+      if (start < end) {
+        fprintf(dbgout, "  first words: %016lx %016lx %016lx %016lx\n",
+                start[0], start[1], start < end-2 ? start[2] : 0, start < end-3 ? start[3] : 0);
+        fprintf(dbgout, "  subtag_function=0x%lx, function_header=0x%lx\n",
+                (long)subtag_function, (long)function_header);
+      }
+      while (start < end) {
+        LispObj w0 = *start;
+        natural subtag = header_subtag(w0);
+
+        if (immheader_tag_p(subtag)) {
+          ivecs++;
+          start = (LispObj *)skip_over_ivector((natural)start, w0);
+        } else if (nodeheader_tag_p(subtag)) {
+          natural count = header_element_count(w0);
+          gvecs++;
+          if (subtag == subtag_function && count >= 2) {
+            start[1] = start[2];
+            fixed++;
+            funcs++;
+          }
+          start += 1 + count;
+          if (((natural)start) & (dnode_size - 1)) {
+            start++;
+          }
+        } else {
+          conses++;
+          start += 2;
+        }
+      }
+      fprintf(dbgout, "  dynamic: %d ivecs, %d gvecs (%d funcs), %d conses\n",
+              ivecs, gvecs, funcs, conses);
+    }
+
+    /* Also fix readonly area */
+    {
+      area *ro = readonly_area;
+      if (ro && ro->low < ro->active) {
+        LispObj *rostart = (LispObj *)ro->low;
+        LispObj *roend = (LispObj *)ro->active;
+        int ro_fixed = 0;
+        fprintf(dbgout, "Entrypoint fix: scanning readonly area %p - %p (%ld bytes)\n",
+                rostart, roend, (long)((char*)roend - (char*)rostart));
+        while (rostart < roend) {
+          LispObj w0 = *rostart;
+          natural subtag = header_subtag(w0);
+          if (immheader_tag_p(subtag)) {
+            rostart = (LispObj *)skip_over_ivector((natural)rostart, w0);
+          } else if (nodeheader_tag_p(subtag)) {
+            natural count = header_element_count(w0);
+            if (subtag == subtag_function && count >= 2) {
+              rostart[1] = rostart[2];
+              ro_fixed++;
+            }
+            rostart += 1 + count;
+            if (((natural)rostart) & (dnode_size - 1)) rostart++;
+          } else {
+            rostart += 2;
+          }
+        }
+        fprintf(dbgout, "Fixed %d function entrypoints in readonly area\n", ro_fixed);
+        fixed += ro_fixed;
+      }
+    }
+    fprintf(dbgout, "Total: fixed %d function entrypoints\n", fixed);
+  }
+#endif
 #if defined(DARWIN) && defined(ARM64)
   /* macOS ARM64 W^X: make heap areas executable before entering Lisp.
      Pages start as RW after image loading.  mprotect to RX so code

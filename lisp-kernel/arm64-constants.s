@@ -325,7 +325,7 @@ max_1_bit_constant_index = 0
 	_endstructf
 	
 /* Functions are of (conceptually) unlimited size. */
-	_struct(_function,node_bias)
+	_structf(_function)
          _struct_label(entrypoint)
 	_ends
 

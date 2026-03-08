@@ -46,12 +46,16 @@ define(`jump_builtin',`
 
 
 
-/* On ARM64 with TBI tagging, functions embed code directly — the
-   function pointer IS the entrypoint (no separate codevector).
-   This stub exists to satisfy the sptab requirement that
-   fix_nfn_entrypoint be the first entry. */
+/* Fix the entrypoint of the function in nfn.  Copy the code-vector
+   pointer from slot 1 into slot 0 (the entrypoint slot), then
+   re-enter the function through its now-valid entrypoint.
+   This is called when a newly-created closure is invoked for the
+   first time — its entrypoint initially points here.
+   Must be the first entry in the subprims table. */
 _spentry(fix_nfn_entrypoint)
-        __(ret)
+        __(ldr temp2,[nfn,#node_size])             /* load slot 1 = code vector */
+        __(str temp2,[nfn,#_function.entrypoint])   /* store into slot 0 */
+        __(br temp2)                                /* branch to code */
 _endsubp(fix_nfn_entrypoint)
 
 

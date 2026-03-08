@@ -413,14 +413,20 @@ macro_label(ok):
         ')
                 
         
-/* "jump" to the code-vector of the function in nfn. */
+/* "jump" to the code-vector of the function in nfn.
+   Load the entrypoint from slot 0 of the function object,
+   then branch to it.  The entrypoint is a tagged pointer to
+   the code-vector; TBI strips the tag byte so we branch to
+   the first instruction in the code-vector's data. */
 define(`jump_nfn',`
-        __(br nfn)
+        __(ldr temp2,[nfn,#_function.entrypoint])
+        __(br temp2)
 ')
 
-/* "call the  function in nfn. */
+/* "call" the function in nfn. */
 define(`call_nfn',`
-        __(blr nfn)
+        __(ldr temp2,[nfn,#_function.entrypoint])
+        __(blr temp2)
 ')
 	
 
