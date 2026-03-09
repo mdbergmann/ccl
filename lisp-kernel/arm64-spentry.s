@@ -470,7 +470,7 @@ _spentry(conslist)
 1:
 	__(vpop1(arg_y))
 	__(Cons(arg_z,arg_y,arg_z))
-	__(subs nargs,nargs,#1)
+	__(subs nargs,nargs,#node_size)
 2:
 	__(bne 1b)
 	__(ret)
@@ -480,11 +480,11 @@ _spentry(conslist)
 
 _spentry(conslist_star)
 	__(cmp nargs,#0)
-	__(b 2f) 
+	__(b 2f)
 1:
 	__(vpop1(arg_y))
 	__(Cons(arg_z,arg_y,arg_z))
-	__(subs nargs,nargs,#1)
+	__(subs nargs,nargs,#node_size)
 2:
 	__(bne 1b)
 	__(ret)
@@ -592,10 +592,10 @@ _spentry(makes128)
 
 /* funcall nfn, returning multiple values if it does.  */
 _spentry(mvpass)
-        __(cmp nargs,#nargregs)
-        __(mov imm1,vsp)        
+        __(cmp nargs,#nargregs*node_size)
+        __(mov imm1,vsp)
 	__(sub imm0,vsp,#node_size*nargregs)
-	__(add imm2,imm1,nargs,lsl #node_shift)
+	__(add imm2,imm1,nargs)
         __(csel imm1,imm0,imm2,gt)
 	__(build_lisp_frame(imm1))
 	__(adr lr,C(ret1valn))
@@ -621,11 +621,11 @@ local_label(return_values):
 	__(mov arg_z,rnil)
 	__(cmp imm0,lr)
 	__(beq 3f)
-	__(cmp nargs,#1)
-	__(add imm0,vsp,nargs,lsl #node_shift)
+	__(cmp nargs,#1*node_size)
+	__(add imm0,vsp,nargs)
         __(blo 0f)
 	__(ldr arg_z,[imm0,#-node_size])
-0:      
+0:
 	__(mov vsp,temp0)
 	__(ret)
 
@@ -633,12 +633,12 @@ local_label(return_values):
 /* Return multiple values to real caller.  */
 3:
 	__(ldr lr,[sp,#lisp_frame.savelr])
-	__(add imm1,vsp,nargs,lsl #node_shift)
+	__(add imm1,vsp,nargs)
 	__(ldr imm0,[sp,#lisp_frame.savevsp])
 	__(cmp imm1,imm0) /* a fairly common case  */
 	__(discard_lisp_frame())
 	__(b.eq 9f) /* already in the right place  */
-	__(cmp nargs,#1) /* sadly, a very common case  */
+	__(cmp nargs,#1*node_size) /* sadly, a very common case  */
 	__(bne 4f)
 	__(ldr arg_z,[vsp,#0])
 	__(mov vsp,imm0)
@@ -646,10 +646,10 @@ local_label(return_values):
 	__(ret)
 4:
 	__(blt 6f)
-	__(mov temp1,#1)
+	__(mov temp1,#node_size)
 5:
 	__(cmp temp1,nargs)
-	__(add temp1,temp1,#1)
+	__(add temp1,temp1,#node_size)
 	__(ldr arg_z,[imm1,#-node_size]!)
 	__(push1(arg_z,imm0))
 	__(bne 5b)
@@ -675,7 +675,7 @@ C(nvalret):
         __(ldr temp0,[rcontext, #tcr.catch_top])
         __(mov imm0,#0) /* count intervening catch/unwind-protect frames.  */
         __(cmp temp0,#0)
-        __(ldr temp2,[vsp,nargs,lsl #node_shift])
+        __(ldr temp2,[vsp,nargs])
         __(beq local_label(_throw_tag_not_found))
 local_label(_throw_loop):
         __(ldr temp1,[temp0,#catch_frame.catch_tag])
@@ -687,7 +687,7 @@ local_label(_throw_loop):
         __(bne local_label(_throw_loop))
 local_label(_throw_tag_not_found):
         __(uuo_error_no_throw_tag(temp2))
-        __(str temp2,[vsp,nargs,lsl #node_shift])
+        __(str temp2,[vsp,nargs])
         __(b _SPthrow)
 
 /* This takes N multiple values atop the vstack.  */
@@ -1083,11 +1083,11 @@ C(egc_write_barrier_end):
 _spentry(stkconslist)
         __(mov arg_z,rnil)
 C(stkconslist_star):           
-        __(lsl temp2,nargs,#node_shift+1)
+        __(lsl temp2,nargs,#1)
         __(dnode_align(temp2,temp2,node_size))
         __(mov imm1,#simple_vector_header<<tag_shift)
         __(add imm1,imm1,#1)
-        __(add imm1,imm1,nargs,lsl #1)
+        __(add imm1,imm1,nargs,lsr #2)
         __(mov imm0,#tag_simple_vector)
         __(stack_allocate_zeroed_vector(imm0,imm1,temp2,imm0))
         __(add imm1,sp,#dnode_size+node_size)
@@ -1099,11 +1099,11 @@ C(stkconslist_star):
         __(_rplacd(imm1,arg_z))
         __(mov arg_z,imm1)
         __(add imm1,imm1,#cons.size)
-        __(subs nargs,nargs,#1)
+        __(subs nargs,nargs,#node_size)
 4:
         __(bne 1b)
         __(ret)
- 
+
 /* do list*: last arg in arg_z, all others vpushed,  */
 /* nargs set to #args vpushed.  */
 _spentry(stkconslist_star)
@@ -1112,17 +1112,17 @@ _spentry(stkconslist_star)
 /* Make a stack-consed simple-vector out of the NARGS objects  */
 /* on top of the vstack; return it in arg_z.  */
 _spentry(mkstackv)
-        __(lsl imm1,nargs,#node_shift)
+        __(mov imm1,nargs)
         __(dnode_align(imm1,nargs,node_size))
         __(mov imm0,#simple_vector_header<<tag_shift)
-        __(orr imm0,imm0,nargs)
+        __(orr imm0,imm0,nargs,lsr #node_shift)
         __(mov imm2,#tag_simple_vector)
         __(stack_allocate_zeroed_vector(arg_z,imm0,imm1,imm2))
-        __(add imm1,arg_z,nargs,lsl #node_shift)
+        __(add imm1,arg_z,nargs)
         __(b 4f)
 3:      __(vpop1(arg_y))
         __(str arg_y,[imm1,#-node_size]!)
-        __(sub nargs,nargs,#1)
+        __(sub nargs,nargs,#node_size)
 4:      __(cbnz nargs,3b)
         __(ret)
 	
@@ -1271,11 +1271,11 @@ stack_misc_alloc_no_room:
 /* objects.  */
 
 _spentry(gvector)
-        __(sub nargs,nargs,#1)
-        __(ldr arg_z,[vsp,nargs,lsl #node_shift])
+        __(sub nargs,nargs,#node_size)
+        __(ldr arg_z,[vsp,nargs])
         __(unbox_fixnum(imm0,arg_z))
         __(lsl imm0,imm0,#subtag_shift)
-        __(orr imm0,imm0,nargs)
+        __(orr imm0,imm0,nargs,lsr #node_shift)
         __(dnode_align(imm1,nargs,node_size))
         __(Misc_Alloc(arg_z,imm0,imm1))
         __(mov imm1,nargs)
@@ -1330,7 +1330,7 @@ _spentry(default_optional_args)
         __(mov imm1,nargs)
         __(bhs 9f)
 1: 
-        __(add imm1,imm1,#fixnum_one)
+        __(add imm1,imm1,#node_size)
         __(cmp imm1,imm0)
         __(vpush1(arg_z))
         __(bne 1b)
@@ -1347,7 +1347,7 @@ _spentry(opt_supplied_p)
 1:     
         /* (vpush (< imm1 nargs))  */
         __(cmp imm1,nargs)
-        __(add imm1,imm1,#fixnumone)
+        __(add imm1,imm1,#node_size)
         __(bne 2f)
         __(sub arg_x,arg_x,#t_offset)
 2:      __(vpush1(arg_x))
@@ -1365,13 +1365,13 @@ _spentry(heap_rest_arg)
 1:
         __(vpop1(arg_y))
         __(Cons(arg_z,arg_y,arg_z))
-        __(subs imm1,imm1,#fixnum_one)
+        __(subs imm1,imm1,#node_size)
 2:
         __(cbnz imm1,1b)
         __(vpush1(arg_z))
         __(ret)
 
- 
+
 /* And this entry point when the argument registers haven't yet been  */
 /* vpushed (as is typically the case when required/&rest but no  */
 /* &optional/&key.)  */
@@ -1383,7 +1383,7 @@ _spentry(req_heap_rest_arg)
 1:
         __(vpop1(arg_y))
         __(Cons(arg_z,arg_y,arg_z))
-        __(subs imm1,imm1,#fixnum_one)
+        __(subs imm1,imm1,#node_size)
 2:
         __(bgt 1b)
         __(vpush1(arg_z))
@@ -1397,7 +1397,7 @@ _spentry(heap_cons_rest_arg)
 1:
         __(vpop1(arg_y))
         __(Cons(arg_z,arg_y,arg_z))
-        __(subs imm1,imm1,#fixnum_one)
+        __(subs imm1,imm1,#node_size)
 2:
         __(bgt 1b)
         __(vpush1(arg_z))
@@ -1558,7 +1558,7 @@ _spentry(stack_cons_rest_arg)
         __(add imm0,sp,#dnode_size)
         __(orr imm0,imm0,#(fulltag_cons << tag_shift))
 1:
-        __(subs temp0,temp0,#fixnumone)
+        __(subs temp0,temp0,#node_size)
         __(vpop1(arg_x))
         __(_rplacd(imm0,arg_z))
         __(_rplaca(imm0,arg_x))
@@ -1584,10 +1584,12 @@ _spentry(stack_cons_rest_arg)
 /* (function name, lfbits) elements of nfn to the "arglist".  */
 /* functions which take "inherited arguments" work consistently  */
 /* even in cases where no closure object is created.  */
-_spentry(call_closure)        
-        __(cmp nargs,#nargregs<<fixnumshift)
+_spentry(call_closure)
+        __(cmp nargs,#nargregs*node_size)
         __(vector_length(imm0,nfn,imm0))
-        __(sub imm0,imm0,#5<<fixnumshift) /* imm0 = inherited arg count  */
+        /* imm0 = raw element count.  Scale to nargs units (node_size). */
+        __(lsl imm0,imm0,#node_shift)
+        __(sub imm0,imm0,#5*node_size) /* imm0 = inherited arg count (scaled)  */
         __(ble local_label(no_insert))
         /* Some arguments have already been vpushed.  Vpush imm0's worth  */
         /* of NILs, copy those arguments that have already been vpushed from  */
@@ -1597,25 +1599,25 @@ _spentry(call_closure)
         __(mov arg_x,imm0)
         __(mov arg_y,rnil)
 local_label(push_nil_loop):
-        __(subs arg_x,arg_x,#fixnumone)
+        __(subs arg_x,arg_x,#node_size)
         __(vpush1(arg_y))
         __(bne local_label(push_nil_loop))
         __(add arg_y,vsp,imm0)
         __(mov imm1,#0)
-local_label(copy_already_loop): 
+local_label(copy_already_loop):
         __(ldr arg_x,[arg_y,imm1])
         __(str arg_x,[vsp,imm1])
-        __(add imm1,imm1,#fixnumone)
+        __(add imm1,imm1,#node_size)
         __(cmp imm1,nargs)
         __(bne local_label(copy_already_loop))
-        __(mov imm1,#misc_data_offset+(3<<fixnumshift))
+        __(mov imm1,#misc_data_offset+(3*node_size))
         __(add arg_y,vsp,nargs)
         __(add arg_y,arg_y,imm0)
 local_label(insert_loop):
-        __(subs imm0,imm0,#fixnumone)
+        __(subs imm0,imm0,#node_size)
         __(ldr fname,[nfn,imm1])
-        __(add imm1,imm1,#fixnumone)
-        __(add nargs,nargs,#fixnumone)
+        __(add imm1,imm1,#node_size)
+        __(add nargs,nargs,#node_size)
         __(push1(fname,arg_y))
         __(bne local_label(insert_loop))
         __(vpop_all_argregs())
@@ -1623,48 +1625,48 @@ local_label(insert_loop):
 local_label(no_insert):
 /* nargregs or fewer args were already vpushed.  */
 /* if exactly nargregs, vpush remaining inherited vars.  */
-        __(cmp nargs,#nargregs<<fixnumshift)
-        __(add imm1,imm0,#misc_data_offset+(3<<fixnumshift))
+        __(cmp nargs,#nargregs*node_size)
+        __(add imm1,imm0,#misc_data_offset+(3*node_size))
         __(bne local_label(set_regs))
 local_label(vpush_remaining):
-        __(mov imm1,#misc_data_offset+(3<<fixnumshift))
-local_label(vpush_remaining_loop):              
+        __(mov imm1,#misc_data_offset+(3*node_size))
+local_label(vpush_remaining_loop):
         __(ldr fname,[nfn,imm1])
-        __(add imm1,imm1,#fixnum_one)
+        __(add imm1,imm1,#node_size)
         __(vpush1(fname))
-        __(subs imm0,imm0,#fixnum_one)
-        __(add nargs,nargs,#fixnum_one)
+        __(subs imm0,imm0,#node_size)
+        __(add nargs,nargs,#node_size)
         __(bne  local_label(vpush_remaining_loop))
         __(b local_label(go))
 local_label(set_regs):
         /* if nargs was > 1 (and we know that it was < 3), it must have  */
         /* been 2.  Set arg_x, then vpush the remaining args.  */
-        __(cmp nargs,#fixnumone)
+        __(cmp nargs,#node_size)
         __(ble local_label(set_y_z))
 local_label(set_arg_x):
-        __(subs imm0,imm0,#fixnum_one)
-        __(sub imm1,imm1,#fixnum_one)
+        __(subs imm0,imm0,#node_size)
+        __(sub imm1,imm1,#node_size)
         __(ldr arg_x,[nfn,imm1])
-        __(add nargs,nargs,#fixnum_one)
+        __(add nargs,nargs,#node_size)
         __(bne local_label(vpush_remaining))
         __(b local_label(go))
         /* Maybe set arg_y or arg_z, preceding args  */
 local_label(set_y_z):
-        __(cmp nargs,#fixnumone)
+        __(cmp nargs,#node_size)
         __(bne local_label(set_arg_z))
         /* Set arg_y, maybe arg_x, preceding args  */
 local_label(set_arg_y):
-        __(subs imm0,imm0,fixnum_one)
-        __(sub imm1,imm1,#fixnum_one)
+        __(subs imm0,imm0,#node_size)
+        __(sub imm1,imm1,#node_size)
         __(ldr arg_y,[nfn,imm1])
-        __(add nargs,nargs,#fixnum_one)
+        __(add nargs,nargs,#node_size)
         __(bne local_label(set_arg_x))
         __(b local_label(go))
 local_label(set_arg_z):
-        __(subs imm0,imm0,#fixnum_one)
-        __(sub imm1,imm1,#fixnum_one)
+        __(subs imm0,imm0,#node_size)
+        __(sub imm1,imm1,#node_size)
         __(ldr arg_z,[nfn,imm1])
-        __(add nargs,nargs,#fixnum_one)
+        __(add nargs,nargs,#node_size)
         __(bne local_label(set_arg_y))
  
 local_label(go):
@@ -1691,7 +1693,7 @@ _spentry(spreadargz)
         __(cmp arg_z,rnil)
         __(extract_lisptag(imm1,arg_z))
         __(vpush1(arg_x))
-        __(add imm0,imm0,#fixnum_one)
+        __(add imm0,imm0,#node_size)
         __(bne 1b)
 2:
         __(add  nargs,nargs,imm0)
@@ -1709,13 +1711,13 @@ _spentry(spreadargz)
 /* Tail-recursively funcall temp0.  */
 /* Pretty much the same as the tcallsym* cases above.  */
 _spentry(tfuncallgen)
-        __(cmp nargs,#nargregs<<fixnumshift)
+        __(cmp nargs,#nargregs*node_size)
         __(ldr lr,[sp,#lisp_frame.savelr])
         __(ble 2f)
         __(ldr imm0,[sp,#lisp_frame.savevsp])
         __(discard_lisp_frame())
         /* can use temp0 as a temporary  */
-        __(sub imm1,nargs,#nargregs<<fixnumshift)
+        __(sub imm1,nargs,#nargregs*node_size)
         __(add imm1,imm1,vsp)
 1:
         __(ldr temp0,[imm1,#-node_size]!)
@@ -1737,7 +1739,7 @@ _spentry(tfuncallslide)
         __(ldr lr,[sp,#lisp_frame.savelr])
         __(discard_lisp_frame())
         /* can use temp0 as a temporary  */
-        __(sub imm1,nargs,#nargregs<<fixnumshift)
+        __(sub imm1,nargs,#nargregs*node_size)
         __(add imm1,imm1,vsp)
 1:
         __(ldr temp0,[imm1,#-node_size]!)
@@ -1757,14 +1759,14 @@ _spentry(jmpsym)
 /* to the base of the frame.  If not, we can just restore  */
 /* vsp, lr, fn from the saved lisp frame on the control stack.  */
 _spentry(tcallsymgen)
-        __(cmp nargs,#nargregs<<fixnumshift)
+        __(cmp nargs,#nargregs*node_size)
         __(ldr lr,[sp,#lisp_frame.savelr])
         __(ble 2f)
 
         __(ldr imm0,[sp,#lisp_frame.savevsp])
         __(discard_lisp_frame())
         /* can use nfn (= temp2) as a temporary  */
-        __(sub imm1,nargs,#nargregs<<fixnumshift)
+        __(sub imm1,nargs,#nargregs*node_size)
         __(add imm1,imm1,vsp)
 1:
         __(ldr temp2,[imm1,#-node_size]!)
@@ -1787,7 +1789,7 @@ _spentry(tcallsymslide)
         __(ldr imm0,[sp,#lisp_frame.savevsp])
         __(discard_lisp_frame())
         /* can use nfn (= temp2) as a temporary  */
-        __(sub imm1,nargs,#nargregs<<fixnumshift)
+        __(sub imm1,nargs,#nargregs*node_size)
         __(add imm1,imm1,vsp)
 1:
         __(ldr temp2,[imm1,#-node_size]!)
@@ -1801,7 +1803,7 @@ _spentry(tcallsymslide)
 /* Tail-recursively call the function in nfn.  */
 /* Pretty much the same as the tcallsym* cases above.  */
 _spentry(tcallnfngen)
-        __(cmp nargs,#nargregs<<fixnumshift)
+        __(cmp nargs,#nargregs*node_size)
         __(bgt _SPtcallnfnslide)
         __(restore_lisp_frame())
         __(jump_nfn())
@@ -1813,7 +1815,7 @@ _spentry(tcallnfnslide)
         __(ldr imm0,[sp,#lisp_frame.savevsp])
         __(discard_lisp_frame())
         /* Since we have a known function, can use fname as a temporary.  */
-        __(sub imm1,nargs,#nargregs<<fixnumshift)
+        __(sub imm1,nargs,#nargregs*node_size)
         __(add imm1,imm1,vsp)
 1:
         __(ldr fname,[imm1,#-node_size]!)
@@ -1978,7 +1980,7 @@ _spentry(makestacklist)
 /* node header subtag.) Nargs set to count of things vpushed.  */
 
 _spentry(stkgvector)
-        __(sub imm0,nargs,#fixnumone)
+        __(sub imm0,nargs,#node_size)
         __(ldr temp0,[vsp,imm0])
         __(dnode_align(temp1,imm0,node_size))
         __(mov imm1,imm0)
@@ -2000,9 +2002,9 @@ _spentry(stkgvector)
 1:
         __(vpop1(temp0))
         __(push1(temp0,imm0))
-2:      __(subs nargs,nargs,#fixnumone)
+2:      __(subs nargs,nargs,#node_size)
         __(bne 1b)
-        __(add vsp,vsp,#fixnumone)
+        __(add vsp,vsp,#node_size)
         __(ret)
 3:      /* Have to heap-cons. */
         __(stp arg_x,temp2,[sp,#-dnode_size]!)
@@ -2016,11 +2018,11 @@ _spentry(stkgvector)
         __(add imm0,nargs,#misc_data_offset)
         __(b 5f)
 4:      __(vpop1(temp0))
-        __(subs imm0,imm0,#fixnumone)
+        __(subs imm0,imm0,#node_size)
         __(str temp0,[arg_z,imm0])
-5:      __(subs nargs,nargs,#fixnumone)
+5:      __(subs nargs,nargs,#node_size)
         __(bne 4b)
-        __(add vsp,vsp,#fixnumone)
+        __(add vsp,vsp,#node_size)
         __(ret)
         
 /* Allocate a "fulltag_misc" object.  On entry, arg_y contains the element  */
@@ -2106,7 +2108,7 @@ _spentry(recover_values)
 2:      __(subs imm0,imm0,#fixnumone)        
         __(ldr arg_z,[temp1,#-node_size]!)
         __(vpush1(arg_z))
-        __(add nargs,nargs,#fixnumone)
+        __(add nargs,nargs,#node_size)
 3:      __(bne 2b)
         __(ldr temp0,[temp0,#mvcall_younger_value_set])
         __(cmp temp0,#0)
@@ -2165,8 +2167,8 @@ _spentry(misc_set)
 /* ppc2-invoke-fn assumes that temp1 is preserved here.  */
 _spentry(spread_lexprz)
         __(ldr imm0,[arg_z,#0])
-        __(add imm1,arg_z,imm0)
-        __(add nargs,nargs,imm0)
+        __(add imm1,arg_z,imm0,lsl #node_shift)
+        __(add nargs,nargs,imm0,lsl #node_shift)
         __(add imm1,imm1,#node_size)
         __(cmp imm0,#3<<fixnumshift)
         __(bge 9f)
@@ -2197,7 +2199,7 @@ _spentry(spread_lexprz)
 /* lexpr count is two: set arg_y, arg_z from the  */
 /* lexpr, maybe vpop arg_x  */
 2:
-        __(cmp nargs,#2<<fixnumshift)
+        __(cmp nargs,#2*node_size)
         __(ldr arg_y,[imm1,#-node_size*1])
         __(ldr arg_z,[imm1,#-node_size*2])
         __(beq 9f)  /* return if (new) nargs = 2  */
@@ -2207,7 +2209,7 @@ _spentry(spread_lexprz)
 /* lexpr count is one: set arg_z from the lexpr,  */
 /* maybe vpop arg_y, arg_x  */
 1: 
-        __(cmp nargs,#2<<fixnumshift)
+        __(cmp nargs,#2*node_size)
         __(ldr arg_z,[imm1,#-node_size])
         __(blt 9f)  /* return if (new) nargs < 2  */
         __(vpop1(arg_y))
@@ -2236,7 +2238,7 @@ _spentry(mvslide)
         __(add imm0,vsp,nargs)
         __(beq 2f)
 1:
-        __(subs temp1,temp1,#1<<fixnumshift)
+        __(subs temp1,temp1,#node_size)
         __(ldr temp0,[imm0,#-node_size]!)
         __(str temp0,[imm1,#-node_size]!)
         __(bne 1b)
@@ -2827,11 +2829,11 @@ _spentry(keyword_bind)
         __(bpl 0f)
         __(mov key_value_count,#0)
 0:
-        __(tst key_value_count,#fixnumone)
+        __(tst key_value_count,#node_size)
         __(bne local_label(odd_keywords))
-        __(mov imm1,key_value_count)
+        __(lsr imm1,key_value_count,#node_shift)
         __(movk imm1,#(subtag_u64_vector << 8),lsl #48)
-        __(lsl imm0,key_value_count,#word_shift)
+        __(mov imm0,key_value_count)
         __(add imm0,imm0,#dnode_size) /* we know count is even */
         __(stack_allocate_zeroed_ivector(imm1,imm0))
         __(mov imm0,#subtag_simple_vector)
@@ -2844,10 +2846,10 @@ _spentry(keyword_bind)
         __(b 1f)
 0:      __(ldr arg_x,[imm0,#-node_size]!)
         __(str arg_x,[imm1],#node_size)
-1:      __(subs temp2,temp2,#fixnumone)
+1:      __(subs temp2,temp2,#node_size)
         __(bge 0b)
         /* Discard the key/value pairs from the vstack. */
-        __(add vsp,vsp,key_value_count,lsl #word_shift)
+        __(add vsp,vsp,key_value_count)
         __(ldr temp2,[fn,#misc_data_offset+(2*node_size)])
         __(getvheader(imm0,temp2))
         __(header_length(imm0,imm0))
@@ -2934,7 +2936,7 @@ local_label(defined_keyword_found):
 local_label(nextkeyvalpairnext):
         __(add imm2,imm2,#(2*node_size))
 local_label(nextvalpairtest):
-        __(cmp imm2,key_value_count,lsl #word_shift)
+        __(cmp imm2,key_value_count)
         __(bne local_label(nextvalpairloop))
         __(ldp imm2,temp1,[vsp],#dnode_size)
         /* If unknown keywords and that's not allowed, signal error.
@@ -2953,11 +2955,10 @@ local_label(nextvalpairtest):
         __(b 2f)
 1:      __(ldr arg_x,[temp2],#node_size)
         __(vpush1(arg_x))
-        __(add imm0,imm0,#fixnumone)
+        __(add imm0,imm0,#node_size)
 2:      __(cmp imm0,key_value_count)
         __(bne 1b)
 local_label(discard_stack_vector):
-        __(lsl key_value_count,key_value_count,#word_shift)
         __(add key_value_count,key_value_count,#dnode_size)
         __(add sp,sp,key_value_count)
         __(ret)               /* it's finally over ! */
@@ -2969,7 +2970,7 @@ local_label(badkeys):   /* Disturbingly similar to the &rest case */
         __(b 1f)
 0:      __(ldr arg_x,[temp2],#node_size)
         __(vpush1(arg_x))
-        __(add nargs,nargs,#fixnumone)
+        __(add nargs,nargs,#node_size)
 1:      __(cmp nargs,key_value_count)
         __(bne 0b)
         /* Lose the stack vector */
@@ -3034,32 +3035,23 @@ _spentry(eabi_ff_callhf)
         __(add imm2,sp,#8<<3)
         __(stp imm0,imm1,[imm2])
         __(mov sp,imm2)
+/* ARM64 ff-call: Save Lisp state on the value stack (not a C-stack lisp
+   frame), load C args from the c-frame without advancing sp, set sp to
+   prevsp (clean stack), then call C.  This avoids the lisp-frame-inside-
+   c-frame overlap that corrupted savelr when the c-frame was small.  */
 _spentry(eabi_ff_call)
+        /* Save Lisp state on vsp: last_lisp_frame, arg_x, temp0, temp1,
+           temp2(=nfn), lr — 6 values. */
         __(ldr arg_y,[rcontext,#tcr.last_lisp_frame])
-        __(sub vsp,vsp,#5*node_size)
+        __(sub vsp,vsp,#6*node_size)
         __(stp arg_y,arg_x,[vsp])
         __(stp temp0,temp1,[vsp,#2*node_size])
-        __(str temp2,[vsp,#4*node_size])
+        __(stp temp2,lr,[vsp,#4*node_size])
         __(str vsp,[rcontext,#tcr.save_vsp])
-/* There's a u64 vector on top of the stack ; its first data word points
-   to the previous stack object.  The words at the bottom of the vector
-   are reserved for a lisp frame, which we construct carefully ... */
-        __(load_marker(imm0,tag_lisp_frame))
-        __(mov imm1,#0)
-        __(ldr temp0,[sp,#node_size])
-        __(sub temp0,temp0,#lisp_frame.size)
-        __(str imm0,[temp0])
-        __(ldr imm0,[sp,#0])
-        __(str imm1,[temp0,#lisp_frame.savelr])
-        __(sub imm0,imm0,#(lisp_frame.size/node_size))
-        __(str vsp,[temp0,#lisp_frame.savevsp])
-        __(str imm0,[sp,#0])
-        __(str lr,[temp0,#lisp_frame.savelr])
         __(str allocptr,[rcontext,#tcr.save_allocptr])
+        __(mov temp0,sp)
         __(str temp0,[rcontext,#tcr.last_lisp_frame])
-        /* Save rcontext in x29 (frame pointer, callee-saved in AAPCS64).
-           Cannot use temp0 (x12) since it is caller-saved and will be
-           clobbered by the C function. */
+        /* Save rcontext in x29 (callee-saved in AAPCS64). */
         __(mov x29,rcontext)
         /* Unbox the function pointer from arg_z */
         __(test_fixnum(imm2,arg_z))
@@ -3071,35 +3063,41 @@ _spentry(eabi_ff_call)
         __(mov imm0,#TCR_STATE_FOREIGN)
         __(str imm0,[rcontext,#tcr.valence])
         __(mov x16,imm1)
-        __(add sp,sp,#dnode_size)
-        /* Load integer args from stack (AAPCS64: x0-x7) */
-        __(ldp imm0,imm1,[sp])
-        __(ldp imm2,imm3,[sp,#2*node_size])
-        __(ldp imm4,imm5,[sp,#4*node_size])
-        __(ldp rnil,rt,[sp,#6*node_size])
-        __(add sp,sp,#8*node_size)
+        /* Load integer args from c-frame data area using temp3 as pointer.
+           Don't advance sp — we'll set it to prevsp for a clean C stack. */
+        __(add temp3,sp,#dnode_size)
+        __(ldp imm0,imm1,[temp3])
+        __(ldp imm2,imm3,[temp3,#2*node_size])
+        __(ldp imm4,imm5,[temp3,#4*node_size])
+        __(ldp rnil,rt,[temp3,#6*node_size])
+        /* Set sp to prevsp (original sp before c-frame allocation).
+           The C function gets a clean, properly-aligned stack. */
+        __(ldr temp3,[sp,#node_size])
+        __(mov sp,temp3)
         __(blr x16)
-        /* Back from foreign call.  Clear lisp registers. */
+        /* Back from foreign call.  x0 holds the C return value.
+           Restore lisp state from vsp (not from C stack). */
         __(fmov d31,xzr)
         __(mov temp1,#0)
         __(mov temp2,#0)
         __(mov arg_z,#0)
         __(mov arg_y,#0)
         __(mov arg_x,#0)
+        __(load_nil(rnil))
+        __(load_t(rt,rnil))
         __(load_voidptr(allocptr))
         __(mov rcontext,x29)
-        __(ldr imm2,[rcontext,#tcr.last_lisp_frame])
-        __(mov sp,imm2)
         __(mov imm2,#0)
         __(str imm2,[rcontext,#tcr.valence])
         __(ldr allocptr,[rcontext,#tcr.save_allocptr])
-        __(restore_lisp_frame(temp0))
+        __(ldr vsp,[rcontext,#tcr.save_vsp])
+        /* Restore saved values from vsp */
         __(ldp arg_y,arg_x,[vsp])
         __(ldp temp0,temp1,[vsp,#2*node_size])
-        __(ldr temp2,[vsp,#4*node_size])
-        __(add vsp,vsp,#5*node_size)
+        __(ldp temp2,lr,[vsp,#4*node_size])
+        __(add vsp,vsp,#6*node_size)
         __(str arg_y,[rcontext,#tcr.last_lisp_frame])
-        __(check_pending_interrupt(temp2))
+        __(check_pending_interrupt(imm2))
         __(ret)
 
 /* Stub: makes32 — box a signed 32-bit value.
@@ -3713,7 +3711,7 @@ local_label(nthrownv_tpushloop):
         __(ldr temp0,[temp1,#-node_size]!)
         __(push1(temp0,temp2))
 local_label(nthrownv_tpushtest):        
-        __(subs nargs,nargs,#fixnumone)
+        __(subs nargs,nargs,#node_size)
         __(bge local_label(nthrownv_tpushloop))
         __(mov imm1,#0)
         /* This instruction sequence needs support from pc_luser_xp() */

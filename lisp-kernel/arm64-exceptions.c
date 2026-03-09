@@ -1124,6 +1124,11 @@ handle_uuo(ExceptionInformation *xp, siginfo_t *info, opcode the_uuo)
       unsigned nullary_info = HLT_NULLARY_INFO(the_uuo);
 
       switch (nullary_info) {
+      case 1:  /* wrong nargs */
+        /* The preceding CMP set nargs; invoke Lisp error handler. */
+        handled = handle_error(xp, 0, the_uuo, &bump);
+        break;
+
       case 3:  /* debug trap */
         adjust_exception_pc(xp, bump);
         bump = 0;
@@ -2415,13 +2420,15 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
     static int dbg_exc_count = 0;
     if (dbg_exc_count < 10) {
       dbg_exc_count++;
-      fprintf(dbgout, "MACH[%d]: exc=%d code0=%lld pc=0x%lx",
-              dbg_exc_count, exception, (long long)code0, (unsigned long)ts->__pc);
+      fprintf(dbgout, "MACH[%d]: exc=%d code0=%lld pc=0x%lx lr=0x%lx",
+              dbg_exc_count, exception, (long long)code0,
+              (unsigned long)ts->__pc, (unsigned long)ts->__lr);
       if (exception == EXC_BAD_ACCESS) {
-        fprintf(dbgout, " addr=0x%llx x0=0x%lx x9=0x%lx x10=0x%lx x15=0x%lx",
+        fprintf(dbgout, " addr=0x%llx x0=0x%lx x9=0x%lx x10=0x%lx x15=0x%lx sp=0x%lx",
                 (long long)code[1],
                 (unsigned long)ts->__x[0], (unsigned long)ts->__x[9],
-                (unsigned long)ts->__x[10], (unsigned long)ts->__x[15]);
+                (unsigned long)ts->__x[10], (unsigned long)ts->__x[15],
+                (unsigned long)ts->__sp);
         /* Dump function object slots when we crash with KERN_INVALID_ADDRESS */
         if (code0 == KERN_INVALID_ADDRESS) {
           natural nfn_tagged = ts->__x[10];

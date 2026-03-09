@@ -243,7 +243,7 @@ define(`unlink',`
 
 	
 define(`set_nargs',`
-	__(mov nargs,#($1))
+	__(mov nargs,#($1*node_size))
 	')
 	
 
@@ -303,21 +303,10 @@ define(`ref_nrs_symbol',`
 
 
 	/* vpop argregs - nargs is known to be non-zero */
+	/* nargs convention: nargs = n * node_size (e.g. 1 arg = 8, 2 args = 16) */
 define(`vpop_argregs_nz',`
         new_macro_labels()
-        __(cmp nargs,#2)
-        __(vpop1(arg_z))
-        __(blo macro_label(done))
-        __(vpop1(arg_y))
-        __(beq macro_label(done))
-        __(vpop1(arg_x))
-macro_label(done):              
-        ')
-
-define(`vpop_argregs',`
-        new_macro_labels()
-        __(cbz nargs,macro_label(done))
-        __(cmp nargs,#2)
+        __(cmp nargs,#2*node_size)
         __(vpop1(arg_z))
         __(blo macro_label(done))
         __(vpop1(arg_y))
@@ -325,23 +314,35 @@ define(`vpop_argregs',`
         __(vpop1(arg_x))
 macro_label(done):
         ')
-        
+
+define(`vpop_argregs',`
+        new_macro_labels()
+        __(cbz nargs,macro_label(done))
+        __(cmp nargs,#2*node_size)
+        __(vpop1(arg_z))
+        __(blo macro_label(done))
+        __(vpop1(arg_y))
+        __(beq macro_label(done))
+        __(vpop1(arg_x))
+macro_label(done):
+        ')
+
 define(`vpush_argregs_nz',`
         new_macro_labels()
-        __(cmp nargs,#2)
+        __(cmp nargs,#2*node_size)
         __(bls macro_label(notx))
         __(vpush1(arg_x))
-macro_label(notx):      
+macro_label(notx):
         __(bne macro_label(justz))
         __(vpush1(arg_y))
 macro_label(justz):
         __(vpush1(arg_z))
         ')
-        
+
 define(`vpush_argregs',`
 	new_macro_labels()
         __(cbz nargs,macro_label(done))
-        __(cmp nargs,#2)
+        __(cmp nargs,#2*node_size)
         __(bls macro_label(notx))
         __(vpush1(arg_x))
 macro_label(notx):

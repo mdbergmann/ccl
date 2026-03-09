@@ -687,7 +687,11 @@ new_semaphore(int count)
 #ifdef USE_MACH_SEMAPHORES
   kern_return_t kret;
   semaphore_t s = (semaphore_t)0;
+  fprintf(dbgout, "DBG new_semaphore: count=%d task=0x%x sp=%p\n", count, mach_task_self(), &s);
+  fflush(dbgout);
   kret = semaphore_create(mach_task_self(),&s, SYNC_POLICY_FIFO, count);
+  fprintf(dbgout, "DBG new_semaphore: kret=%d s=0x%x\n", kret, s);
+  fflush(dbgout);
   if (kret != KERN_SUCCESS) {
     fatal_oserr("Can't create Mach semaphore.",(OSErr)kret);
   }
