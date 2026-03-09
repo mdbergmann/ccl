@@ -77,8 +77,11 @@ define(`unbox_fixnum',`
 define(`trap_unless_fulltag_equal',`
         new_macro_labels()
         __(extract_fulltag($3,$1))
+ifelse($2,`fulltag_misc',`dnl
+        /* fulltag_misc: TBI tag byte is subtag^0xC0, so bit 6 identifies all misc ptrs */
+        __(tbnz $3,`#'6,macro_label(ok))',`dnl
         __(cmp $3,#$2)
-        __(beq macro_label(ok))
+        __(beq macro_label(ok))')
         __(uuo_error_reg_not_fulltag($1,$2))
 macro_label(ok):
         ')

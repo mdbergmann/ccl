@@ -1982,8 +1982,10 @@
   :no-trap
   (str Rheader (:@ allocptr (:$ 0)))
   (add dest allocptr (:$ arm64::misc-bias))
-  ;; Derive reference tag: XOR subtag with #xC0, shift to top byte, OR in
-  (eor tag Rheader (:$ #xC0))
+  ;; Derive TBI reference tag from header subtag (in high byte).
+  ;; pointer_tag = header_subtag XOR 0xC0.  Extract high byte, XOR, shift back.
+  (lsr tag Rheader (:$ arm64::tag-shift))
+  (eor tag tag (:$ #xC0))
   (lsl tag tag (:$ arm64::tag-shift))
   (orr dest dest tag))
 
@@ -2013,7 +2015,9 @@
   :no-trap
   (str Rheader (:@ allocptr (:$ 0)))
   (add dest allocptr (:$ arm64::misc-bias))
-  (eor tag Rheader (:$ #xC0))
+  ;; Derive TBI reference tag from header subtag (in high byte).
+  (lsr tag Rheader (:$ arm64::tag-shift))
+  (eor tag tag (:$ #xC0))
   (lsl tag tag (:$ arm64::tag-shift))
   (orr dest dest tag)
   ;; Initialize gvector elements from vstack (last pushed = lowest index)
