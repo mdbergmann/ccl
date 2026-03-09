@@ -3020,16 +3020,18 @@ _spentry(sdiv32)
 _endsubp(sdiv32)
 
 _spentry(eabi_ff_callhf)
-        /* On ARM64, float args are already in d0-d7 per AAPCS64. */
-        /* Load d0-d7 from stack frame if needed. */
-        __(add imm0,sp,#node_size)
+        /* Load d0-d7 from the c-frame float area (elements 0-7).
+           Data starts at sp + dnode_size (past header + prevsp). */
+        __(add imm0,sp,#dnode_size)
         __(ldp d0,d1,[imm0])
         __(ldp d2,d3,[imm0,#16])
         __(ldp d4,d5,[imm0,#32])
         __(ldp d6,d7,[imm0,#48])
+        /* Strip 8 float slots (64 bytes) from the c-frame.
+           Create new header+prevsp at sp+64, then set SP there. */
         __(ldp imm0,imm1,[sp])
-        __(sub imm0,imm0,#16)
-        __(add imm2,sp,#16<<3)
+        __(sub imm0,imm0,#8)
+        __(add imm2,sp,#8<<3)
         __(stp imm0,imm1,[imm2])
         __(mov sp,imm2)
 _spentry(eabi_ff_call)
@@ -3055,7 +3057,10 @@ _spentry(eabi_ff_call)
         __(str lr,[temp0,#lisp_frame.savelr])
         __(str allocptr,[rcontext,#tcr.save_allocptr])
         __(str temp0,[rcontext,#tcr.last_lisp_frame])
-        __(mov temp0,rcontext)
+        /* Save rcontext in x29 (frame pointer, callee-saved in AAPCS64).
+           Cannot use temp0 (x12) since it is caller-saved and will be
+           clobbered by the C function. */
+        __(mov x29,rcontext)
         /* Unbox the function pointer from arg_z */
         __(test_fixnum(imm2,arg_z))
         __(cbnz imm2,0f)
@@ -3065,7 +3070,7 @@ _spentry(eabi_ff_call)
 1:
         __(mov imm0,#TCR_STATE_FOREIGN)
         __(str imm0,[rcontext,#tcr.valence])
-        __(mov imm4,imm1)
+        __(mov x16,imm1)
         __(add sp,sp,#dnode_size)
         /* Load integer args from stack (AAPCS64: x0-x7) */
         __(ldp imm0,imm1,[sp])
@@ -3073,7 +3078,7 @@ _spentry(eabi_ff_call)
         __(ldp imm4,imm5,[sp,#4*node_size])
         __(ldp rnil,rt,[sp,#6*node_size])
         __(add sp,sp,#8*node_size)
-        __(blr imm4)
+        __(blr x16)
         /* Back from foreign call.  Clear lisp registers. */
         __(fmov d31,xzr)
         __(mov temp1,#0)
@@ -3082,7 +3087,7 @@ _spentry(eabi_ff_call)
         __(mov arg_y,#0)
         __(mov arg_x,#0)
         __(load_voidptr(allocptr))
-        __(mov rcontext,temp0)
+        __(mov rcontext,x29)
         __(ldr imm2,[rcontext,#tcr.last_lisp_frame])
         __(mov sp,imm2)
         __(mov imm2,#0)
@@ -3095,10 +3100,27 @@ _spentry(eabi_ff_call)
         __(add vsp,vsp,#5*node_size)
         __(str arg_y,[rcontext,#tcr.last_lisp_frame])
         __(check_pending_interrupt(temp2))
-        __(ret)                
-        
+        __(ret)
 
-        
+/* Stub: makes32 — box a signed 32-bit value.
+   On ARM64 with fixnumshift=0, 32-bit values are fixnums.
+   imm0 = unboxed s32 → arg_z = fixnum (identity on ARM64). */
+_spentry(makes32)
+        __(sxtw arg_z,imm0)
+        __(ret)
+
+/* Stub: makeu32 — box an unsigned 32-bit value.
+   On ARM64 with fixnumshift=0, 32-bit values are fixnums. */
+_spentry(makeu32)
+        __(uxtw arg_z,imm0)
+        __(ret)
+
+/* Stub: debind — destructuring-bind.
+   TODO: full implementation needed for destructuring-bind. */
+_spentry(debind)
+        __(hlt #0xDBDB)
+
+
 _spentry(eabi_callback)
         /* Save integer arg regs (AAPCS64: x0-x7) */
         __(stp imm0,imm1,[sp,#-8*node_size]!)
@@ -3993,11 +4015,11 @@ local_label(start):
         .quad _SPbind
         .quad _SPconslist
         .quad _SPconslist_star
-        .quad _SPmakes64
-        .quad _SPmakeu64
+        .quad _SPmakes32
+        .quad _SPmakeu32
         .quad _SPfix_overflow
-        .quad _SPmakeu128
-        .quad _SPmakes128
+        .quad _SPmakeu64
+        .quad _SPmakes64
         .quad _SPmvpass
         .quad _SPvalues
         .quad _SPnvalret
@@ -4089,6 +4111,7 @@ local_label(start):
         .quad _SPudiv32
         .quad _SPsdiv32
         .quad _SPeabi_ff_call
+        .quad _SPdebind
         .quad _SPeabi_callback
         .quad _SPeabi_ff_callhf
 local_label(end):       

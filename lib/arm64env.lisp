@@ -42,10 +42,15 @@
 
 
 
+;;; NOTE: temp2 = nfn = x10 is NOT included here.
+;;; On ARM64, fn and nfn are the same register (x10).  Unlike ARM32 where
+;;; fn=r11 (callee-saved) is separate from nfn=r9=temp2, ARM64 uses x10
+;;; for both ref-constant (function immediates) and nfn (current function).
+;;; If the allocator assigns x10 for temp use, it clobbers nfn, and
+;;; subsequent ref-constant vinsns will load from address 0 → crash.
 (defconstant arm64-temp-node-regs
   (make-mask arm64::temp0
              arm64::temp1
-             arm64::temp2
              arm64::temp3
              arm64::arg_x
              arm64::arg_y

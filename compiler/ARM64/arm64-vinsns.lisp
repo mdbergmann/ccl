@@ -2037,17 +2037,21 @@
 ;;; Element count = (n-c-args + 2) & ~1 (even, for dnode alignment).
 ;;; Frame size = 8 + element-count * 8.
 
+;;; Apple Silicon requires SP to be 16-byte aligned at all times.
+;;; Total frame = (1 + n-elements) * 8.  For 16-byte alignment,
+;;; (1 + n-elements) must be even, so n-elements must be ODD.
+;;; Also: MOV from SP must use ADD (register 31 = XZR in ORR context).
 (define-arm64-vinsn (alloc-aapcs64-c-frame :predicatable)
     (()
      ((n-c-args :u16const))
      ((header :u64)
       (prevsp :imm)))
-  (movz header (:$ (:apply logandc2 (:apply + 2 n-c-args) 1)))
+  (movz header (:$ (:apply logior (:apply logandc2 (:apply + 2 n-c-args) 1) 1)))
   (movk header (:$ (:apply ash arm64::subtag-u64-vector 8)) (:lsl 48))
-  (mov prevsp sp)
+  (add prevsp sp (:$ 0))
   (sub sp sp (:$ (:apply + 8
                          (:apply ash
-                                 (:apply logandc2 (:apply + 2 n-c-args) 1)
+                                 (:apply logior (:apply logandc2 (:apply + 2 n-c-args) 1) 1)
                                  3))))
   (str header (:@ sp (:$ 0)))
   (str prevsp (:@ sp (:$ 8))))
@@ -2062,14 +2066,15 @@
      ((header :u64)
       (size :imm)
       (prevsp :imm)))
-  ;; element-count = (n-c-args + 2) & ~1
+  ;; element-count = ((n-c-args + 2) & ~1) | 1  → always odd for 16-byte alignment
   (add size n-c-args (:$ 2))
   (bic size size (:$ 1))
-  (mov prevsp sp)
+  (orr size size (:$ 1))
+  (add prevsp sp (:$ 0))
   ;; header = (subtag-u64-vector << 56) | element-count
   (mov header size)
   (movk header (:$ (:apply ash arm64::subtag-u64-vector 8)) (:lsl 48))
-  ;; frame-size = (element-count + 1) * 8
+  ;; frame-size = (element-count + 1) * 8  → always 16-byte aligned
   (add size size (:$ 1))
   (lsl size size (:$ arm64::word-shift))
   ;; sp -= frame-size
@@ -2080,13 +2085,14 @@
 
 
 ;;; Discard C frame by restoring saved SP from offset 8.
+;;; Must use ADD to write SP (register 31 = XZR in ORR context).
 
 (define-arm64-vinsn (discard-c-frame :pop :discard :predicatable)
     (()
      ()
      ((temp :imm)))
   (ldr temp (:@ sp (:$ 8)))
-  (mov sp temp))
+  (add sp temp (:$ 0)))
 
 
 ;;; ======================================================================
@@ -3445,7 +3451,7 @@
 (define-arm64-vinsn (%current-frame-ptr :predicatable)
     (((dest :imm))
      ())
-  (mov dest sp))
+  (add dest sp (:$ 0)))
 
 (define-arm64-vinsn (%current-tcr :predicatable)
     (((dest :imm))
@@ -4462,20 +4468,22 @@
 
 ;;; --- FFI ---
 
+;;; Store a C argument at word index OFFSET in the c-frame.
+;;; Byte offset = dnode-size + offset * node-size (skip header+prevsp, then index).
 (define-arm64-vinsn (set-aapcs64-c-arg :predicatable) (()
                                                         ((val :u64)
                                                          (offset :u16const)))
-  (str val (:@ sp (:$ offset))))
+  (str val (:@ sp (:$ (:apply + arm64::dnode-size (:apply ash offset arm64::word-shift))))))
 
 (define-arm64-vinsn (set-double-aapcs64-c-arg :predicatable) (()
                                                                 ((val :double-float)
                                                                  (offset :u16const)))
-  (str val (:@ sp (:$ offset))))
+  (str val (:@ sp (:$ (:apply + arm64::dnode-size (:apply ash offset arm64::word-shift))))))
 
 (define-arm64-vinsn (set-single-aapcs64-c-arg :predicatable) (()
                                                                 ((val :single-float)
                                                                  (offset :u16const)))
-  (str val (:@ sp (:$ offset))))
+  (str val (:@ sp (:$ (:apply + arm64::dnode-size (:apply ash offset arm64::word-shift))))))
 
 ;;; --- Misc / forms ---
 

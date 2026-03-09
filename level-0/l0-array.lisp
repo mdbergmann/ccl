@@ -566,6 +566,10 @@ minimum number of elements to add if it must be extended."
       (setf (%svref vector target::vectorH.logsize-cell) (the fixnum (1+ fill))))
     fill))
 
+;;; Bootstrap version for level-0; level-1 redefines with multi-dimensional support.
+(defun %make-simple-array (subtype dims)
+  (%alloc-misc (if (listp dims) (apply #'* dims) dims) subtype))
+
 ;;; Could avoid potential memoization somehow
 (defun vector (&lexpr vals)
   "Construct a SIMPLE-VECTOR from the given objects."
