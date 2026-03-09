@@ -43,6 +43,7 @@
 
 (defparameter *xload-target-nil* nil)
 (defparameter *xload-target-fixnumshift* nil)
+(defparameter *xload-target-word-shift* nil)
 (defparameter *xload-target-fulltag-cons* nil)
 (defparameter *xload-target-fulltag-misc* nil)
 (defparameter *xload-target-misc-data-offset* nil)
@@ -80,6 +81,7 @@
 (defparameter *xload-readonly-space-size* (ash 1 18))
 (defparameter *xload-dynamic-space-address* nil)
 (defparameter *xload-dynamic-space-size* (ash 1 18))
+(defparameter *xload-udf-address* nil)
 (defparameter *xload-managed-static-space-address* nil)
 (defparameter *xload-managed-static-space-size* 0)
 (defparameter *xload-static-cons-space-address* nil)
@@ -129,6 +131,8 @@
           (arch::target-misc-subtag-offset arch))
     (setq *xload-target-fixnumshift*
           (arch::target-fixnum-shift arch))
+    (setq *xload-target-word-shift*
+          (arch::target-word-shift arch))
     (setq *xload-target-fulltag-cons*
           (arch::target-cons-tag arch))
     (setq *xload-target-car-offset*
@@ -390,7 +394,8 @@
 
 
 (defun  %xload-unbound-function% ()
-  (xload-apply-tag *xload-dynamic-space-address* *xload-target-fulltag-misc*))
+  (or *xload-udf-address*
+      (xload-apply-tag *xload-dynamic-space-address* *xload-target-fulltag-misc*)))
 
 (defparameter *xload-dynamic-space* nil)
 (defparameter *xload-readonly-space* nil)
@@ -1075,6 +1080,7 @@
 
 (defun xfasload (output-file &rest pathnames)
   (setq *xload-cached-symbol-header* nil)
+  (setq *xload-udf-address* nil)
   (let* ((*xload-symbols* (make-hash-table :test #'eq))
          (*xload-symbol-addresses* (make-hash-table :test #'eql))
          (*xload-spaces* nil)
@@ -1112,6 +1118,20 @@
                   *xload-target-backend*)))
           (locally (declare (ftype (function (t) t) xload-arm-set-entrypoint))
             (xload-arm-set-entrypoint udf-object))))
+       (:arm64
+        ;; On ARM64: make a 2-element function: slot 0=entrypoint, slot 1=code-vector.
+        ;; Must be a function (not simple-vector) so jump_nfn works correctly.
+        (let* ((udf-object (xload-make-gvector :function 2))
+               (code-vector (xload-save-code-vector
+                             (backend-xload-info-udf-code
+                              *xload-target-backend*))))
+          (setf (xload-%svref udf-object 1) code-vector)
+          ;; Entrypoint = code-vector address with TBI tag stripped
+          (setf (xload-%svref udf-object 0)
+                (logand code-vector #x00FFFFFFFFFFFFFF))
+          ;; Re-tag with tag_function and store for %xload-unbound-function%
+          (setq *xload-udf-address*
+                (xload-apply-tag udf-object *xload-target-fulltag-for-functions*))))
        (otherwise
         ;; The undefined-function object is a 1-element simple-vector (not
         ;; a function vector).  The code-vector in its 0th element should
@@ -1346,7 +1366,7 @@
   (setq symbol-address
         (xload-apply-tag symbol-address *xload-target-fulltag-misc*))
   (setf (xload-%svref symbol-address target::symbol.binding-index-cell)
-        (ash idx *xload-target-fixnumshift*))
+        (ash idx *xload-target-word-shift*))
   (setf (gethash symbol-address *xload-special-binding-indices*) idx))
 
 (defun xload-ensure-binding-index (symbol-address)
@@ -1987,6 +2007,7 @@
             (*xload-target-misc-header-offset* *xload-target-misc-header-offset*)
             (*xload-target-misc-subtag-offset* *xload-target-misc-subtag-offset*)
             (*xload-target-fixnumshift* *xload-target-fixnumshift*)
+            (*xload-target-word-shift* *xload-target-word-shift*)
             (*xload-target-fulltag-cons* *xload-target-fulltag-cons*)
             (*xload-target-car-offset* *xload-target-car-offset*)
             (*xload-target-cdr-offset* *xload-target-cdr-offset*)

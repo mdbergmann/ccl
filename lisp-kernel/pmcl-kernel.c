@@ -2203,64 +2203,27 @@ main
     LispObj *end = (LispObj *)active_dynamic_area->active;
     int fixed = 0;
 
-    fprintf(dbgout, "Entrypoint fix: scanning dynamic area %p - %p (%ld bytes)\n",
-            start, end, (long)((char*)end - (char*)start));
-    {
-      int ivecs = 0, gvecs = 0, conses = 0, funcs = 0;
-      /* Show first few words for debugging */
-      if (start < end) {
-        fprintf(dbgout, "  first words: %016lx %016lx %016lx %016lx\n",
-                start[0], start[1], start < end-2 ? start[2] : 0, start < end-3 ? start[3] : 0);
-        fprintf(dbgout, "  subtag_function=0x%lx, function_header=0x%lx\n",
-                (long)subtag_function, (long)function_header);
-      }
-      while (start < end) {
-        LispObj w0 = *start;
-        natural subtag = header_subtag(w0);
-        int total = ivecs + gvecs + conses;
+    while (start < end) {
+      LispObj w0 = *start;
+      natural subtag = header_subtag(w0);
 
-        if (total < 15) {
-          fprintf(dbgout, "  [%d] @%p: w0=%016lx subtag=0x%lx imm=%d node=%d",
-                  total, start, w0, subtag,
-                  immheader_tag_p(subtag), nodeheader_tag_p(subtag));
+      if (immheader_tag_p(subtag)) {
+        start = (LispObj *)skip_over_ivector((natural)start, w0);
+      } else if (nodeheader_tag_p(subtag)) {
+        natural count = header_element_count(w0);
+        if (subtag == subtag_function && count >= 2) {
+          /* Copy code-vector ref (slot 2) to entrypoint (slot 1),
+             stripping TBI tag since br/blr don't honor TBI. */
+          start[1] = untag(start[2]);
+          fixed++;
         }
-
-        if (immheader_tag_p(subtag)) {
-          natural count = header_element_count(w0);
-          LispObj *next = (LispObj *)skip_over_ivector((natural)start, w0);
-          if (total < 15) {
-            fprintf(dbgout, " IVEC count=%ld skip_to=%p\n", count, next);
-          }
-          ivecs++;
-          start = next;
-        } else if (nodeheader_tag_p(subtag)) {
-          natural count = header_element_count(w0);
-          if (total < 15) {
-            fprintf(dbgout, " GVEC count=%ld subtag=0x%lx func=%d\n",
-                    count, subtag, (subtag == subtag_function));
-          }
-          gvecs++;
-          if (subtag == subtag_function && count >= 2) {
-            /* Copy code-vector ref (slot 2) to entrypoint (slot 1),
-               stripping TBI tag since br/blr don't honor TBI. */
-            start[1] = untag(start[2]);
-            fixed++;
-            funcs++;
-          }
-          start += 1 + count;
-          if (((natural)start) & (dnode_size - 1)) {
-            start++;
-          }
-        } else {
-          if (total < 15) {
-            fprintf(dbgout, " CONS\n");
-          }
-          conses++;
-          start += 2;
+        start += 1 + count;
+        if (((natural)start) & (dnode_size - 1)) {
+          start++;
         }
+      } else {
+        start += 2;
       }
-      fprintf(dbgout, "  dynamic: %d ivecs, %d gvecs (%d funcs), %d conses\n",
-              ivecs, gvecs, funcs, conses);
     }
 
     /* Also fix readonly area */
@@ -2269,9 +2232,6 @@ main
       if (ro && ro->low < ro->active) {
         LispObj *rostart = (LispObj *)ro->low;
         LispObj *roend = (LispObj *)ro->active;
-        int ro_fixed = 0;
-        fprintf(dbgout, "Entrypoint fix: scanning readonly area %p - %p (%ld bytes)\n",
-                rostart, roend, (long)((char*)roend - (char*)rostart));
         while (rostart < roend) {
           LispObj w0 = *rostart;
           natural subtag = header_subtag(w0);
@@ -2280,9 +2240,8 @@ main
           } else if (nodeheader_tag_p(subtag)) {
             natural count = header_element_count(w0);
             if (subtag == subtag_function && count >= 2) {
-              /* Strip TBI tag: br/blr need untagged code address */
               rostart[1] = untag(rostart[2]);
-              ro_fixed++;
+              fixed++;
             }
             rostart += 1 + count;
             if (((natural)rostart) & (dnode_size - 1)) rostart++;
@@ -2290,55 +2249,40 @@ main
             rostart += 2;
           }
         }
-        fprintf(dbgout, "Fixed %d function entrypoints in readonly area\n", ro_fixed);
-        fixed += ro_fixed;
       }
     }
-    fprintf(dbgout, "Total: fixed %d function entrypoints\n", fixed);
   }
 #endif
 #if defined(DARWIN) && defined(ARM64)
   /* macOS ARM64 W^X: make heap areas executable before entering Lisp.
      Pages start as RW after image loading.  mprotect to RX so code
-     can execute.  Write faults will toggle individual pages back to
-     RW as needed (handled in handle_protection_violation). */
+     can execute.  Write faults are handled directly in the Mach
+     exception handler by toggling individual pages back to RW. */
   {
     area *a = active_dynamic_area;
-    /* Use HEAP_START (set before egc_control moved a->low) as the true
-       base of loaded code.  a->high is the end of the dynamic region. */
     BytePtr heap_start = (BytePtr)(natural)lisp_global(HEAP_START);
-    fprintf(dbgout, "W^X: dynamic area=%p, low=%p, active=%p, high=%p, HEAP_START=%p\n",
-            a, a ? a->low : NULL, a ? a->active : NULL, a ? a->high : NULL, heap_start);
     if (a && heap_start && a->active >= heap_start) {
       natural base = truncate_to_power_of_2((natural)heap_start, log2_page_size);
       natural limit = align_to_power_of_2((natural)a->active, log2_page_size);
-      fprintf(dbgout, "W^X: mprotect dynamic area RX: 0x%lx - 0x%lx (%ld bytes)\n",
-              base, limit, limit - base);
       sys_icache_invalidate((void *)base, limit - base);
       if (mprotect((void *)base, limit - base, PROT_READ | PROT_EXEC) != 0) {
-        perror("W^X: mprotect dynamic area to RX failed");
+        perror("mprotect dynamic area to RX failed");
       }
     }
+    /* Leave static area as RW — it contains writable kernel globals. */
     if (static_space_start && static_space_active > static_space_start) {
       natural base = truncate_to_power_of_2((natural)static_space_start, log2_page_size);
       natural limit = align_to_power_of_2((natural)static_space_active, log2_page_size);
-      fprintf(dbgout, "W^X: mprotect static area RX: 0x%lx - 0x%lx (%ld bytes)\n",
-              base, limit, limit - base);
       sys_icache_invalidate((void *)base, limit - base);
-      if (mprotect((void *)base, limit - base, PROT_READ | PROT_EXEC) != 0) {
-        perror("W^X: mprotect static area to RX failed");
-      }
     }
     {
       area *ro = readonly_area;
       if (ro && ro->low < ro->active) {
         natural base = truncate_to_power_of_2((natural)ro->low, log2_page_size);
         natural limit = align_to_power_of_2((natural)ro->active, log2_page_size);
-        fprintf(dbgout, "W^X: mprotect readonly area RX: 0x%lx - 0x%lx (%ld bytes)\n",
-                base, limit, limit - base);
         sys_icache_invalidate((void *)base, limit - base);
         if (mprotect((void *)base, limit - base, PROT_READ | PROT_EXEC) != 0) {
-          perror("W^X: mprotect readonly area to RX failed");
+          perror("mprotect readonly area to RX failed");
         }
       }
     }
@@ -2352,6 +2296,19 @@ main
 #endif
 #endif
 #endif
+  {
+    LispObj *ivsp = (LispObj *)(natural)tcr->save_vsp;
+    LispObj initfn = ivsp[0];
+    fprintf(dbgout, "Entering start_lisp: vsp=%p initfn=%016lx tag=0x%02lx\n",
+            ivsp, (unsigned long)initfn, (unsigned long)(initfn >> 56));
+    if ((initfn >> 56) == 0x62) {
+      natural fn_base = (initfn & 0x00FFFFFFFFFFFFFFLL) - 8;
+      LispObj *p = (LispObj *)fn_base;
+      fprintf(dbgout, "  fn hdr=%016lx ep=%016lx cv=%016lx\n",
+              (unsigned long)p[0], (unsigned long)p[1], (unsigned long)p[2]);
+    }
+    fflush(dbgout);
+  }
   start_lisp(TCR_TO_TSD(tcr), 0);
   _exit(0);
 }

@@ -53,8 +53,10 @@ define(`extract_subtag',`
         __(ldrb gpr32($1),[$2,#misc_subtag_offset])
         ')
 
+/* On ARM64 TBI, the subtag is in bits 63:56 (high byte), not bits 7:0.
+   extract_lowbyte is used to extract the subtag from a header register. */
 define(`extract_lowbyte',`
-        __(and $1,$2,#0xff)
+        __(lsr $1,$2,#56)
         ')
 
 define(`extract_typecode',`
@@ -158,10 +160,11 @@ define(`clear_tag',`
         
         
         
-/* Set $2 to 0 iff $1 is a fixnum, to an arbitrary bit pattern otherwise. */
+/* Set $1 to 0 iff $2 is a fixnum, to an arbitrary bit pattern otherwise.
+   $1 is the scratch/result register, $2 is the value to test. */
 define(`test_fixnum',`
-        __(sign_extend_value($2,$1))
-        __(eor $2,$1,$2)
+        __(sign_extend_value($1,$2))
+        __(eor $1,$2,$1)
         ')
         
                         

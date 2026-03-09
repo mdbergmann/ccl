@@ -850,6 +850,60 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
 {
   LispObj errdisp = nrs_ERRDISP.vcell;
 
+  fprintf(dbgout, "handle_error: PC=%016lx LR=%016lx arg1=%u arg2=%08x errdisp=%016lx tag=0x%02lx\n",
+          (unsigned long)(natural)xpPC(xp), (unsigned long)xpGPR(xp, 30),
+          arg1, arg2, (unsigned long)errdisp, (unsigned long)fulltag_of(errdisp));
+  fprintf(dbgout, "  nfn(x10)=%016lx fname(x9)=%016lx arg_z(x15)=%016lx\n",
+          (unsigned long)xpGPR(xp, 10), (unsigned long)xpGPR(xp, 9),
+          (unsigned long)xpGPR(xp, 15));
+  /* Try to print the symbol name from x9 (fname) */
+  {
+    LispObj fname_tagged = xpGPR(xp, 9);
+    natural fname_raw = fname_tagged & 0x00FFFFFFFFFFFFFF;
+    if (fname_raw > 0x100000000 && fname_raw < 0x400000000000) {
+      LispObj pname_tagged = ((LispObj *)fname_raw)[0]; /* symbol.pname */
+      natural pname_raw = pname_tagged & 0x00FFFFFFFFFFFFFF;
+      if (pname_raw > 0x100000000 && pname_raw < 0x400000000000) {
+        LispObj pname_hdr = ((LispObj *)pname_raw)[-1];
+        natural pname_len = pname_hdr & 0x00FFFFFFFFFFFFFF;
+        char *pname_data = (char *)pname_raw;
+        fprintf(dbgout, "  pname: tagged=0x%lx raw=0x%lx hdr=0x%lx len=%lu\n",
+                (unsigned long)pname_tagged, (unsigned long)pname_raw,
+                (unsigned long)pname_hdr, (unsigned long)pname_len);
+        if (pname_len > 0 && pname_len < 256) {
+          unsigned char pname_subtag = (pname_hdr >> 56) & 0xFF;
+          int char_size = (pname_subtag & 0x7F) == 7 ? 4 : 1; /* simple-string=4, base-string=1 */
+          int pi;
+          fprintf(dbgout, "  fname symbol name(%d-byte chars): \"", char_size);
+          for (pi = 0; pi < (int)pname_len; pi++)
+            fprintf(dbgout, "%c", pname_data[pi * char_size]);
+          fprintf(dbgout, "\"\n");
+        }
+      }
+    }
+  }
+  /* Dump instructions around LR to see the calling code */
+  {
+    natural lr = xpGPR(xp, 30);
+    if (lr > 0x200000000LL && lr < 0x400000000000LL) {
+      uint32_t *code = (uint32_t *)(lr - 32);
+      fprintf(dbgout, "  code@LR-32: %08x %08x %08x %08x %08x %08x %08x %08x\n",
+              code[0], code[1], code[2], code[3], code[4], code[5], code[6], code[7]);
+      code = (uint32_t *)lr;
+      fprintf(dbgout, "  code@LR:    %08x %08x %08x %08x %08x %08x %08x %08x\n",
+              code[0], code[1], code[2], code[3], code[4], code[5], code[6], code[7]);
+    }
+  }
+  /* Dump vsp stack to trace caller */
+  {
+    LispObj *dbg_vsp = (LispObj *)xpGPR(xp, 25);
+    int dbg_i;
+    fprintf(dbgout, "  vsp=%p stack dump:\n", dbg_vsp);
+    for (dbg_i = 0; dbg_i < 24; dbg_i++) {
+      fprintf(dbgout, "    vsp[%2d] = %016lx\n", dbg_i, (unsigned long)dbg_vsp[dbg_i]);
+    }
+  }
+  fflush(dbgout);
   if (is_uvector_fulltag(fulltag_of(errdisp)) &&
       (header_subtag(header_of(errdisp)) == subtag_macptr)) {
     return callback_for_trap(errdisp, xp, arg1, arg2, bumpP);
@@ -1054,6 +1108,15 @@ handle_uuo(ExceptionInformation *xp, siginfo_t *info, opcode the_uuo)
   Boolean handled = false;
   int bump = 4;
   TCR *tcr = get_tcr(true);
+
+  fprintf(dbgout, "UUO: PC=%016lx LR=%016lx fmt=%u reg=%u info=%u insn=%08x\n",
+          (unsigned long)(natural)xpPC(xp), (unsigned long)xpGPR(xp, 30),
+          format, HLT_UUO_REG(the_uuo), HLT_UUO_INFO(the_uuo), the_uuo);
+  fprintf(dbgout, "  nfn=%016lx fname=%016lx arg_x=%016lx arg_y=%016lx arg_z=%016lx\n",
+          (unsigned long)xpGPR(xp, 10), (unsigned long)xpGPR(xp, 9),
+          (unsigned long)xpGPR(xp, 13), (unsigned long)xpGPR(xp, 14),
+          (unsigned long)xpGPR(xp, 15));
+  fflush(dbgout);
 
   switch (format) {
   case hlt_code_nullary:
@@ -2348,12 +2411,95 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
   /* Check for pseudo-sigreturn: HLT generates EXC_BAD_INSTRUCTION on ARM64.
      When signal_handler returns, lr = pseudo_sigreturn, the HLT executes,
      and we get EXC_BAD_INSTRUCTION with PC at pseudo_sigreturn. */
+  {
+    static int dbg_exc_count = 0;
+    if (dbg_exc_count < 10) {
+      dbg_exc_count++;
+      fprintf(dbgout, "MACH[%d]: exc=%d code0=%lld pc=0x%lx",
+              dbg_exc_count, exception, (long long)code0, (unsigned long)ts->__pc);
+      if (exception == EXC_BAD_ACCESS) {
+        fprintf(dbgout, " addr=0x%llx x0=0x%lx x9=0x%lx x10=0x%lx x15=0x%lx",
+                (long long)code[1],
+                (unsigned long)ts->__x[0], (unsigned long)ts->__x[9],
+                (unsigned long)ts->__x[10], (unsigned long)ts->__x[15]);
+        /* Dump function object slots when we crash with KERN_INVALID_ADDRESS */
+        if (code0 == KERN_INVALID_ADDRESS) {
+          natural nfn_tagged = ts->__x[10];
+          natural nfn_raw = nfn_tagged & 0x00FFFFFFFFFFFFFF;
+          fprintf(dbgout, "\n  nfn=0x%lx raw=0x%lx", (unsigned long)nfn_tagged, (unsigned long)nfn_raw);
+          /* Try to read function's slots */
+          if (nfn_raw > 0x100000000 && nfn_raw < 0x400000000000) {
+            LispObj *fn = (LispObj *)nfn_raw;
+            natural hdr = *(fn - 1);
+            int nslots = hdr & 0x00FFFFFFFFFFFFFF;
+            fprintf(dbgout, " hdr=0x%lx nslots=%d", (unsigned long)hdr, nslots);
+            int i;
+            for (i = 0; i < nslots && i < 10; i++) {
+              fprintf(dbgout, "\n  slot[%d]=0x%lx", i, (unsigned long)fn[i]);
+            }
+            /* For slot[2], if it looks like a symbol, try to read its value cell */
+            if (nslots > 2) {
+              LispObj sym_tagged = fn[2];
+              natural sym_raw = sym_tagged & 0x00FFFFFFFFFFFFFF;
+              if (sym_raw > 0x100000000 && sym_raw < 0x400000000000) {
+                LispObj *sym = (LispObj *)sym_raw;
+                fprintf(dbgout, "\n  sym[2] vcell=0x%lx tlbidx=0x%lx pname=0x%lx",
+                        (unsigned long)sym[1], (unsigned long)sym[6], (unsigned long)sym[3]);
+              }
+            }
+          }
+        }
+      }
+      fprintf(dbgout, "\n");
+      fflush(dbgout);
+    }
+  }
   if ((exception == EXC_BAD_INSTRUCTION) &&
       ((natural)(ts->__pc) == (natural)pseudo_sigreturn)) {
     kret = do_pseudo_sigreturn(thread, tcr, out_ts);
   } else if (tcr->flags & (1<<TCR_FLAG_BIT_PROPAGATE_EXCEPTION)) {
     CLR_TCR_FLAG(tcr, TCR_FLAG_BIT_PROPAGATE_EXCEPTION);
     kret = 17;
+  } else if ((exception == EXC_BAD_ACCESS) && (code0 == KERN_PROTECTION_FAILURE)) {
+    /* W^X page toggle: handle protection faults directly in the Mach
+       exception handler without going through the signal machinery.
+       code[1] is the fault address on ARM64 macOS. */
+    natural fault_addr = (natural)code[1] & 0x00FFFFFFFFFFFFFF;  /* strip TBI tag */
+    area *a = active_dynamic_area;
+    BytePtr heap_start = (BytePtr)(natural)lisp_global(HEAP_START);
+    Boolean in_heap = (a && heap_start &&
+                       (BytePtr)fault_addr >= heap_start &&
+                       (BytePtr)fault_addr < a->high);
+    Boolean in_static = ((BytePtr)fault_addr >= static_space_start &&
+                         (BytePtr)fault_addr < static_space_limit);
+    Boolean in_readonly = (readonly_area &&
+                           (BytePtr)fault_addr >= (BytePtr)readonly_area->low &&
+                           (BytePtr)fault_addr < (BytePtr)readonly_area->active);
+
+    if (in_heap || in_static || in_readonly) {
+      natural page_start = truncate_to_power_of_2(fault_addr, log2_page_size);
+
+      /* Determine if this is an instruction fetch (exec fault) or data write.
+         For Mach exceptions, EXC_BAD_ACCESS with KERN_PROTECTION_FAILURE:
+         Check if PC is at the fault address (exec fault) or elsewhere (data fault). */
+      if ((natural)ts->__pc >= page_start &&
+          (natural)ts->__pc < page_start + page_size) {
+        /* PC is on the faulting page: instruction fetch fault.
+           Page is RW, needs RX for code execution. */
+        sys_icache_invalidate((void *)page_start, page_size);
+        mprotect((void *)page_start, page_size, PROT_READ | PROT_EXEC);
+      } else {
+        /* Data write fault: page is RX, needs RW for data write. */
+        mprotect((void *)page_start, page_size, PROT_READ | PROT_WRITE);
+      }
+      /* Copy input state to output state to resume the thread */
+      *out_ts = *ts;
+      kret = KERN_SUCCESS;
+    } else {
+      /* Protection fault outside heap — dispatch as SIGBUS */
+      signum = SIGBUS;
+    }
+    if (!signum) goto done;
   } else {
     switch (exception) {
     case EXC_BAD_ACCESS:
@@ -2394,6 +2540,7 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
     }
   }
 
+done:
   if (kret) {
     *out_state_count = 0;
     *flavor = 0;

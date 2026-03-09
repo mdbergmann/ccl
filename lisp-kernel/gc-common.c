@@ -1688,7 +1688,7 @@ gc(TCR *tcr, signed_natural param)
           dnode, ndnodes;
       
         if ((pkgidx >= tcr->tlb_limit) ||
-            ((pkg = tcr->tlb_pointer[pkgidx>>fixnumshift]) == 
+            ((pkg = tcr->tlb_pointer[pkgidx/sizeof(LispObj)]) ==
              no_thread_local_binding_marker)) {
           pkg = nrs_PACKAGE.vcell;
         }

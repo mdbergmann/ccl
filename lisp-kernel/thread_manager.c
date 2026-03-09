@@ -1357,7 +1357,7 @@ new_tcr(natural vstack_size, natural tstack_size)
     (1 << FPSCR_OFE_BIT);
 #endif
   tcr->save_allocbase = tcr->save_allocptr = (void *) VOID_ALLOCPTR;
-  tcr->tlb_limit = 2048<<fixnumshift;
+  tcr->tlb_limit = 2048*sizeof(LispObj);
   tcr->tlb_pointer = (LispObj *)malloc(tcr->tlb_limit);
   for (i = 0; i < 2048; i++) {
     tcr->tlb_pointer[i] = (LispObj) no_thread_local_binding_marker;

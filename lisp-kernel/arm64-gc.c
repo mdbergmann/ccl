@@ -189,7 +189,7 @@ check_tcrs(TCR *first)
     }
     tlb_start = tcr->tlb_pointer;
     if (tlb_start) {
-      tlb_end = tlb_start + ((tcr->tlb_limit) >> fixnumshift);
+      tlb_end = tlb_start + (tcr->tlb_limit / sizeof(LispObj));
       check_range(tlb_start, tlb_end, false);
     }
     tcr = tcr->next;

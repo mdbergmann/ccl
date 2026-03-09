@@ -1827,4 +1827,11 @@
 (defconstant fpcr-sysreg #x5A20)   ; FPCR: op0=3,op1=3,CRn=4,CRm=4,op2=0
 (defconstant fpsr-sysreg #x5A21)   ; FPSR: op0=3,op1=3,CRn=4,CRm=4,op2=1
 
+;;; Override arch::make-vheader for ARM64 header format.
+;;; ARM64 headers have subtag in the high byte (bits 56-63) and
+;;; element count in the low 56 bits, unlike other architectures
+;;; which put subtag in the low byte.
+(defmacro arch::make-vheader (element-count subtag)
+  `(logior (ash ,subtag 56) ,element-count))
+
 (provide "ARM64-ARCH")

@@ -1840,8 +1840,9 @@ _spentry(misc_ref)
         __(blo 1f)
         __(trap_unless_fixnum(arg_z,imm1))
         __(uuo_error_vector_bounds(arg_z,arg_y))
-1:              
-        __(b C(misc_ref_common)) 
+1:
+        __(extract_lowbyte(imm1,imm1))
+        __(b C(misc_ref_common))
 
 /* like misc_ref, only the boxed subtag is in arg_x.  */
 
@@ -3181,12 +3182,13 @@ _spentry(eabi_callback)
 /*  EOF, basically  */
 	
 _startfn(C(misc_ref_common))
+        /* imm1 = header subtag (high byte of header word, uvector_header-based) */
         __(and imm0,imm1,#uvector_mask)
-        __(cmp imm0,#uvector_ref)
+        __(cmp imm0,#uvector_header)
         __(bne local_label(misc_ref_invalid))
         __(tst imm1,#gvector_tag_mask)
         __(beq 0f)
-        __(cmp imm1,#tag_function)
+        __(cmp imm1,#subtag_function)
         __(bne local_label(misc_ref_node))
         __(getvheader(imm0,arg_y,imm0))
         __(sub imm0,imm0,#1)
@@ -3199,54 +3201,43 @@ _startfn(C(misc_ref_common))
         __(add imm0,imm0,imm1,lsl #2)
         __(br imm0)        
 
-local_label(misc_ref_jmp):          
-	__(b local_label(misc_ref_invalid))     
-        __(b local_label(misc_ref_bit))
-	
-	__(b local_label(misc_ref_invalid))
-        __(b local_label(misc_ref_s8))
-        
-        __(b local_label(misc_ref_invalid))
-        __(b local_label(misc_ref_u8))
-        
-        __(b local_label(misc_ref_invalid))
-        __(b local_label(misc_ref_s16)) 
-        
-        __(b local_label(misc_ref_invalid))
-        __(b local_label(misc_ref_u16))
-        
-        __(b local_label(misc_ref_invalid))
-        __(b local_label(misc_ref_invalid))
-
-        __(b local_label(misc_ref_invalid))
-        __(b local_label(misc_ref_invalid))
-        
-        __(b local_label(misc_ref_invalid))
-        __(b local_label(misc_ref_invalid))
-	
-        __(b local_label(misc_ref_invalid))
-        __(b local_label(misc_ref_s32))
-        
-        __(b local_label(misc_ref_u32))     /* bignum */
-        __(b local_label(misc_ref_u32))
-        
-        __(b local_label(misc_ref_u32))
-        __(b local_label(misc_ref_single_float_vector))
-        
-        __(b local_label(misc_ref_u32))
-        __(b local_label(misc_ref_simple_string))
-        
-        __(b local_label(misc_ref_invalid))
-        __(b local_label(misc_ref_s64))
-	
-        __(b local_label(misc_ref_invalid))
-        __(b local_label(misc_ref_u64))
-        
-        __(b local_label(misc_ref_u64))
-        __(b local_label(misc_ref_node)) /* fixnum-vector */
-	
-        __(b local_label(misc_ref_u64))
-        __(b local_label(misc_ref_double_float_vector))
+/* Jump table indexed by type_bits & 0x1F (lower 5 bits of header subtag).
+   ARM64 TBI ivector type_bits layout:
+     define_ivector(name, n) -> type_bits = n*2 (even)
+     define_cl_ivector(name, n) -> type_bits = n*2|1 (odd)  */
+local_label(misc_ref_jmp):
+        __(b local_label(misc_ref_u32))                 /* 0: bignum */
+        __(b local_label(misc_ref_s32))                 /* 1: s32_vector */
+        __(b local_label(misc_ref_u32))                 /* 2: double_float */
+        __(b local_label(misc_ref_u32))                 /* 3: u32_vector */
+        __(b local_label(misc_ref_u32))                 /* 4: complex_single_float */
+        __(b local_label(misc_ref_single_float_vector)) /* 5: single_float_vector */
+        __(b local_label(misc_ref_u32))                 /* 6: complex_double_float */
+        __(b local_label(misc_ref_simple_string))       /* 7: simple_string */
+        __(b local_label(misc_ref_u32))                 /* 8: xcode_vector */
+        __(b local_label(misc_ref_invalid))             /* 9: (unused) */
+        __(b local_label(misc_ref_u64))                 /* 10: macptr */
+        __(b local_label(misc_ref_s64))                 /* 11: s64_vector */
+        __(b local_label(misc_ref_u64))                 /* 12: dead_macptr */
+        __(b local_label(misc_ref_u64))                 /* 13: u64_vector */
+        __(b local_label(misc_ref_invalid))             /* 14: (unused) */
+        __(b local_label(misc_ref_node))                /* 15: fixnum_vector */
+        __(b local_label(misc_ref_invalid))             /* 16: (unused) */
+        __(b local_label(misc_ref_double_float_vector)) /* 17: double_float_vector */
+        __(b local_label(misc_ref_invalid))             /* 18: (unused) */
+        __(b local_label(misc_ref_u64))                 /* 19: complex_sf_vector */
+        __(b local_label(misc_ref_invalid))             /* 20: (unused) */
+        __(b local_label(misc_ref_s8))                  /* 21: s8_vector */
+        __(b local_label(misc_ref_invalid))             /* 22: (unused) */
+        __(b local_label(misc_ref_u8))                  /* 23: u8_vector */
+        __(b local_label(misc_ref_invalid))             /* 24: (unused) */
+        __(b local_label(misc_ref_s16))                 /* 25: s16_vector */
+        __(b local_label(misc_ref_invalid))             /* 26: (unused) */
+        __(b local_label(misc_ref_u16))                 /* 27: u16_vector */
+        __(b local_label(misc_ref_invalid))             /* 28: (unused) */
+        __(b local_label(misc_ref_u64))                 /* 29: complex_df_vector */
+        __(b local_label(misc_ref_invalid))             /* 30: (unused) */
+        __(b local_label(misc_ref_bit))                 /* 31: bit_vector */
               
                 
 
@@ -3313,12 +3304,13 @@ local_label(misc_ref_invalid):
 _endfn
         
 _startfn(C(misc_set_common))
+        /* imm1 = header subtag (high byte of header word, uvector_header-based) */
         __(and imm0,imm1,#uvector_mask)
-        __(cmp imm0,#uvector_ref)
+        __(cmp imm0,#uvector_header)
         __(bne local_label(misc_set_invalid))
         __(tst imm1,#gvector_tag_mask)
         __(beq 0f)
-        __(cmp imm1,#tag_function)
+        __(cmp imm1,#subtag_function)
         __(bne _SPgvset)
         __(getvheader(imm0,arg_y,imm0))
         __(sub imm0,imm0,#1)
@@ -3331,54 +3323,43 @@ _startfn(C(misc_set_common))
         __(add imm0,imm0,imm1,lsl #2)
         __(br imm0)        
 
-local_label(misc_set_jmp):          
-	__(b local_label(misc_set_invalid))     
-        __(b local_label(misc_set_bit_vector))
-	
-	__(b local_label(misc_set_invalid))
-        __(b local_label(misc_set_s8))
-        
-        __(b local_label(misc_set_invalid))
-        __(b local_label(misc_set_u8))
-        
-        __(b local_label(misc_set_invalid))
-        __(b local_label(misc_set_s16)) 
-        
-        __(b local_label(misc_set_invalid))
-        __(b local_label(misc_set_u16))
-        
-        __(b local_label(misc_set_invalid))
-        __(b local_label(misc_set_invalid))
-
-        __(b local_label(misc_set_invalid))
-        __(b local_label(misc_set_invalid))
-        
-        __(b local_label(misc_set_invalid))
-        __(b local_label(misc_set_invalid))
-	
-        __(b local_label(misc_set_invalid))
-        __(b local_label(misc_set_s32))
-        
-        __(b local_label(misc_set_u32))     /* bignum */
-        __(b local_label(misc_set_u32))
-        
-        __(b local_label(misc_set_u32))
-        __(b local_label(misc_set_single_float_vector))
-        
-        __(b local_label(misc_set_u32))
-        __(b local_label(misc_set_simple_string))
-        
-        __(b local_label(misc_set_invalid))
-        __(b local_label(misc_set_s64))
-	
-        __(b local_label(misc_set_invalid))
-        __(b local_label(misc_set_u64))
-        
-        __(b local_label(misc_set_u64))
-        __(b local_label(misc_set_fixnum)) /* fixnum-vector */
-	
-        __(b local_label(misc_set_u64))
-        __(b local_label(misc_set_double_float_vector))
+/* Jump table indexed by type_bits & 0x1F (lower 5 bits of header subtag).
+   ARM64 TBI ivector type_bits layout:
+     define_ivector(name, n) -> type_bits = n*2 (even)
+     define_cl_ivector(name, n) -> type_bits = n*2|1 (odd)  */
+local_label(misc_set_jmp):
+        __(b local_label(misc_set_u32))                  /* 0: bignum */
+        __(b local_label(misc_set_s32))                  /* 1: s32_vector */
+        __(b local_label(misc_set_u32))                  /* 2: double_float */
+        __(b local_label(misc_set_u32))                  /* 3: u32_vector */
+        __(b local_label(misc_set_u32))                  /* 4: complex_single_float */
+        __(b local_label(misc_set_single_float_vector))  /* 5: single_float_vector */
+        __(b local_label(misc_set_u32))                  /* 6: complex_double_float */
+        __(b local_label(misc_set_simple_string))        /* 7: simple_string */
+        __(b local_label(misc_set_u32))                  /* 8: xcode_vector */
+        __(b local_label(misc_set_invalid))              /* 9: (unused) */
+        __(b local_label(misc_set_u64))                  /* 10: macptr */
+        __(b local_label(misc_set_s64))                  /* 11: s64_vector */
+        __(b local_label(misc_set_u64))                  /* 12: dead_macptr */
+        __(b local_label(misc_set_u64))                  /* 13: u64_vector */
+        __(b local_label(misc_set_invalid))              /* 14: (unused) */
+        __(b local_label(misc_set_fixnum))               /* 15: fixnum_vector */
+        __(b local_label(misc_set_invalid))              /* 16: (unused) */
+        __(b local_label(misc_set_double_float_vector))  /* 17: double_float_vector */
+        __(b local_label(misc_set_invalid))              /* 18: (unused) */
+        __(b local_label(misc_set_u64))                  /* 19: complex_sf_vector */
+        __(b local_label(misc_set_invalid))              /* 20: (unused) */
+        __(b local_label(misc_set_s8))                   /* 21: s8_vector */
+        __(b local_label(misc_set_invalid))              /* 22: (unused) */
+        __(b local_label(misc_set_u8))                   /* 23: u8_vector */
+        __(b local_label(misc_set_invalid))              /* 24: (unused) */
+        __(b local_label(misc_set_s16))                  /* 25: s16_vector */
+        __(b local_label(misc_set_invalid))              /* 26: (unused) */
+        __(b local_label(misc_set_u16))                  /* 27: u16_vector */
+        __(b local_label(misc_set_invalid))              /* 28: (unused) */
+        __(b local_label(misc_set_u64))                  /* 29: complex_df_vector */
+        __(b local_label(misc_set_invalid))              /* 30: (unused) */
+        __(b local_label(misc_set_bit_vector))           /* 31: bit_vector */
 
 local_label(misc_set_u32):
         __(extract_unsigned_byte(imm0,arg_z,32))

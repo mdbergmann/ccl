@@ -237,7 +237,8 @@
        (binding-index-reverse-map (make-hash-table :test #'eq :weak :value))
        (next-binding-index 0))
   (defun %set-binding-index (val) (setq next-binding-index val))
-  (defun next-binding-index () (1+ next-binding-index))
+  (defun next-binding-index () (+ next-binding-index
+                                   (ash 1 (- target::word-shift target::fixnumshift))))
   (defun ensure-binding-index (sym)
     (with-lock-grabbed (binding-index-lock)
       (let* ((symvec (symptr->symvector (%symbol->symptr sym)))
@@ -250,7 +251,8 @@
             (remhash idx binding-index-reverse-map)
             (setf (%svref symvec target::symbol.binding-index-cell) 0))
           (if (zerop idx)
-            (let* ((new-idx (incf next-binding-index)))
+            (let* ((new-idx (incf next-binding-index
+                                  (ash 1 (- target::word-shift target::fixnumshift)))))
               (setf (%svref symvec target::symbol.binding-index-cell) new-idx)
               (setf (gethash new-idx binding-index-reverse-map) sym))))
         sym)))
