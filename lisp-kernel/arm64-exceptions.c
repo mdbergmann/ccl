@@ -886,7 +886,10 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
   {
     natural lr = xpGPR(xp, 30);
     if (lr > 0x200000000LL && lr < 0x400000000000LL) {
-      uint32_t *code = (uint32_t *)(lr - 32);
+      uint32_t *code = (uint32_t *)(lr - 64);
+      fprintf(dbgout, "  code@LR-64: %08x %08x %08x %08x %08x %08x %08x %08x\n",
+              code[0], code[1], code[2], code[3], code[4], code[5], code[6], code[7]);
+      code = (uint32_t *)(lr - 32);
       fprintf(dbgout, "  code@LR-32: %08x %08x %08x %08x %08x %08x %08x %08x\n",
               code[0], code[1], code[2], code[3], code[4], code[5], code[6], code[7]);
       code = (uint32_t *)lr;
@@ -894,13 +897,109 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
               code[0], code[1], code[2], code[3], code[4], code[5], code[6], code[7]);
     }
   }
+  /* Dump lisp frame at sp to identify calling function */
+  {
+    natural sp = xpSP(xp);
+    fprintf(dbgout, "  sp=%016lx x10=%016lx x12=%016lx\n",
+            (unsigned long)sp, (unsigned long)xpGPR(xp, 10),
+            (unsigned long)xpGPR(xp, 12));
+    if (sp > 0x100000000LL && sp < 0x800000000000LL) {
+      LispObj *frame = (LispObj *)sp;
+      fprintf(dbgout, "  frame[0](savevsp)=%016lx frame[1](savelr)=%016lx frame[2](savefn)=%016lx frame[3]=%016lx\n",
+              (unsigned long)frame[0], (unsigned long)frame[1],
+              (unsigned long)frame[2], (unsigned long)frame[3]);
+      /* Try to read function name from savefn's constants */
+      {
+        LispObj savefn = frame[2];
+        natural fn_raw = savefn & 0x00FFFFFFFFFFFFFF;
+        if (fn_raw > 0x100000000LL && fn_raw < 0x400000000000LL) {
+          LispObj *fn_slots = (LispObj *)fn_raw;
+          LispObj fn_hdr = fn_slots[-1];
+          natural fn_nslots = fn_hdr & 0x00FFFFFFFFFFFFFF;
+          fprintf(dbgout, "  savefn hdr=%016lx nslots=%lu\n",
+                  (unsigned long)fn_hdr, (unsigned long)fn_nslots);
+          /* Last slot is lfbits, second-to-last is name */
+          if (fn_nslots > 2 && fn_nslots < 100) {
+            LispObj name_slot = fn_slots[fn_nslots - 2];
+            natural name_raw = name_slot & 0x00FFFFFFFFFFFFFF;
+            fprintf(dbgout, "  fn name slot=%016lx\n", (unsigned long)name_slot);
+            if (name_raw > 0x100000000LL && name_raw < 0x400000000000LL) {
+              LispObj pname = ((LispObj *)name_raw)[0]; /* symbol.pname */
+              natural pname_raw = pname & 0x00FFFFFFFFFFFFFF;
+              if (pname_raw > 0x100000000LL && pname_raw < 0x400000000000LL) {
+                LispObj phdr = ((LispObj *)pname_raw)[-1];
+                natural plen = phdr & 0x00FFFFFFFFFFFFFF;
+                if (plen > 0 && plen < 256) {
+                  unsigned char ps = (phdr >> 56) & 0xFF;
+                  int cs = (ps & 0x7F) == 7 ? 4 : 1;
+                  char *pd = (char *)pname_raw;
+                  int pi;
+                  fprintf(dbgout, "  savefn name(%d): \"", cs);
+                  for (pi = 0; pi < (int)plen; pi++)
+                    fprintf(dbgout, "%c", pd[pi * cs]);
+                  fprintf(dbgout, "\"\n");
+                }
+              }
+            }
+          }
+          /* Also dump first few constant slots */
+          int si;
+          for (si = 0; si < (int)fn_nslots && si < 12; si++) {
+            fprintf(dbgout, "  fn_slot[%d]=%016lx\n", si, (unsigned long)fn_slots[si]);
+          }
+        }
+      }
+      /* Walk up to 5 lisp frames */
+      int fi;
+      for (fi = 0; fi < 5; fi++) {
+        LispObj *fr = (LispObj *)(sp + (fi + 1) * 32);
+        natural fr_addr = (natural)fr;
+        if (fr_addr < 0x100000000LL || fr_addr > 0x800000000000LL) break;
+        LispObj fr_savefn = fr[2];
+        natural fr_fn_raw = fr_savefn & 0x00FFFFFFFFFFFFFF;
+        fprintf(dbgout, "  frame[%d] @%p: savevsp=%016lx savelr=%016lx savefn=%016lx",
+                fi + 1, fr, (unsigned long)fr[0], (unsigned long)fr[1], (unsigned long)fr_savefn);
+        /* Try to print function name */
+        if (fr_fn_raw > 0x100000000LL && fr_fn_raw < 0x400000000000LL) {
+          LispObj *fr_fn_slots = (LispObj *)fr_fn_raw;
+          LispObj fr_fn_hdr = fr_fn_slots[-1];
+          natural fr_fn_ns = fr_fn_hdr & 0x00FFFFFFFFFFFFFF;
+          if (fr_fn_ns > 2 && fr_fn_ns < 100) {
+            LispObj fr_name = fr_fn_slots[fr_fn_ns - 2];
+            natural fr_name_raw = fr_name & 0x00FFFFFFFFFFFFFF;
+            if (fr_name_raw > 0x100000000LL && fr_name_raw < 0x400000000000LL) {
+              LispObj fr_pn = ((LispObj *)fr_name_raw)[0];
+              natural fr_pn_raw = fr_pn & 0x00FFFFFFFFFFFFFF;
+              if (fr_pn_raw > 0x100000000LL && fr_pn_raw < 0x400000000000LL) {
+                LispObj fr_ph = ((LispObj *)fr_pn_raw)[-1];
+                natural fr_pl = fr_ph & 0x00FFFFFFFFFFFFFF;
+                if (fr_pl > 0 && fr_pl < 256) {
+                  unsigned char fr_ps = (fr_ph >> 56) & 0xFF;
+                  int fr_cs = (fr_ps & 0x7F) == 7 ? 4 : 1;
+                  char *fr_pd = (char *)fr_pn_raw;
+                  int fr_pi;
+                  fprintf(dbgout, " \"");
+                  for (fr_pi = 0; fr_pi < (int)fr_pl; fr_pi++)
+                    fprintf(dbgout, "%c", fr_pd[fr_pi * fr_cs]);
+                  fprintf(dbgout, "\"");
+                }
+              }
+            }
+          }
+        }
+        fprintf(dbgout, "\n");
+      }
+    }
+  }
   /* Dump vsp stack to trace caller */
   {
     LispObj *dbg_vsp = (LispObj *)xpGPR(xp, 25);
     int dbg_i;
     fprintf(dbgout, "  vsp=%p stack dump:\n", dbg_vsp);
-    for (dbg_i = 0; dbg_i < 24; dbg_i++) {
-      fprintf(dbgout, "    vsp[%2d] = %016lx\n", dbg_i, (unsigned long)dbg_vsp[dbg_i]);
+    for (dbg_i = 0; dbg_i < 32; dbg_i++) {
+      LispObj val = dbg_vsp[dbg_i];
+      unsigned tag = (unsigned)(val >> 56);
+      fprintf(dbgout, "    vsp[%2d] = %016lx (tag=0x%02x)\n", dbg_i, (unsigned long)val, tag);
     }
   }
   fflush(dbgout);

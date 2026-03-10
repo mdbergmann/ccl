@@ -2213,7 +2213,8 @@
                                                         ((temp (:u64 #.arm64::imm0))))
   (mov temp (:$ (:apply ash n arm64::word-shift)))
   (ldr rt (:@ rcontext (:$ (:apply arm64::arm64-subprimitive-offset '.SPdefault-optional-args))))
-  (blr rt))
+  (blr rt)
+  (ldr nfn (:@ sp (:$ arm64::lisp-frame.savefn))))
 
 
 ;;; --- Default optional arguments ---
@@ -2517,7 +2518,8 @@
     (((val :lisp))
      ((sym (:lisp (:ne val)))))
   (ldr rt (:@ rcontext (:$ (:apply arm64::arm64-subprimitive-offset '.SPspecrefcheck))))
-  (blr rt))
+  (blr rt)
+  (ldr nfn (:@ sp (:$ arm64::lisp-frame.savefn))))
 
 ;;; ref-symbol-value-inline: inline TLB lookup with unbound check.
 ;;; TBI: symbol fields accessed via tagged pointer (TBI ignores tag byte).
@@ -2549,7 +2551,8 @@
     (((val :lisp))
      ((sym (:lisp (:ne val)))))
   (ldr rt (:@ rcontext (:$ (:apply arm64::arm64-subprimitive-offset '.SPspecref))))
-  (blr rt))
+  (blr rt)
+  (ldr nfn (:@ sp (:$ arm64::lisp-frame.savefn))))
 
 ;;; %ref-symbol-value-inline: inline TLB lookup, no unbound check.
 (define-arm64-vinsn %ref-symbol-value-inline (((dest :lisp))
@@ -2576,7 +2579,8 @@
      ((sym :lisp)
       (val :lisp)))
   (ldr rt (:@ rcontext (:$ (:apply arm64::arm64-subprimitive-offset '.SPspecset))))
-  (blr rt))
+  (blr rt)
+  (ldr nfn (:@ sp (:$ arm64::lisp-frame.savefn))))
 
 
 ;;; --- Symbol function lookup ---
@@ -3184,7 +3188,8 @@
 (define-arm64-vinsn (call-subprim :call :subprim) (()
                                                     ((spno :s32const)))
   (ldr rt (:@ rcontext (:$ spno)))
-  (blr rt))
+  (blr rt)
+  (ldr nfn (:@ sp (:$ arm64::lisp-frame.savefn))))
 
 (define-arm64-vinsn (jump-subprim :jumplr) (()
                                              ((spno :s32const)))
@@ -3195,20 +3200,23 @@
 (define-arm64-vinsn (call-subprim-0 :call :subprim) (((dest t))
                                                       ((spno :s32const)))
   (ldr rt (:@ rcontext (:$ spno)))
-  (blr rt))
+  (blr rt)
+  (ldr nfn (:@ sp (:$ arm64::lisp-frame.savefn))))
 
 (define-arm64-vinsn (call-subprim-1 :call :subprim) (((dest t))
                                                       ((spno :s32const)
                                                        (z t)))
   (ldr rt (:@ rcontext (:$ spno)))
-  (blr rt))
+  (blr rt)
+  (ldr nfn (:@ sp (:$ arm64::lisp-frame.savefn))))
 
 (define-arm64-vinsn (call-subprim-2 :call :subprim) (((dest t))
                                                       ((spno :s32const)
                                                        (y t)
                                                        (z t)))
   (ldr rt (:@ rcontext (:$ spno)))
-  (blr rt))
+  (blr rt)
+  (ldr nfn (:@ sp (:$ arm64::lisp-frame.savefn))))
 
 (define-arm64-vinsn (call-subprim-3 :call :subprim) (((dest t))
                                                       ((spno :s32const)
@@ -3216,7 +3224,8 @@
                                                        (y t)
                                                        (z t)))
   (ldr rt (:@ rcontext (:$ spno)))
-  (blr rt))
+  (blr rt)
+  (ldr nfn (:@ sp (:$ arm64::lisp-frame.savefn))))
 
 
 ;;; --- tail-funcall-vsp ---
@@ -3243,7 +3252,8 @@
   (let ((offset (arm64::arm64-subprimitive-offset spno)))
     `(define-arm64-vinsn (,name :call :subprim ,@other-attrs) (() ())
        (ldr rt (:@ rcontext (:$ ,offset)))
-       (blr rt))))
+       (blr rt)
+       (ldr nfn (:@ sp (:$ arm64::lisp-frame.savefn))))))
 
 (defmacro define-arm64-subprim-jump-vinsn ((name &rest other-attrs) spno)
   (let ((offset (arm64::arm64-subprimitive-offset spno)))
@@ -3313,7 +3323,8 @@
 ;;; TODO: entrypoint fixup may need revision when closure model is finalized.
 (define-arm64-vinsn (make-stack-closure :call :subprim) (() ())
   (ldr rt (:@ rcontext (:$ (:apply arm64::arm64-subprimitive-offset '.SPstkgvector))))
-  (blr rt))
+  (blr rt)
+  (ldr nfn (:@ sp (:$ arm64::lisp-frame.savefn))))
 
 (define-arm64-subprim-call-vinsn (stack-misc-alloc) .SPstack-misc-alloc)
 
@@ -3361,7 +3372,8 @@
 (define-arm64-vinsn (nth-value :call :subprim) (((result :lisp))
                                                 ())
   (ldr rt (:@ rcontext (:$ (:apply arm64::arm64-subprimitive-offset '.SPnthvalue))))
-  (blr rt))
+  (blr rt)
+  (ldr nfn (:@ sp (:$ arm64::lisp-frame.savefn))))
 
 (define-arm64-subprim-call-vinsn (fitvals) .SPfitvals)
 
@@ -3468,10 +3480,12 @@
   ((:pred > n 1)
    (mov temp (:$ n))
    (ldr rt (:@ rcontext (:$ (:apply arm64::arm64-subprimitive-offset '.SPunbind-n))))
-   (blr rt))
+   (blr rt)
+   (ldr nfn (:@ sp (:$ arm64::lisp-frame.savefn))))
   ((:pred = n 1)
    (ldr rt (:@ rcontext (:$ (:apply arm64::arm64-subprimitive-offset '.SPunbind))))
-   (blr rt)))
+   (blr rt)
+   (ldr nfn (:@ sp (:$ arm64::lisp-frame.savefn)))))
 
 
 ;;; --- Interrupt control ---
