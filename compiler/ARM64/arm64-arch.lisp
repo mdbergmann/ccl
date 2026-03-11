@@ -1034,7 +1034,7 @@
   savevsp
   savelr
   savefn
-  padding)
+  savefp)
 
 ;;; Special-variable binding record.  0-based, on the value stack.
 (define-storage-layout binding 0

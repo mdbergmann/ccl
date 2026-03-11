@@ -409,12 +409,12 @@ typedef struct double_float {
 } double_float;
 
 /* Lisp stack frame — 0-based, no marker word (unlike ARM32).
-   32 bytes: savevsp, savelr, savefn (nfn=fn on ARM64), padding. */
+   32 bytes: savevsp, savelr, savefn (nfn=fn on ARM64), savefp (x29). */
 typedef struct lisp_frame {
   LispObj savevsp;
   LispObj savelr;
   LispObj savefn;
-  LispObj padding;
+  LispObj savefp;
 } lisp_frame;
 
 /* Catch frame — a gvector allocated on the temp stack.

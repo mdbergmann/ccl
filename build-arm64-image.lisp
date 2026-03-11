@@ -52,6 +52,12 @@
                                       (%nx1-operator eabi-ff-call)))
               (funcall orig-fn context whole env))))))
 
+;;; Step 2c: Pre-load modules required by level-0 files at compile time
+(load "ccl:lib;number-macros.lisp" :verbose nil)
+(provide "NUMBER-MACROS")
+(load "ccl:lib;number-case-macro.lisp" :verbose nil)
+(provide "NUMBER-CASE-MACRO")
+
 ;;; Step 3: Load compile-ccl support
 (let ((*warn-if-redefine-kernel* nil))
   (compile-file "ccl:lib;compile-ccl.lisp" :output-file "ccl:bin;compile-ccl.dx64fsl" :verbose nil :load t))

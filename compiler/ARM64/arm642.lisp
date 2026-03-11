@@ -3320,7 +3320,7 @@
         (! adjust-sp diff)))
     (if (%i< 0 (setq diff (%i- current-vstack target-vstack)))
       (with-arm64-local-vinsn-macros (seg)
-        (! vstack-discard (ash diff (- *arm642-target-fixnum-shift*)))))
+        (! vstack-discard (ash diff (- arm64::word-shift)))))
     exit-vstack))
 
 (defun arm642-multiple-value-body (seg form)
@@ -4756,9 +4756,9 @@
                          (nprev (+ num-fixed num-opt)))
                     (declare (fixnum flags nprev))
                     (backend-immediate-index keyvect)
-                    ;; ARM64: fixnumshift=0, so ash by target-fixnum-shift (=0) is identity
+                    ;; ARM64: flags is a fixnum (fixnumshift=0), nprev must be byte-scaled
                     (arm642-lri seg arm64::arg_y (ash flags *arm642-target-fixnum-shift*))
-                    (arm642-lri seg arm64::imm0 (ash nprev *arm642-target-fixnum-shift*))
+                    (arm642-lri seg arm64::imm0 (ash nprev arm64::word-shift))
                     (! keyword-bind)))
                 (when rest
                   (if lexprp
@@ -4770,7 +4770,7 @@
                              (simple (and (not keys) (= 0 nprev))))
                         (declare (fixnum nprev))
                         (unless simple
-                          (arm642-lri seg arm64::imm0 (ash nprev *arm642-target-fixnum-shift*)))
+                          (arm642-lri seg arm64::imm0 (ash nprev arm64::word-shift)))
                         (if stack-consed-rest
                           (if simple
                             (! stack-rest-arg)
@@ -4783,7 +4783,7 @@
                               (! req-heap-rest-arg)
                               (! heap-cons-rest-arg))))))))
                 (when hardopt
-                  (arm642-lri seg arm64::imm0 (ash num-opt *arm642-target-fixnum-shift*))
+                  (arm642-lri seg arm64::imm0 (ash num-opt arm64::word-shift))
                   ;; .SPopt-supplied-p wants nargs adjusted by num-fixed
                   (unless (= 0 num-fixed)
                     (! scale-nargs num-fixed))

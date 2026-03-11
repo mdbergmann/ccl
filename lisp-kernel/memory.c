@@ -388,6 +388,17 @@ new_protected_area(BytePtr start, BytePtr end, lisp_protection_kind reason, natu
   protected_area_ptr p = malloc(sizeof(protected_area));
   
   if (p == NULL) return NULL;
+#ifdef ARM64
+  /* Align start/end to page boundaries to match what ProtectMemory
+     actually protects (16KB pages on macOS ARM64).  Otherwise
+     find_protected_area won't find faults in the alignment padding. */
+  {
+    natural pgsz = page_size ? page_size : 16384;
+    start = (BytePtr)(((natural)start) & ~(pgsz - 1));
+    end = (BytePtr)((((natural)end) + pgsz - 1) & ~(pgsz - 1));
+    protsize = end - start;
+  }
+#endif
   p->protsize = protsize;
   p->nprot = 0;
   p->start = start;

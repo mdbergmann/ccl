@@ -368,15 +368,16 @@ define(`vpop_all_argregs',`
                 
 
 /* $1 = value for lisp_frame.savevsp
-   Frame layout: [sp+0]=savevsp, [sp+8]=savelr, [sp+16]=savefn, [sp+24]=padding
+   Frame layout: [sp+0]=savevsp, [sp+8]=savelr, [sp+16]=savefn, [sp+24]=savefp(x29)
    Total: 32 bytes = lisp_frame.size */
 define(`build_lisp_frame',`
         __(stp ifelse($1,`',vsp,$1),lr,[sp,#-lisp_frame.size]!)
-        __(str nfn,[sp,#lisp_frame.savefn])
+        __(stp nfn,x29,[sp,#lisp_frame.savefn])
+        __(mov x29,sp)
 ')
 
 define(`restore_lisp_frame',`
-        __(ldr nfn,[sp,#lisp_frame.savefn])
+        __(ldp nfn,x29,[sp,#lisp_frame.savefn])
         __(ldp vsp,lr,[sp],#lisp_frame.size)
         ')
 
@@ -386,6 +387,7 @@ define(`return_lisp_frame',`
         ')
 
 define(`discard_lisp_frame',`
+	__(ldr x29,[sp,#lisp_frame.savefp])
 	__(add sp,sp,#lisp_frame.size)
 	')
 	

@@ -817,12 +817,19 @@ handle_protection_violation(ExceptionInformation *xp, siginfo_t *info,
   }
 #endif
 
-  if (is_write_fault(xp, info)) {
-    area = find_protected_area(addr);
-    if (area != NULL) {
+  {
+    Boolean wf = is_write_fault(xp, info);
+    area = wf ? find_protected_area(addr) : NULL;
+    fprintf(dbgout, "handle_prot_viol: addr=%p write=%d prot_area=%p vs_low=%p vs_high=%p vsp=0x%lx\n",
+            addr, wf, area,
+            tcr->vs_area ? (void*)tcr->vs_area->low : NULL,
+            tcr->vs_area ? (void*)tcr->vs_area->high : NULL,
+            (unsigned long)xpGPR(xp, 25));
+    fflush(dbgout);
+    if (wf && area != NULL) {
       handler = protection_handlers[area->why];
       return handler(xp, area, addr);
-    } else {
+    } else if (wf) {
       if ((addr >= readonly_area->low) &&
           (addr < readonly_area->active)) {
         UnProtectMemory((LogicalAddress)(truncate_to_power_of_2(addr, log2_page_size)),
@@ -879,6 +886,33 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
             fprintf(dbgout, "%c", pname_data[pi * char_size]);
           fprintf(dbgout, "\"\n");
         }
+      }
+    }
+  }
+  /* Dump arg_z (x15) and arg_y (x11) if they look like heap pointers */
+  {
+    LispObj az = xpGPR(xp, 15);
+    unsigned az_tag = (unsigned)(az >> 56);
+    natural az_raw = az & 0x00FFFFFFFFFFFFFF;
+    if (az_tag != 0 && az_tag != 0xFF && az_raw > 0x100000000LL && az_raw < 0x400000000000LL) {
+      LispObj *ap = (LispObj *)(az_raw - 16);
+      int ai;
+      fprintf(dbgout, "  arg_z contents (tag=0x%02x raw=0x%lx):\n", az_tag, (unsigned long)az_raw);
+      for (ai = 0; ai < 6; ai++) {
+        fprintf(dbgout, "    [%+d] = %016lx (tag=0x%02lx)\n",
+                (ai - 2) * 8, (unsigned long)ap[ai], (unsigned long)(ap[ai] >> 56));
+      }
+    }
+    LispObj ay = xpGPR(xp, 11);
+    unsigned ay_tag = (unsigned)(ay >> 56);
+    natural ay_raw = ay & 0x00FFFFFFFFFFFFFF;
+    if (ay_tag != 0 && ay_tag != 0xFF && ay_raw > 0x100000000LL && ay_raw < 0x400000000000LL) {
+      LispObj *ap2 = (LispObj *)(ay_raw - 16);
+      int ai2;
+      fprintf(dbgout, "  arg_y contents (tag=0x%02x raw=0x%lx):\n", ay_tag, (unsigned long)ay_raw);
+      for (ai2 = 0; ai2 < 6; ai2++) {
+        fprintf(dbgout, "    [%+d] = %016lx (tag=0x%02lx)\n",
+                (ai2 - 2) * 8, (unsigned long)ap2[ai2], (unsigned long)(ap2[ai2] >> 56));
       }
     }
   }
@@ -991,6 +1025,29 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
       }
     }
   }
+  /* Dump constants of frame[1] and frame[2] functions too */
+  {
+    natural sp = xpSP(xp);
+    int fi2;
+    for (fi2 = 1; fi2 <= 3; fi2++) {
+      LispObj *fr2 = (LispObj *)(sp + fi2 * 32);
+      LispObj fn2 = fr2[2];
+      natural fn2_raw = fn2 & 0x00FFFFFFFFFFFFFF;
+      if (fn2_raw > 0x100000000LL && fn2_raw < 0x400000000000LL) {
+        LispObj *fn2_slots = (LispObj *)fn2_raw;
+        LispObj fn2_hdr = fn2_slots[-1];
+        natural fn2_ns = fn2_hdr & 0x00FFFFFFFFFFFFFF;
+        if (fn2_ns > 0 && fn2_ns < 50) {
+          fprintf(dbgout, "  frame[%d] fn constants (%lu slots):", fi2, (unsigned long)fn2_ns);
+          int si2;
+          for (si2 = 0; si2 < (int)fn2_ns && si2 < 12; si2++) {
+            fprintf(dbgout, " %016lx", (unsigned long)fn2_slots[si2]);
+          }
+          fprintf(dbgout, "\n");
+        }
+      }
+    }
+  }
   /* Dump vsp stack to trace caller */
   {
     LispObj *dbg_vsp = (LispObj *)xpGPR(xp, 25);
@@ -1000,6 +1057,81 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
       LispObj val = dbg_vsp[dbg_i];
       unsigned tag = (unsigned)(val >> 56);
       fprintf(dbgout, "    vsp[%2d] = %016lx (tag=0x%02x)\n", dbg_i, (unsigned long)val, tag);
+    }
+  }
+  /* Dump memory around any non-fixnum vsp values to inspect object headers */
+  {
+    int vi;
+    for (vi = 0; vi < 8; vi++) {
+      LispObj val = ((LispObj *)xpGPR(xp, 25))[vi];
+      unsigned vtag = (unsigned)(val >> 56);
+      if (vtag != 0 && vtag != 0xFF && vtag != 0x02) {
+        natural raw = val & 0x00FFFFFFFFFFFFFF;
+        if (raw > 0x100000000LL && raw < 0x400000000000LL) {
+          LispObj *mp = (LispObj *)(raw - 24);
+          fprintf(dbgout, "  mem@vsp[%d]=0x%lx (tag=0x%02x addr=0x%lx):\n",
+                  vi, (unsigned long)val, vtag, (unsigned long)raw);
+          int mi;
+          for (mi = 0; mi < 8; mi++) {
+            fprintf(dbgout, "    [%+d] = %016lx (tag=0x%02lx)\n",
+                    (mi - 3) * 8, (unsigned long)mp[mi], (unsigned long)(mp[mi] >> 56));
+          }
+        }
+      }
+    }
+  }
+  /* Also dump code around each frame's savelr (wider window) */
+  {
+    natural sp = xpSP(xp);
+    int fi;
+    for (fi = 0; fi < 3; fi++) {
+      LispObj *fr = (LispObj *)(sp + (fi + 1) * 32);
+      natural lr = (natural)fr[1];
+      if (lr > 0x200000000LL && lr < 0x400000000000LL) {
+        uint32_t *code;
+        code = (uint32_t *)(lr - 64);
+        fprintf(dbgout, "  frame[%d] code@savelr-64: %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                fi + 1, code[0], code[1], code[2], code[3],
+                code[4], code[5], code[6], code[7]);
+        code = (uint32_t *)(lr - 32);
+        fprintf(dbgout, "  frame[%d] code@savelr-32: %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                fi + 1, code[0], code[1], code[2], code[3],
+                code[4], code[5], code[6], code[7]);
+        code = (uint32_t *)lr;
+        fprintf(dbgout, "  frame[%d] code@savelr+00: %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                fi + 1, code[0], code[1], code[2], code[3],
+                code[4], code[5], code[6], code[7]);
+        code = (uint32_t *)(lr + 32);
+        fprintf(dbgout, "  frame[%d] code@savelr+32: %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                fi + 1, code[0], code[1], code[2], code[3],
+                code[4], code[5], code[6], code[7]);
+      }
+    }
+  }
+  /* Dump top of vstack (near savevsp) to see initial list values */
+  {
+    natural sp = xpSP(xp);
+    LispObj *frame0 = (LispObj *)sp;
+    natural savevsp0 = (natural)frame0[0];
+    if (savevsp0 > 0x100000000LL && savevsp0 < 0x800000000000LL) {
+      LispObj *top_vsp = (LispObj *)savevsp0;
+      int ti;
+      fprintf(dbgout, "  vstack top (savevsp=%p):\n", top_vsp);
+      for (ti = -4; ti < 8; ti++) {
+        LispObj val = top_vsp[ti];
+        unsigned vtag = (unsigned)(val >> 56);
+        fprintf(dbgout, "    top[%+d] = %016lx (tag=0x%02x)", ti, (unsigned long)val, vtag);
+        /* If it looks like a cons (tag 0x03), show CAR and CDR */
+        if (vtag == 0x03) {
+          natural cons_raw = val & 0x00FFFFFFFFFFFFFF;
+          if (cons_raw > 0x100000000LL && cons_raw < 0x400000000000LL) {
+            LispObj car_val = *(LispObj *)cons_raw;         /* cons.car = offset 0 */
+            LispObj cdr_val = *(LispObj *)(cons_raw - 8);   /* cons.cdr = offset -8 */
+            fprintf(dbgout, "  CAR=%016lx CDR=%016lx", (unsigned long)car_val, (unsigned long)cdr_val);
+          }
+        }
+        fprintf(dbgout, "\n");
+      }
     }
   }
   fflush(dbgout);
@@ -2517,11 +2649,15 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
      and we get EXC_BAD_INSTRUCTION with PC at pseudo_sigreturn. */
   {
     static int dbg_exc_count = 0;
-    if (dbg_exc_count < 10) {
+    static int initfn_dumped = 0;
+    if (dbg_exc_count < 30) {
       dbg_exc_count++;
-      fprintf(dbgout, "MACH[%d]: exc=%d code0=%lld pc=0x%lx lr=0x%lx",
+      fprintf(dbgout, "MACH[%d]: exc=%d code0=%lld pc=0x%lx lr=0x%lx vsp=0x%lx rnil=0x%lx rt=0x%lx fp=0x%lx",
               dbg_exc_count, exception, (long long)code0,
-              (unsigned long)ts->__pc, (unsigned long)ts->__lr);
+              (unsigned long)ts->__pc, (unsigned long)ts->__lr,
+              (unsigned long)ts->__x[25],
+              (unsigned long)ts->__x[6], (unsigned long)ts->__x[7],
+              (unsigned long)ts->__x[29]);
       if (exception == EXC_BAD_ACCESS) {
         fprintf(dbgout, " addr=0x%llx x0=0x%lx x9=0x%lx x10=0x%lx x15=0x%lx sp=0x%lx",
                 (long long)code[1],
@@ -2554,9 +2690,82 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
               }
             }
           }
+          /* Dump code around crash PC for KERN_INVALID_ADDRESS in lisp code */
+          {
+            natural pc_raw = ts->__pc & 0x00FFFFFFFFFFFFFF;
+            if (pc_raw > 0x200000000ULL && pc_raw < 0x400000000000ULL) {
+              opcode *pc_code = (opcode *)(pc_raw - 32);  /* 8 instrs before */
+              int ci;
+              fprintf(dbgout, "\n  code dump around crash pc=0x%lx:\n", (unsigned long)pc_raw);
+              for (ci = 0; ci < 24; ci++) {
+                char marker = ((ci == 8) ? '>' : ' ');
+                fprintf(dbgout, "   %c[%+3d] 0x%lx: %08x\n", marker, (ci-8)*4, (unsigned long)(pc_raw + (ci-8)*4), pc_code[ci]);
+              }
+            }
+            /* Also dump lisp frame contents from SP and walk frame chain */
+            {
+              natural sp = ts->__sp;
+              if (sp > 0x100000000ULL && sp < 0x800000000000ULL) {
+                LispObj *frame = (LispObj *)sp;
+                fprintf(dbgout, "  lisp frame at sp=0x%lx:\n", (unsigned long)sp);
+                fprintf(dbgout, "    [0] savevsp = 0x%lx\n", (unsigned long)frame[0]);
+                fprintf(dbgout, "    [1] savelr  = 0x%lx\n", (unsigned long)frame[1]);
+                fprintf(dbgout, "    [2] savefn  = 0x%lx\n", (unsigned long)frame[2]);
+                fprintf(dbgout, "    [3] savefp  = 0x%lx\n", (unsigned long)frame[3]);
+                /* Walk frame chain via savefp (x29 = __fp) */
+                natural fp = ts->__fp;
+                int fi;
+                for (fi = 0; fi < 5 && fp > 0x100000000ULL && fp < 0x800000000000ULL; fi++) {
+                  LispObj *fr = (LispObj *)fp;
+                  fprintf(dbgout, "  frame[%d] at fp=0x%lx: savevsp=0x%lx savelr=0x%lx savefn=0x%lx savefp=0x%lx\n",
+                          fi, (unsigned long)fp, (unsigned long)fr[0], (unsigned long)fr[1],
+                          (unsigned long)fr[2], (unsigned long)fr[3]);
+                  fp = (natural)fr[3]; /* follow savefp chain */
+                }
+              }
+            }
+            fflush(dbgout);
+            /* Dump vstack contents */
+            {
+              natural dbg_vsp = ts->__x[25];
+              if (dbg_vsp > 0x100000000ULL && dbg_vsp < 0x800000000000ULL) {
+                LispObj *vs = (LispObj *)dbg_vsp;
+                int vi;
+                fprintf(dbgout, "  vstack at vsp=0x%lx:\n", (unsigned long)dbg_vsp);
+                for (vi = 0; vi < 12; vi++) {
+                  fprintf(dbgout, "    [vsp+%d] = 0x%lx\n", vi*8, (unsigned long)vs[vi]);
+                }
+                fflush(dbgout);
+              }
+            }
+            /* Dump LR code context too */
+            {
+              natural lr_raw = ts->__lr & 0x00FFFFFFFFFFFFFF;
+              if (lr_raw > 0x200000000ULL && lr_raw < 0x400000000000ULL) {
+                opcode *lr_code = (opcode *)(lr_raw - 16);
+                int ci;
+                fprintf(dbgout, "  code around lr=0x%lx:\n", (unsigned long)lr_raw);
+                for (ci = 0; ci < 12; ci++) {
+                  char marker = ((ci == 4) ? '>' : ' ');
+                  fprintf(dbgout, "   %c[%+3d] 0x%lx: %08x\n", marker, (ci-4)*4, (unsigned long)(lr_raw + (ci-4)*4), lr_code[ci]);
+                }
+              }
+            }
+          }
         }
       }
       fprintf(dbgout, "\n");
+      /* One-time dump of init function code around alloc trap */
+      if (!initfn_dumped && exception == EXC_BAD_INSTRUCTION && ts->__pc > 0x200000000000ULL) {
+        initfn_dumped = 1;
+        opcode *code_start = (opcode *)((ts->__pc & 0x00FFFFFFFFFFFFFF) - 0x10);
+        int ci;
+        fprintf(dbgout, "  initfn code dump (24 instrs from pc-0x10):\n");
+        for (ci = 0; ci < 24; ci++) {
+          fprintf(dbgout, "    [%+3d] %08x\n", (ci-4)*4, code_start[ci]);
+        }
+        fflush(dbgout);
+      }
       fflush(dbgout);
     }
   }
@@ -2602,8 +2811,16 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
       *out_ts = *ts;
       kret = KERN_SUCCESS;
     } else {
-      /* Protection fault outside heap — dispatch as SIGBUS */
+      /* Protection fault outside heap (e.g. vstack guard) — dispatch as SIGBUS */
       signum = SIGBUS;
+      kret = setup_signal_frame(thread,
+                                (void *)DARWIN_EXCEPTION_HANDLER,
+                                signum,
+                                code0,
+                                tcr,
+                                ts,
+                                out_ts);
+      goto done;
     }
     if (!signum) goto done;
   } else {

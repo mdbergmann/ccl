@@ -1644,9 +1644,9 @@
                       ;; Plain register
                       (t
                        (logior (cond ((and is-sub sets-flags) #xeb000000)
-                                      (is-sub                  #xcb000000)
-                                      (sets-flags              #xab000000)
-                                      (t                       #x8b000000))
+                                     (is-sub                  #xcb000000)
+                                     (sets-flags              #xab000000)
+                                     (t                       #x8b000000))
                                (ash (gpr src2) 16)
                                (ash (gpr rn) 5)
                                (gpr rd)))))))))

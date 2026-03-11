@@ -59,21 +59,29 @@
               (uuo-error-wrong-nargs)
               ,ok2)))))))
 
-;;; ARM64 lisp frame: 2 slots (savevsp + savelr), 16 bytes total.
-;;; No marker word, no fn save (unlike ARM32's 4-slot frame).
+;;; ARM64 lisp frame: 4 slots (savevsp, savelr, savefn, savefp), 32 bytes total.
+;;; Must save/restore nfn (x10) and fp (x29) for the frame pointer chain.
 (defarm64lapmacro build-lisp-frame (&optional (vsp-arg 'vsp))
-  `(stp ,vsp-arg lr (:@! sp (:$ (- arm64::lisp-frame.size)))))
+  `(progn
+    (stp ,vsp-arg lr (:@! sp (:$ (- arm64::lisp-frame.size))))
+    (stp nfn x29 (:@ sp (:$ arm64::lisp-frame.savefn)))
+    (add x29 sp (:$ 0))))
 
 (defarm64lapmacro restore-lisp-frame ()
-  `(ldp vsp lr (:@+ sp (:$ arm64::lisp-frame.size))))
+  `(progn
+    (ldp nfn x29 (:@ sp (:$ arm64::lisp-frame.savefn)))
+    (ldp vsp lr (:@+ sp (:$ arm64::lisp-frame.size)))))
 
 (defarm64lapmacro return-lisp-frame ()
   `(progn
+    (ldp nfn x29 (:@ sp (:$ arm64::lisp-frame.savefn)))
     (ldp vsp lr (:@+ sp (:$ arm64::lisp-frame.size)))
     (ret)))
 
 (defarm64lapmacro discard-lisp-frame ()
-  `(add sp sp (:$ arm64::lisp-frame.size)))
+  `(progn
+    (ldr x29 (:@ sp (:$ arm64::lisp-frame.savefp)))
+    (add sp sp (:$ arm64::lisp-frame.size))))
 
 
 ;;; Push/pop using pre-decrement/post-increment on a stack pointer register.
@@ -178,8 +186,8 @@
   `(progn
     (load-constant fname ,function-name)
     (ldr nfn (:@ fname (:$ arm64::symbol.fcell)))
-    (ldr rt (:@ nfn (:$ arm64::function.entrypoint)))
-    (blr rt)))
+    (ldr imm2 (:@ nfn (:$ arm64::function.entrypoint)))
+    (blr imm2)))
 
 
 ;;; Vector header access.  Header is at offset -8 from tagged pointer.
@@ -429,16 +437,16 @@
 (defarm64lapmacro spjump (spno)
   (let* ((offset (arm64::arm64-subprimitive-offset spno)))
     `(progn
-      (ldr rt (:@ rcontext (:$ ,offset)))
-      (br rt))))
+      (ldr imm2 (:@ rcontext (:$ ,offset)))
+      (br imm2))))
 
 ;;; Call a subprimitive (returns).
 ;;; Loads the subprim address from the TCR subprim table, then calls.
 (defarm64lapmacro spcall (spno)
   (let* ((offset (arm64::arm64-subprimitive-offset spno)))
     `(progn
-      (ldr rt (:@ rcontext (:$ ,offset)))
-      (blr rt))))
+      (ldr imm2 (:@ rcontext (:$ ,offset)))
+      (blr imm2))))
 
 
 ;;; UUO trap pseudo-instructions.

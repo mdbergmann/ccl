@@ -335,7 +335,7 @@ _spentry(builtin_ash)
         __(branch_if_not_fixnum(arg_y,9f,imm0))
         __(branch_if_not_fixnum(arg_z,9f,imm0))
         __(branch_if_negative(arg_z,0f))
-        __(cbnz arg_z,2f)
+        __(cbnz arg_z,1f)
         __(mov arg_z,arg_y)
         __(ret)
 0:              
@@ -3051,8 +3051,8 @@ _spentry(eabi_ff_call)
         __(str allocptr,[rcontext,#tcr.save_allocptr])
         __(mov temp0,sp)
         __(str temp0,[rcontext,#tcr.last_lisp_frame])
-        /* Save rcontext in x29 (callee-saved in AAPCS64). */
-        __(mov x29,rcontext)
+        /* x28 (rcontext) and x29 (fp) are callee-saved in AAPCS64,
+           so they are preserved across the C call automatically. */
         /* Unbox the function pointer from arg_z */
         __(test_fixnum(imm2,arg_z))
         __(cbnz imm2,0f)
@@ -3086,7 +3086,7 @@ _spentry(eabi_ff_call)
         __(load_nil(rnil))
         __(load_t(rt,rnil))
         __(load_voidptr(allocptr))
-        __(mov rcontext,x29)
+        /* rcontext (x28) preserved by callee-saved convention */
         __(mov imm2,#0)
         __(str imm2,[rcontext,#tcr.valence])
         __(ldr allocptr,[rcontext,#tcr.save_allocptr])
@@ -3562,6 +3562,7 @@ local_label(throw_pushed_values):
         __(ldr imm0,[temp0,#catch_frame.link])
         __(str imm0,[rcontext,#tcr.catch_top])
         __(ldr lr,[sp,#catch_frame.size+lisp_frame.savelr])
+        __(ldp nfn,x29,[sp,#catch_frame.size+lisp_frame.savefn])
         __(add sp,sp,#catch_frame.size+lisp_frame.size)
         __(pop_lisp_fprs())
         __(ret)
@@ -3593,6 +3594,7 @@ local_label(_nthrow1v_dont_unbind):
         __(cbnz temp2,0f)
         __(ldr vsp,[sp,#catch_frame.size+lisp_frame.savevsp])
 0:
+        __(ldr x29,[sp,#catch_frame.size+lisp_frame.savefp])
         __(add sp,sp,#catch_frame.size+lisp_frame.size)
         __(pop_lisp_fprs())
         __(b local_label(_nthrow1v_nextframe))
@@ -3626,7 +3628,7 @@ C(swap_lr_lisp_frame_temp0):
         __(str lr,[temp0,#lisp_frame.savelr])
         __(mov lr,imm0)
 C(swap_lr_lisp_frame_temp0_end):            
-        __(ldr nfn,[temp0,#lisp_frame.savefn])
+        __(ldp nfn,x29,[temp0,#lisp_frame.savefn])
         __(str fn,[temp0,#lisp_frame.savefn])
         __(ldr vsp,[temp0,#lisp_frame.savevsp])
         __(add temp0,temp0,#lisp_frame.size)
@@ -3634,9 +3636,9 @@ C(swap_lr_lisp_frame_temp0_end):
         __(str imm1,[rcontext,#tcr.unwinding])
         __(blr lr)
         __(mov imm1,#1)
-        __(ldr arg_z,[sp,#8])
+        __(ldr arg_z,[sp,#2*node_size])
         __(str imm1,[rcontext,#tcr.unwinding])
-        __(ldr temp2,[sp,#12])
+        __(ldr temp2,[sp,#3*node_size])
         __(add sp,sp,#4*node_size)
         __(restore_lisp_frame())
         __(discard_lisp_fprs())
@@ -3685,9 +3687,10 @@ local_label(nthrownv_push_loop):
 local_label(nthrownv_push_test):        
         __(cbnz arg_z,local_label(nthrownv_push_loop))
         __(mov vsp,imm0)
-local_label(nthrownv_skip):     
+local_label(nthrownv_skip):
+        __(ldr x29,[sp,#catch_frame.size+lisp_frame.savefp])
         __(add sp,sp,#catch_frame.size+lisp_frame.size)
-        __(pop_lisp_fprs())          
+        __(pop_lisp_fprs())
         __(b local_label(nthrownv_nextframe))                
 local_label(nthrownv_do_unwind):
         __(ldr arg_x,[temp0,#catch_frame.xframe])
@@ -3722,7 +3725,7 @@ C(swap_lr_lisp_frame_arg_z):
         __(str lr,[arg_z,#lisp_frame.savelr])
         __(mov lr,imm0)
 C(swap_lr_lisp_frame_arg_z_end):                   
-        __(ldr nfn,[arg_z,#lisp_frame.savefn])
+        __(ldp nfn,x29,[arg_z,#lisp_frame.savefn])
         __(str fn,[arg_z,#lisp_frame.savefn])
         __(ldr vsp,[arg_z,#lisp_frame.savevsp])
         __(add arg_z,arg_z,#lisp_frame.size)
