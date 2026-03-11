@@ -57,6 +57,14 @@
                     (if (> depth max)
                       (setq max depth)))))))))
 
+;;; Total NFP frame size: save area (8 bytes for old tcr.nfp) + data,
+;;; rounded up to 16-byte alignment (required by AArch64 SP).
+(defun arm642-nfp-frame-size ()
+  (let* ((depth (arm642-max-nfp-depth)))
+    (if (> depth 0)
+      (logand (+ depth 8 15) -16)
+      0)))
+
 
 (defmacro with-arm642-p2-declarations (declsform &body body)
   `(let* ((*arm642-tail-allow* *arm642-tail-allow*)

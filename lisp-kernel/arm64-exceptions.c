@@ -889,6 +889,39 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
       }
     }
   }
+  /* For type errors (code 157), read arg_z symbol name (expected type) */
+  {
+    LispObj ax = xpGPR(xp, 13);
+    if (ax == 157) {  /* $xwrongtype */
+      LispObj az = xpGPR(xp, 15);
+      unsigned az_tag = (unsigned)(az >> 56);
+      natural az_raw = az & 0x00FFFFFFFFFFFFFF;
+      if (az_tag == 0x63 && az_raw > 0x100000000LL && az_raw < 0x400000000000LL) {
+        LispObj *sym = (LispObj *)az_raw;
+        LispObj pname = sym[0];  /* symbol.pname is first slot after header */
+        natural pname_raw = pname & 0x00FFFFFFFFFFFFFF;
+        if (pname_raw > 0x100000000LL && pname_raw < 0x400000000000LL) {
+          LispObj pname_hdr = *((LispObj *)pname_raw - 1);
+          int pname_len = (int)(pname_hdr & 0xFFFFFFFF);
+          unsigned char *pname_data = (unsigned char *)pname_raw;
+          if (pname_len > 0 && pname_len < 256) {
+            unsigned char pname_subtag = (pname_hdr >> 56) & 0xFF;
+            int char_size = (pname_subtag & 0x7F) == 7 ? 4 : 1;
+            int pi;
+            fprintf(dbgout, "  TYPE ERROR: expected type = \"");
+            for (pi = 0; pi < pname_len; pi++)
+              fprintf(dbgout, "%c", pname_data[pi * char_size]);
+            fprintf(dbgout, "\"\n");
+          }
+        }
+      }
+      /* Also show arg_y (the value) */
+      LispObj ay = xpGPR(xp, 14);
+      fprintf(dbgout, "  TYPE ERROR: value = 0x%lx (tag=0x%02x)\n",
+              (unsigned long)ay, (unsigned)(ay >> 56));
+    }
+    fflush(dbgout);
+  }
   /* Dump arg_z (x15) and arg_y (x11) if they look like heap pointers */
   {
     LispObj az = xpGPR(xp, 15);
@@ -1135,6 +1168,11 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
     }
   }
   fflush(dbgout);
+  if (errdisp == unbound_marker) {
+    fprintf(dbgout, "handle_error: %%err-disp is unbound — aborting.\n");
+    fflush(dbgout);
+    _exit(1);
+  }
   if (is_uvector_fulltag(fulltag_of(errdisp)) &&
       (header_subtag(header_of(errdisp)) == subtag_macptr)) {
     return callback_for_trap(errdisp, xp, arg1, arg2, bumpP);
@@ -2589,6 +2627,9 @@ setup_signal_frame(mach_port_t thread,
   *new_ts = *ts;
   new_ts->__pc = (natural) handler_address;
   new_ts->__lr = (natural) pseudo_sigreturn;
+  fprintf(dbgout, "DBG setup_signal_frame: handler=0x%lx lr(pseudo_sigreturn)=0x%lx signum=%d sp=0x%lx\n",
+          (unsigned long)new_ts->__pc, (unsigned long)new_ts->__lr, signum, (unsigned long)stackp);
+  fflush(dbgout);
   new_ts->__x[0] = signum;
   new_ts->__x[1] = (natural) info;
   new_ts->__x[2] = (natural) pseudosigcontext;

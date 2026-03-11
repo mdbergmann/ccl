@@ -16,6 +16,9 @@
 
 (in-package "CCL")
 
+;;; During cold boot, locks from image build have stale macptrs.
+;;; This flag makes lock acquisition a no-op (safe: boot is single-threaded).
+(defvar *early-boot* t)
 
 ;;; Bootstrapping for futexes
 #+(and linux-target no (or x86-target arm-target))
@@ -622,7 +625,8 @@
   
 
 (defun %lock-recursive-lock-object (lock &optional flag)
-  (%lock-recursive-lock-ptr (recursive-lock-ptr lock) lock flag))
+  (unless *early-boot*
+    (%lock-recursive-lock-ptr (recursive-lock-ptr lock) lock flag)))
 
 
 
@@ -777,7 +781,8 @@
   nil)
 
 (defun %unlock-recursive-lock-object (lock)
-  (%unlock-recursive-lock-ptr (%svref lock target::lock._value-cell) lock))
+  (unless *early-boot*
+    (%unlock-recursive-lock-ptr (%svref lock target::lock._value-cell) lock)))
 
 
 
@@ -927,7 +932,8 @@
 
 
 (defun write-lock-rwlock (lock &optional flag)
-  (%write-lock-rwlock-ptr (read-write-lock-ptr lock) lock flag))
+  (unless *early-boot*
+    (%write-lock-rwlock-ptr (read-write-lock-ptr lock) lock flag)))
 
 #-futex
 (defun %read-lock-rwlock-ptr (ptr lock &optional flag)
@@ -1001,7 +1007,8 @@
 
 
 (defun read-lock-rwlock (lock &optional flag)
-  (%read-lock-rwlock-ptr (read-write-lock-ptr lock) lock flag))
+  (unless *early-boot*
+    (%read-lock-rwlock-ptr (read-write-lock-ptr lock) lock flag)))
 
 
 
@@ -1095,7 +1102,8 @@
 
 
 (defun unlock-rwlock (lock)
-  (%unlock-rwlock-ptr (read-write-lock-ptr lock) lock))
+  (unless *early-boot*
+    (%unlock-rwlock-ptr (read-write-lock-ptr lock) lock)))
 
 ;;; There are all kinds of ways to lose here.
 ;;; The caller must have read access to the lock exactly once,

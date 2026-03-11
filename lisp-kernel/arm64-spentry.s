@@ -1250,10 +1250,11 @@ _spentry(stack_misc_alloc)
         __(load_marker(temp0,tag_stack_alloc))
         __(mov temp1,sp)
         __(bls stack_misc_alloc_no_room)
+        __(mov imm2,arg_z)
         __(eor imm0,arg_z,#uvector_mask)
         __(lsl imm0,imm0,#subtag_shift)
         __(orr imm0,imm0,arg_y)
-        __(stack_allocate_zeroed_vector(arg_z,imm0,imm1,arg_z))
+        __(stack_allocate_zeroed_vector(arg_z,imm0,imm1,imm2))
         __(stp temp0,temp1,[sp,#-dnode_size]!)
         __(ret)
 /* Too large to safely fit on stack.  Heap-cons the vector, but make  */
@@ -1878,7 +1879,7 @@ _spentry(makestackblock)
         __(add temp1,sp,#dnode_size)
         __(make_header(imm1,macptr.element_count,subtag_macptr))
         __(str imm1,[sp,#-macptr.size]!)
-        __(mov arg_z,sp)
+        __(add arg_z,sp,#node_size)
         __(orr arg_z,arg_z,#(fulltag_misc << tag_shift))
         __(str temp1,[arg_z,#macptr.address])
         __(mov imm0,#0)
@@ -1912,7 +1913,7 @@ _spentry(makestackblock0)
         __(add temp1,sp,#dnode_size)
         __(make_header(imm1,macptr.element_count,subtag_macptr))
         __(str imm1,[sp,#-macptr.size]!)
-        __(mov arg_z,sp)
+        __(add arg_z,sp,#node_size)
         __(orr arg_z,arg_z,#(fulltag_misc << tag_shift))
         __(str temp1,[arg_z,#macptr.address])
         __(mov imm0,#0)
@@ -1921,7 +1922,7 @@ _spentry(makestackblock0)
         __(str imm0,[arg_z,#macptr.domain])
         __(stp imm1,temp0,[sp,#-dnode_size]!)
         __(ret)
-	
+
         /* Too big. Heap cons a gcable macptr  */
 1:
         __(load_marker(imm1,tag_stack_alloc))
@@ -1994,7 +1995,7 @@ _spentry(stkgvector)
         __(stack_allocate_zeroed_ivector(imm1,temp1))
         __(unbox_fixnum(imm1,temp0))
         __(strb gpr32(imm1),[sp,#7])
-        __(mov arg_z,sp)
+        __(add arg_z,sp,#node_size)
         __(orr arg_z,arg_z,#(fulltag_misc << tag_shift))
         __(add imm0,sp,nargs)
         __(stp arg_x,temp2,[sp,#-dnode_size]!)
@@ -2325,7 +2326,7 @@ _spentry(stack_misc_alloc_init)
         __(unbox_fixnum(imm0,arg_y))
         __(strb gpr32(imm0),[sp,#7])
         __(mov arg_y,arg_z)
-        __(mov arg_z,sp)
+        __(add arg_z,sp,#node_size)
         __(orr arg_z,arg_z,#(fulltag_misc << tag_shift))
         __(stp temp0,temp1,[sp,#-dnode_size]!)
         __(b initialize_vector)
@@ -3541,29 +3542,30 @@ local_label(throw_all_values):
         __(cmp temp1,#0)
         __(str imm0,[rcontext,#tcr.xframe])
         __(str imm1,[rcontext,#tcr.last_lisp_frame])
-        __(add imm0,vsp,nargs)
+        __(add imm2,vsp,nargs)
         __(ubfx imm0,temp0,#0,#56)
+        __(sub imm0,imm0,#node_size)  /* back to header = 16-byte aligned */
         __(mov sp,imm0)
-        __(ldr imm1,[sp,#catch_frame.size+lisp_frame.savevsp])
+        __(ldr imm1,[sp,#catch_frame.size+lisp_frame.savevsp+node_size])
         __(bne local_label(throw_push_test_entry))
-        __(ldr arg_z,[imm0,#-node_size])
+        __(ldr arg_z,[imm2,#-node_size])
         __(b local_label(throw_pushed_values))
 local_label(throw_push_test_entry):
         __(mov arg_x,nargs)
         __(b local_label(throw_push_test))
 local_label(throw_push_loop):
         __(sub arg_x,arg_x,#fixnumone)
-        __(ldr arg_y,[imm0,#-node_size]!)
+        __(ldr arg_y,[imm2,#-node_size]!)
         __(push1(arg_y,imm1))
-local_label(throw_push_test):   
+local_label(throw_push_test):
         __(cbnz  arg_x,local_label(throw_push_loop))
 local_label(throw_pushed_values):
         __(mov vsp,imm1)
         __(ldr imm0,[temp0,#catch_frame.link])
         __(str imm0,[rcontext,#tcr.catch_top])
-        __(ldr lr,[sp,#catch_frame.size+lisp_frame.savelr])
-        __(ldp nfn,x29,[sp,#catch_frame.size+lisp_frame.savefn])
-        __(add sp,sp,#catch_frame.size+lisp_frame.size)
+        __(ldr lr,[sp,#catch_frame.size+lisp_frame.savelr+node_size])
+        __(ldp nfn,x29,[sp,#catch_frame.size+lisp_frame.savefn+node_size])
+        __(add sp,sp,#catch_frame.size+lisp_frame.size+node_size)
         __(pop_lisp_fprs())
         __(ret)
 _endfn(C(_throw_found))        
@@ -3588,14 +3590,15 @@ local_label(_nthrow1v_dont_unbind):
         __(ldr temp1,[temp0,#catch_frame.catch_tag])
         __(cmp_tag_to_marker(temp1,imm1,tag_unbound))  /* unwind-protect ?  */
         __(ubfx imm0,temp0,#0,#56)
+        __(sub imm0,imm0,#node_size)  /* back to header = stack allocation point */
         __(mov sp,imm0)
         __(beq local_label(_nthrow1v_do_unwind))
         /* A catch frame.  If the last one, restore context from there.  */
         __(cbnz temp2,0f)
-        __(ldr vsp,[sp,#catch_frame.size+lisp_frame.savevsp])
+        __(ldr vsp,[sp,#catch_frame.size+lisp_frame.savevsp+node_size])
 0:
-        __(ldr x29,[sp,#catch_frame.size+lisp_frame.savefp])
-        __(add sp,sp,#catch_frame.size+lisp_frame.size)
+        __(ldr x29,[sp,#catch_frame.size+lisp_frame.savefp+node_size])
+        __(add sp,sp,#catch_frame.size+lisp_frame.size+node_size)
         __(pop_lisp_fprs())
         __(b local_label(_nthrow1v_nextframe))
 local_label(_nthrow1v_do_unwind):
@@ -3603,7 +3606,7 @@ local_label(_nthrow1v_do_unwind):
         /* multiple-value case.  */
         /* Save our caller's LR and FN in the csp frame created by the unwind-  */
         /* protect.  (Clever, eh ?)  */
-        __(add sp,sp,#catch_frame.size)
+        __(add sp,sp,#catch_frame.size+node_size)
         /* We used to use a swp instruction to exchange the lr with
         the lisp_frame.savelr field of the lisp frame that temp0 addresses.
         Multicore ARMv7 machines include the ability to disable the swp
@@ -3671,35 +3674,37 @@ local_label(nthrownv_dont_unbind):
         __(ldr temp1,[temp0,#catch_frame.catch_tag])
         __(cmp_tag_to_marker(temp1,imm1,tag_unbound))  /* unwind-protect ?  */
         __(ubfx imm0,temp0,#0,#56)
+        __(sub imm0,imm0,#node_size)  /* back to header = 16-byte aligned */
         __(mov sp,imm0)
         __(beq local_label(nthrownv_do_unwind))
         __(cmp temp2,#0)
 /* A catch frame.  If the last one, restore context from there.  */
 	__(bne local_label(nthrownv_skip))
-        __(ldr imm0,[sp,#catch_frame.size+lisp_frame.savevsp])
+        __(ldr imm0,[sp,#catch_frame.size+lisp_frame.savevsp+node_size])
         __(add imm1,vsp,nargs)
         __(mov arg_z,nargs)
         __(b local_label(nthrownv_push_test))
-local_label(nthrownv_push_loop):        
+local_label(nthrownv_push_loop):
         __(sub arg_z,arg_z,#fixnumone)
         __(ldr temp1,[imm1,#-node_size]!)
         __(push1(temp1,imm0))
-local_label(nthrownv_push_test):        
+local_label(nthrownv_push_test):
         __(cbnz arg_z,local_label(nthrownv_push_loop))
         __(mov vsp,imm0)
 local_label(nthrownv_skip):
-        __(ldr x29,[sp,#catch_frame.size+lisp_frame.savefp])
-        __(add sp,sp,#catch_frame.size+lisp_frame.size)
+        __(ldr x29,[sp,#catch_frame.size+lisp_frame.savefp+node_size])
+        __(add sp,sp,#catch_frame.size+lisp_frame.size+node_size)
         __(pop_lisp_fprs())
         __(b local_label(nthrownv_nextframe))                
 local_label(nthrownv_do_unwind):
         __(ldr arg_x,[temp0,#catch_frame.xframe])
         __(ldr arg_z,[temp0,#catch_frame.last_lisp_frame])
         __(ubfx imm0,temp0,#0,#56)
+        __(sub imm0,imm0,#node_size)  /* back to header = 16-byte aligned */
         __(mov sp,imm0)
         __(str arg_x,[rcontext,#tcr.xframe])
         __(str arg_z,[rcontext,#tcr.last_lisp_frame])
-        __(add sp,sp,#catch_frame.size)
+        __(add sp,sp,#catch_frame.size+node_size)
         __(add imm1,nargs,#node_size)
         __(mov arg_z,sp)
         __(dnode_align(imm0,imm1,node_size))
@@ -3804,11 +3809,11 @@ _startfn(stack_misc_alloc_init_ivector)
         __(mov temp1,sp)
         __(stack_allocate_zeroed_ivector(imm0,imm1))
         __(mov arg_y,arg_z)
-        __(mov arg_z,sp)
+        __(add arg_z,sp,#node_size)
         __(orr arg_z,arg_z,#(fulltag_misc << tag_shift))
         __(stp temp0,temp1,[sp,#-dnode_size]!)
         __(b initialize_vector)
-_endfn        
+_endfn
 /* This is called from a lisp-style context and calls a lisp function. */
 /* This does the moral equivalent of */
 /*   (loop  */

@@ -1122,6 +1122,8 @@
   tlb-pointer
   shutdown-count
   safe-ref-address
+  last-lisp-frame                       ; when in foreign code
+  io-datum                              ; exception port datum (Darwin)
   nfp)
 
 ;;; Sub-word offsets for fields that are pairs of _word (4-byte)

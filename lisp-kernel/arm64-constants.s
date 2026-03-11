@@ -525,6 +525,7 @@ TCR_BIAS = 0
          _node(safe_ref_address)
 	 _node(last_lisp_frame)	/* when in foreign code */
 	 _node(io_datum)	/* exception port datum (Darwin) */
+	 _node(nfp)		/* native frame pointer for unboxed temps */
 	_ends
 
 TCR_FLAG_BIT_FOREIGN = 0

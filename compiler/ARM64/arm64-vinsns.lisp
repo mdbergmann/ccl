@@ -88,16 +88,27 @@
   (stp nfn x29 (:@ sp (:$ arm64::lisp-frame.savefn)))
   (add x29 sp (:$ 0)))
 
-;;; Save NFP (non-volatile FPR pointer).
-;;; On ARM64 with no GPR NVRs, this is essentially a no-op placeholder.
-;;; When NFP is actually used (for unboxed float temps), this would save
-;;; the native frame pointer. For now, it does nothing.
-(define-arm64-vinsn (save-nfp :predicatable) (()())
-  )
+;;; Save NFP: allocate an NFP frame on the C stack for unboxed temporaries.
+;;; Frame layout: [saved-old-tcr.nfp at SP+0] [data at SP+8 ... SP+8+max_depth]
+;;; Sets tcr.nfp = new SP so nested NFP vinsns can find the frame.
+(define-arm64-vinsn save-nfp (()
+                              ()
+                              ((temp :imm)))
+  ((:pred > (:apply arm642-max-nfp-depth) 0)
+   (ldr temp (:@ rcontext (:$ arm64::tcr.nfp)))
+   (sub sp sp (:$ (:apply arm642-nfp-frame-size)))
+   (str temp (:@ sp (:$ 0)))
+   (add temp sp (:$ 0))
+   (str temp (:@ rcontext (:$ arm64::tcr.nfp)))))
 
-;;; Restore NFP.  Like save-nfp, a placeholder for now.
-(define-arm64-vinsn (restore-nfp :predicatable) (()())
-  )
+;;; Restore NFP: pop the NFP frame, restoring old tcr.nfp.
+(define-arm64-vinsn restore-nfp (()
+                                 ()
+                                 ((temp :imm)))
+  ((:pred > (:apply arm642-max-nfp-depth) 0)
+   (ldr temp (:@ sp (:$ 0)))
+   (str temp (:@ rcontext (:$ arm64::tcr.nfp)))
+   (add sp sp (:$ (:apply arm642-nfp-frame-size)))))
 
 ;;; Restore full lisp context (load vsp, lr, and nfn from frame, pop frame).
 (define-arm64-vinsn (restore-full-lisp-context :lispcontext :pop :lrRestore :predicatable)

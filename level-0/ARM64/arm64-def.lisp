@@ -389,8 +389,8 @@
 (defarm64lapfunction %get-object ((macptr arg_y) (offset arg_z))
   (check-nargs 2)
   (trap-unless-xtype= arg_y arm64::subtag-macptr)
-  (macptr-ptr imm0 arg_y)
   (trap-unless-fixnum arg_z)
+  (macptr-ptr imm0 arg_y)
   (ldr arg_z (:@ imm0 arg_z))
   (ret))
 
@@ -398,8 +398,8 @@
 (defarm64lapfunction %set-object ((macptr arg_x) (offset arg_y) (value arg_z))
   (check-nargs 3)
   (trap-unless-xtype= arg_x arm64::subtag-macptr)
-  (macptr-ptr imm0 arg_x)
   (trap-unless-fixnum arg_y)
+  (macptr-ptr imm0 arg_x)
   (str arg_z (:@ imm0 arg_y))
   (ret))
 

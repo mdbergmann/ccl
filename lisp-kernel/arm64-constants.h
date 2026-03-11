@@ -508,7 +508,8 @@ typedef struct tcr {
   void *safe_ref_address;               /* 0x140 */
   LispObj last_lisp_frame;              /* 0x148 when in foreign code */
   void *io_datum;                       /* 0x150 exception port datum (Darwin) */
-  LispObj spare[5];                     /* 0x158-0x17F reserved/padding */
+  LispObj nfp;                          /* 0x158 native frame pointer for unboxed temps */
+  LispObj spare[4];                     /* 0x160-0x17F reserved/padding */
   LispObj sptab[256];                   /* 0x180 subprims dispatch table */
 } TCR;
 

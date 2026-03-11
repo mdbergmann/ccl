@@ -373,7 +373,7 @@
   (check-nargs 1)
   (trap-unless-xtype= arg_z arm64::subtag-macptr)
   (ldr imm0 (:@ arg_z (:$ arm64::macptr.address)))
-  (trap-unless-fixnum imm0)
+  (trap-unless-fixnum imm0 imm1)
   (mov arg_z imm0)
   (ret))
 

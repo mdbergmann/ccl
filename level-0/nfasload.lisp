@@ -1215,6 +1215,24 @@
       ;; Need to make %ALL-PACKAGES-LOCK% early, so that we can casually
       ;; do SET-PACKAGE in cold load functions.
       (setq %all-packages-lock% (make-read-write-lock))
+      ;; Locks from image build have stale macptrs; recreate them.
+      (dolist (p %all-packages%)
+        (setf (pkg.lock p) (make-read-write-lock)))
+      ;; Hash tables from image build have stale lock macptrs.
+      ;; Nil out exclusion locks — single-threaded boot needs no locking.
+      (when (and %find-classes% (nhash.exclusion-lock %find-classes%))
+        (setf (nhash.exclusion-lock %find-classes%) nil))
+      (when (and (boundp '*lfun-names*) *lfun-names* (nhash.exclusion-lock *lfun-names*))
+        (setf (nhash.exclusion-lock *lfun-names*) nil))
+      (when (and (boundp '%documentation) %documentation (nhash.exclusion-lock %documentation))
+        (setf (nhash.exclusion-lock %documentation) nil))
+      (when (and (boundp '*package-refs*) *package-refs* (nhash.exclusion-lock *package-refs*))
+        (setf (nhash.exclusion-lock *package-refs*) nil))
+      ;; Recreate stale recursive locks from image build.
+      (when (and (boundp '%documentation-lock%) %documentation-lock%)
+        (setq %documentation-lock% (make-lock)))
+      (when (and (boundp '*package-refs-lock*) *package-refs-lock*)
+        (setq *package-refs-lock* (make-lock)))
       (dolist (f (prog1 *xload-cold-load-functions* (setq *xload-cold-load-functions* nil)))
         (funcall f))
       (dolist (pair (prog1 *early-class-cells* (setq *early-class-cells* nil)))
@@ -1236,5 +1254,7 @@
                             (when (> idx max)
                               (setq max idx))))))
         (%set-binding-index max))
+      ;; Boot init complete — enable locking for subsequent code.
+      (setq *early-boot* nil)
       (%fasload *xload-startup-file*)))
 

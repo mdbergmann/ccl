@@ -152,6 +152,28 @@ between threads."
     (%svref r target::lock._value-cell)
     (report-bad-arg r 'recursive-lock)))
 
+;;; Minimal boot-time definitions; overridden by level-1/linux-files.lisp.
+(defun %wait-on-semaphore-ptr (s seconds milliseconds &optional flag)
+  (declare (ignore flag))
+  (let* ((status (ff-call
+                  (%kernel-import target::kernel-import-wait-on-semaphore)
+                  :address s
+                  :unsigned seconds
+                  :unsigned milliseconds
+                  :signed)))
+    (zerop status)))
+
+(defun %process-wait-on-semaphore-ptr (s seconds milliseconds &optional whostate flag)
+  (declare (ignore whostate))
+  (loop
+    (when (%wait-on-semaphore-ptr s seconds milliseconds flag)
+      (return t))))
+
+;;; Minimal boot-time definition; overridden by lib/misc.lisp with formatted version.
+(defun %lock-whostate-string (string lock)
+  (declare (ignore lock))
+  string)
+
 (defun recursive-lock-whostate (r)
   (if (and (eq target::subtag-lock (typecode r))
            (eq (%svref r target::lock.kind-cell) 'recursive-lock))

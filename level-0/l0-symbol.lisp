@@ -260,14 +260,16 @@
     (with-lock-grabbed (binding-index-lock)
       (gethash idx binding-index-reverse-map)))
   (defun cold-load-binding-index (sym)
-    ;; Index may have been assigned via xloader.  Update
-    ;; reverse map
-    (with-lock-grabbed (binding-index-lock)
-      (let* ((idx (%svref (symptr->symvector (%symbol->symptr sym))
-                          target::symbol.binding-index-cell)))
-        (declare (fixnum idx))
-        (unless (zerop idx)
-          (setf (gethash idx binding-index-reverse-map) sym))))))
+    ;; Index may have been assigned via xloader.  Update reverse map.
+    ;; No locking: only called during single-threaded cold boot.
+    ;; Clear stale hash table lock on first call.
+    (when (nhash.exclusion-lock binding-index-reverse-map)
+      (setf (nhash.exclusion-lock binding-index-reverse-map) nil))
+    (let* ((idx (%svref (symptr->symvector (%symbol->symptr sym))
+                        target::symbol.binding-index-cell)))
+      (declare (fixnum idx))
+      (unless (zerop idx)
+        (setf (gethash idx binding-index-reverse-map) sym)))))
 
        
 
