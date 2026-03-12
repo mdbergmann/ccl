@@ -548,6 +548,12 @@ define(`RESERVATION_DISCHARGE',(0x2008+(LOWMEM_BIAS)))
    fixnum values and byte offsets.  On ARM64 with fixnumshift=0, we must
    use the byte offset explicitly.  Entry 1 is at byte offset node_size. */
 INTERRUPT_LEVEL_BINDING_INDEX = node_size
+
+/* On ARM64 with fixnumshift=0, binding indices stored in symbols are slot
+   indices (fixnums), not byte offsets.  To use them as byte offsets into
+   the TLB, shift left by (node_shift - fixnum_shift).  On platforms where
+   fixnumshift == node_shift (e.g. ARM32, x86-64), this is 0 (identity). */
+fixnumshift_to_node_shift = node_shift - fixnum_shift    /* = 3 on ARM64 */
         
 /* Condition bits, not to be confused with condition codes (which
    depend on them.) */

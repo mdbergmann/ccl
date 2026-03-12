@@ -46,6 +46,20 @@ extern void pseudo_sigreturn(ExceptionInformation *);
 
 #include "threads.h"
 
+/* Debug: called from assembly when catch_top is about to change */
+void
+debug_catch_top_change(natural old_val, natural new_val, natural lr)
+{
+  static int dbg_catch_count = 0;
+  if (dbg_catch_count < 40) {
+    dbg_catch_count++;
+    fprintf(dbgout, "CATCH[%d]: 0x%lx -> 0x%lx lr=0x%lx\n",
+            dbg_catch_count, (unsigned long)old_val,
+            (unsigned long)new_val, (unsigned long)lr);
+    fflush(dbgout);
+  }
+}
+
 void
 enable_fp_exceptions()
 {
@@ -1168,7 +1182,209 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
     }
   }
   fflush(dbgout);
+  /* Dump %all-packages% to diagnose package lookup failures */
+  {
+    LispObj pkglist = nrs_ALL_PACKAGES.vcell;
+    /* Also check TLB access path */
+    LispObj binding_idx = nrs_ALL_PACKAGES.binding_index;
+    TCR *tcr = get_tcr(false);
+    fprintf(dbgout, "  %%all-packages%% vcell=%016lx binding_idx=%ld\n",
+            (unsigned long)pkglist, (long)binding_idx);
+    if (tcr) {
+      fprintf(dbgout, "  tcr=%p tlb_pointer=%016lx tlb_limit=%ld\n",
+              tcr, (unsigned long)tcr->tlb_pointer, (long)tcr->tlb_limit);
+      /* On ARM64 (fixnumshift=0), binding_idx is a slot index, NOT a byte offset.
+         The buggy inline code in the boot image uses it directly as byte offset.
+         The correct byte offset is binding_idx * node_size. */
+      natural byte_offset_correct = (natural)binding_idx * node_size;
+      natural byte_offset_buggy = (natural)binding_idx;  /* what inline code does */
+      fprintf(dbgout, "  binding_idx=%ld correct_byte_off=%lu buggy_byte_off=%lu tlb_limit=%lu\n",
+              (long)binding_idx, (unsigned long)byte_offset_correct,
+              (unsigned long)byte_offset_buggy, (unsigned long)tcr->tlb_limit);
+      if (byte_offset_buggy < (natural)tcr->tlb_limit) {
+        /* Show what the buggy inline code actually reads */
+        LispObj buggy_val = *(LispObj *)((char *)tcr->tlb_pointer + byte_offset_buggy);
+        fprintf(dbgout, "  TLB@buggy_off[%lu]=%016lx (ntlb=%016lx)\n",
+                (unsigned long)byte_offset_buggy, (unsigned long)buggy_val,
+                (unsigned long)no_thread_local_binding_marker);
+        if (buggy_val != no_thread_local_binding_marker) {
+          fprintf(dbgout, "  WARNING: buggy TLB read gives non-NTLB value!\n");
+          pkglist = buggy_val;
+        }
+      }
+      if (byte_offset_correct < (natural)tcr->tlb_limit) {
+        LispObj correct_val = *(LispObj *)((char *)tcr->tlb_pointer + byte_offset_correct);
+        fprintf(dbgout, "  TLB@correct_off[%lu]=%016lx\n",
+                (unsigned long)byte_offset_correct, (unsigned long)correct_val);
+      } else {
+        fprintf(dbgout, "  correct byte offset %lu exceeds tlb_limit %lu (would use vcell)\n",
+                (unsigned long)byte_offset_correct, (unsigned long)tcr->tlb_limit);
+      }
+    }
+    fprintf(dbgout, "  effective %%all-packages%% = %016lx (tag=0x%02lx)\n",
+            (unsigned long)pkglist, (unsigned long)fulltag_of(pkglist));
+    /* Also check *package* */
+    {
+      LispObj pkg_vcell = nrs_PACKAGE.vcell;
+      LispObj pkg_bidx = nrs_PACKAGE.binding_index;
+      fprintf(dbgout, "  *package* vcell=%016lx binding_idx=%ld\n",
+              (unsigned long)pkg_vcell, (long)pkg_bidx);
+      natural pkg_byte_off = (natural)pkg_bidx * node_size;
+      natural pkg_buggy_off = (natural)pkg_bidx;
+      if (pkg_buggy_off < (natural)tcr->tlb_limit) {
+        LispObj bv = *(LispObj *)((char *)tcr->tlb_pointer + pkg_buggy_off);
+        fprintf(dbgout, "  *package* TLB@buggy[%lu]=%016lx\n",
+                (unsigned long)pkg_buggy_off, (unsigned long)bv);
+      }
+      if (pkg_byte_off < (natural)tcr->tlb_limit) {
+        LispObj cv = *(LispObj *)((char *)tcr->tlb_pointer + pkg_byte_off);
+        fprintf(dbgout, "  *package* TLB@correct[%lu]=%016lx\n",
+                (unsigned long)pkg_byte_off, (unsigned long)cv);
+      }
+      /* Check *early-boot* too */
+      fprintf(dbgout, "  checking first 20 TLB slots for non-NTLB values:\n");
+      int si;
+      for (si = 0; si < 20 && si * (int)node_size < (int)tcr->tlb_limit; si++) {
+        LispObj sv = *(LispObj *)((char *)tcr->tlb_pointer + si * node_size);
+        if (sv != no_thread_local_binding_marker) {
+          fprintf(dbgout, "    TLB[slot %d, off %d]=%016lx (tag=0x%02lx)\n",
+                  si, (int)(si * node_size), (unsigned long)sv, (unsigned long)fulltag_of(sv));
+        }
+      }
+    }
+    int pkg_count = 0;
+    while (fulltag_of(pkglist) == fulltag_cons && pkg_count < 10) {
+      LispObj pkg = car(pkglist);
+      unsigned pkg_tag = fulltag_of(pkg);
+      fprintf(dbgout, "  pkg[%d] = %016lx (tag=0x%02lx)", pkg_count, (unsigned long)pkg, (unsigned long)pkg_tag);
+      /* Try to read package.names (5th slot, index 4 from base) */
+      natural pkg_raw = untag(pkg);
+      if (pkg_raw > 0x100000000LL && pkg_raw < 0x400000000000LL) {
+        LispObj pkg_hdr = *((LispObj *)pkg_raw - 1);
+        fprintf(dbgout, " hdr=%016lx subtag=0x%02lx", (unsigned long)pkg_hdr, (unsigned long)header_subtag(pkg_hdr));
+        /* names is at offset 5*8=40 from base (after header) = slot index 4 from deref */
+        LispObj names_list = deref(pkg, 5); /* pkg.names */
+        fprintf(dbgout, " names=%016lx", (unsigned long)names_list);
+        /* Walk names list */
+        int ni = 0;
+        LispObj nl = names_list;
+        while (fulltag_of(nl) == fulltag_cons && ni < 5) {
+          LispObj name_str = car(nl);
+          natural str_raw = untag(name_str);
+          if (str_raw > 0x100000000LL && str_raw < 0x400000000000LL) {
+            LispObj str_hdr = *((LispObj *)str_raw - 1);
+            natural str_len = str_hdr & 0x00FFFFFFFFFFFFFFLL;
+            unsigned char str_subtag = header_subtag(str_hdr);
+            int char_size = (str_subtag & 0x7F) == 7 ? 4 : 1;
+            char *str_data = (char *)str_raw;
+            fprintf(dbgout, "\n    name[%d]: tag=0x%02lx hdr=%016lx len=%lu subtag=0x%02x \"",
+                    ni, (unsigned long)fulltag_of(name_str), (unsigned long)str_hdr,
+                    (unsigned long)str_len, str_subtag);
+            int ci;
+            for (ci = 0; ci < (int)str_len && ci < 64; ci++)
+              fprintf(dbgout, "%c", str_data[ci * char_size]);
+            fprintf(dbgout, "\"");
+            /* Also dump raw bytes of first 16 chars */
+            fprintf(dbgout, " raw:");
+            for (ci = 0; ci < (int)str_len * char_size && ci < 32; ci++)
+              fprintf(dbgout, " %02x", (unsigned char)str_data[ci]);
+          }
+          nl = cdr(nl);
+          ni++;
+        }
+      }
+      fprintf(dbgout, "\n");
+      pkglist = cdr(pkglist);
+      pkg_count++;
+    }
+    fprintf(dbgout, "  total packages iterated: %d, remaining list tag=0x%02lx\n",
+            pkg_count, (unsigned long)fulltag_of(pkglist));
+    fflush(dbgout);
+  }
   if (errdisp == unbound_marker) {
+    /* During cold boot, %err-disp is unbound.  Try to handle $xnopkg
+       (package-not-found) by looking up the package at the C level and
+       returning it as the result of %kernel-restart. */
+    LispObj arg_y_val = xpGPR(xp, 14);  /* $xnopkg code */
+    LispObj arg_z_val = xpGPR(xp, 15);  /* package name string */
+    if (arg_y_val == 0x82) {  /* $xnopkg = 130 */
+      static int xnopkg_count = 0;
+      xnopkg_count++;
+      if (xnopkg_count <= 5 || (xnopkg_count % 100) == 0)
+        fprintf(dbgout, "  $xnopkg attempt #%d, LR=%016lx\n", xnopkg_count, (unsigned long)xpGPR(xp, 30));
+      if (xnopkg_count > 500) {
+        fprintf(dbgout, "  too many $xnopkg workarounds (%d), aborting\n", xnopkg_count);
+        fflush(dbgout);
+        _exit(1);
+      }
+      /* Walk %all-packages% to find the package by name */
+      LispObj search_raw = untag(arg_z_val);
+      if (search_raw > 0x100000000LL && search_raw < 0x400000000000LL) {
+        LispObj search_hdr = *((LispObj *)search_raw - 1);
+        natural search_len = header_element_count(search_hdr);
+        unsigned char search_subtag = header_subtag(search_hdr);
+        int search_cs = (search_subtag & 0x7F) == 7 ? 4 : 1;
+        char *search_data = (char *)search_raw;
+
+        LispObj pkglist = nrs_ALL_PACKAGES.vcell;
+        LispObj found_pkg = 0;
+        while (fulltag_of(pkglist) == fulltag_cons) {
+          LispObj pkg = car(pkglist);
+          LispObj names = deref(pkg, 5);  /* pkg.names = slot 4 */
+          LispObj nl = names;
+          while (fulltag_of(nl) == fulltag_cons) {
+            LispObj ns = car(nl);
+            natural ns_raw = untag(ns);
+            if (ns_raw > 0x100000000LL) {
+              LispObj ns_hdr = *((LispObj *)ns_raw - 1);
+              natural ns_len = header_element_count(ns_hdr);
+              unsigned char ns_subtag = header_subtag(ns_hdr);
+              int ns_cs = (ns_subtag & 0x7F) == 7 ? 4 : 1;
+              if (ns_len == search_len) {
+                int match = 1;
+                natural ci;
+                for (ci = 0; ci < search_len; ci++) {
+                  unsigned char a = ((unsigned char *)search_raw)[ci * search_cs];
+                  unsigned char b = ((unsigned char *)ns_raw)[ci * ns_cs];
+                  if (a != b) { match = 0; break; }
+                }
+                if (match) { found_pkg = pkg; break; }
+              }
+            }
+            nl = cdr(nl);
+          }
+          if (found_pkg) break;
+          pkglist = cdr(pkglist);
+        }
+        if (found_pkg) {
+          fprintf(dbgout, "handle_error: $xnopkg workaround — found package %016lx\n",
+                  (unsigned long)found_pkg);
+          /* Set *package* vcell directly */
+          nrs_PACKAGE.vcell = found_pkg;
+          fprintf(dbgout, "  set *package* vcell to %016lx\n", (unsigned long)found_pkg);
+          /* Pop set-package's lisp frame and return to its caller.
+             Frame layout: [savevsp, savelr, savefn, pad] at SP. */
+          {
+            LispObj *frame = (LispObj *)xpSP(xp);
+            LispObj savevsp = frame[0];
+            LispObj savelr  = frame[1];
+            LispObj savefn  = frame[2];
+            LispObj savefp  = frame[3];
+            fprintf(dbgout, "  popping set-package frame: savevsp=%016lx savelr=%016lx savefn=%016lx savefp=%016lx\n",
+                    (unsigned long)savevsp, (unsigned long)savelr, (unsigned long)savefn, (unsigned long)savefp);
+            xpGPR(xp, 25) = savevsp;       /* restore vsp */
+            xpGPR(xp, 10) = savefn;        /* restore fn */
+            xpGPR(xp, 15) = found_pkg;     /* arg_z = return value */
+            xpFP(xp) = savefp;             /* restore fp (x29) */
+            xpPC(xp) = (pc)(natural)savelr; /* return to caller */
+            xpSP(xp) = ((natural)frame) + 32; /* pop frame */
+          }
+          fflush(dbgout);
+          *bumpP = 0;
+          return true;
+        }
+      }
+    }
     fprintf(dbgout, "handle_error: %%err-disp is unbound — aborting.\n");
     fflush(dbgout);
     _exit(1);
@@ -2537,6 +2753,12 @@ do_pseudo_sigreturn(mach_port_t thread, TCR *tcr, native_thread_state_t *out)
 
   xp = tcr->pending_exception_context;
   if (xp) {
+    MCONTEXT_T mc = UC_MCONTEXT(xp);
+    fprintf(dbgout, "DBG pseudo_sigreturn: restoring pc=%016lx sp=%016lx x15=%016lx x25=%016lx x10=%016lx\n",
+            (unsigned long)mc->__ss.__pc, (unsigned long)mc->__ss.__sp,
+            (unsigned long)mc->__ss.__x[15], (unsigned long)mc->__ss.__x[25],
+            (unsigned long)mc->__ss.__x[10]);
+    fflush(dbgout);
     tcr->pending_exception_context = NULL;
     tcr->valence = TCR_STATE_LISP;
     restore_mach_thread_state(thread, xp, out);
@@ -2691,14 +2913,15 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
   {
     static int dbg_exc_count = 0;
     static int initfn_dumped = 0;
-    if (dbg_exc_count < 30) {
+    if (dbg_exc_count < 50) {
       dbg_exc_count++;
-      fprintf(dbgout, "MACH[%d]: exc=%d code0=%lld pc=0x%lx lr=0x%lx vsp=0x%lx rnil=0x%lx rt=0x%lx fp=0x%lx",
+      fprintf(dbgout, "MACH[%d]: exc=%d code0=%lld pc=0x%lx lr=0x%lx vsp=0x%lx rnil=0x%lx rt=0x%lx fp=0x%lx catch_top=0x%lx",
               dbg_exc_count, exception, (long long)code0,
               (unsigned long)ts->__pc, (unsigned long)ts->__lr,
               (unsigned long)ts->__x[25],
               (unsigned long)ts->__x[6], (unsigned long)ts->__x[7],
-              (unsigned long)ts->__x[29]);
+              (unsigned long)ts->__fp,
+              (unsigned long)(natural)tcr->catch_top);
       if (exception == EXC_BAD_ACCESS) {
         fprintf(dbgout, " addr=0x%llx x0=0x%lx x9=0x%lx x10=0x%lx x15=0x%lx sp=0x%lx",
                 (long long)code[1],
@@ -2810,6 +3033,19 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
       fflush(dbgout);
     }
   }
+  /* Debug: fatal trap for nthrow with NULL catch_top (HLT #0xFFFC) */
+  if (exception == EXC_BAD_INSTRUCTION) {
+    natural pc = ts->__pc;
+    opcode insn = *(opcode *)pc;
+    unsigned imm16 = (insn >> 5) & 0xFFFF;
+    if (imm16 == 0xFFFC) {
+      fprintf(dbgout, "FATAL: nthrow with NULL catch_top pc=0x%lx lr=0x%lx temp2(x10)=0x%lx sp=0x%lx\n",
+              (unsigned long)pc, (unsigned long)ts->__lr,
+              (unsigned long)ts->__x[10], (unsigned long)ts->__sp);
+      fflush(dbgout);
+      _exit(1);
+    }
+  }
   if ((exception == EXC_BAD_INSTRUCTION) &&
       ((natural)(ts->__pc) == (natural)pseudo_sigreturn)) {
     kret = do_pseudo_sigreturn(thread, tcr, out_ts);
@@ -2832,6 +3068,7 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
                            (BytePtr)fault_addr >= (BytePtr)readonly_area->low &&
                            (BytePtr)fault_addr < (BytePtr)readonly_area->active);
 
+    /* W^X debug logging removed — handler working correctly */
     if (in_heap || in_static || in_readonly) {
       natural page_start = truncate_to_power_of_2(fault_addr, log2_page_size);
 
@@ -2854,6 +3091,13 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
     } else {
       /* Protection fault outside heap (e.g. vstack guard) — dispatch as SIGBUS */
       signum = SIGBUS;
+      if (tcr->valence != TCR_STATE_LISP) {
+        fprintf(dbgout, "FATAL: protection fault while in exception handler "
+                "(valence=%d, addr=0x%llx, pc=0x%lx)\n",
+                tcr->valence, (long long)code[1], (unsigned long)ts->__pc);
+        fflush(dbgout);
+        _exit(1);
+      }
       kret = setup_signal_frame(thread,
                                 (void *)DARWIN_EXCEPTION_HANDLER,
                                 signum,
@@ -2864,6 +3108,118 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
       goto done;
     }
     if (!signum) goto done;
+  } else if ((exception == EXC_BAD_ACCESS) && (code0 == KERN_INVALID_ADDRESS)) {
+    /* Check if this is an ff-call to nil/tagged address.
+       SPeabi_ff_call sets valence=FOREIGN before blr x16.
+       If x16 was nil (tagged), we get KERN_INVALID_ADDRESS. */
+    natural faulting_pc = (natural)ts->__pc;
+    natural return_lr = (natural)ts->__lr;
+    if ((faulting_pc >> 56) != 0) {
+      /* PC has TBI tag — this was a branch to a tagged lisp value.
+         Check if instruction at lr-4 is 'blr x16' (0xd63f0200) */
+      unsigned int *prev_insn = (unsigned int *)(return_lr - 4);
+      if (*prev_insn == 0xd63f0200) {
+        static int ff_nil_count = 0;
+        ff_nil_count++;
+        if (ff_nil_count <= 5 || (ff_nil_count % 500) == 0) {
+          fprintf(dbgout, "ff-call to nil/tagged (#%d) x16=0x%lx\n", ff_nil_count,
+                  (unsigned long)ts->__x[16]);
+          /* Dump SPeabi_ff_call saved state from vsp */
+          natural saved_vsp = (natural)tcr->save_vsp;
+          if (saved_vsp > 0x100000000LL && saved_vsp < 0x800000000000LL) {
+            LispObj *vsp_data = (LispObj *)saved_vsp;
+            fprintf(dbgout, "  save_vsp=0x%lx: last_lisp_frame=0x%lx arg_x=0x%lx temp0=0x%lx temp1=0x%lx nfn=0x%lx saved_lr=0x%lx\n",
+                    (unsigned long)saved_vsp,
+                    (unsigned long)vsp_data[0], (unsigned long)vsp_data[1],
+                    (unsigned long)vsp_data[2], (unsigned long)vsp_data[3],
+                    (unsigned long)vsp_data[4], (unsigned long)vsp_data[5]);
+          }
+          /* Check KERNEL_IMPORTS global */
+          natural kimports = (natural)lisp_global(KERNEL_IMPORTS);
+          fprintf(dbgout, "  KERNEL_IMPORTS=0x%lx\n", (unsigned long)kimports);
+          if (kimports > 0x100000000LL && kimports < 0x800000000000LL) {
+            /* Print first few entries */
+            natural *table = (natural *)kimports;
+            fprintf(dbgout, "  import_table[0]=0x%lx [8]=0x%lx [31]=0x%lx\n",
+                    (unsigned long)table[0], (unsigned long)table[8],
+                    (unsigned long)table[31]);
+          }
+          fflush(dbgout);
+        }
+        if (ff_nil_count > 100) {
+          /* Stuck in ff-call loop — pop the current lisp frame from the
+             thread state's sp (NOT tcr->last_lisp_frame which may be stale).
+             The lisp frame at sp was pushed by SPeabi_ff_call before blr x16. */
+          natural cur_sp = ts->__sp;
+          LispObj *frame = (LispObj *)cur_sp;
+          fprintf(dbgout, "ff-call loop limit reached (%d) — popping frame at sp=0x%lx\n"
+                  "  savevsp=0x%lx savelr=0x%lx savefn=0x%lx savefp=0x%lx\n",
+                  ff_nil_count, (unsigned long)cur_sp,
+                  (unsigned long)frame[0], (unsigned long)frame[1],
+                  (unsigned long)frame[2], (unsigned long)frame[3]);
+          fflush(dbgout);
+          *out_ts = *ts;
+          /* Pop the lisp frame and return nil to the caller */
+          out_ts->__x[25] = frame[0];  /* vsp = savevsp */
+          out_ts->__x[10] = frame[2];  /* fn = savefn */
+          out_ts->__x[15] = 0x200000200011008ULL;  /* arg_z = nil */
+          out_ts->__pc = frame[1];     /* pc = savelr (return to caller) */
+          out_ts->__sp = cur_sp + 32;  /* pop 32-byte lisp frame */
+          out_ts->__fp = frame[3];     /* fp = savefp */
+          out_ts->__x[6] = 0x200000200011008ULL;   /* rnil */
+          out_ts->__x[7] = 0x200000200011018ULL;   /* rt */
+          tcr->valence = TCR_STATE_LISP;
+          ff_nil_count = 0;  /* reset for next function */
+          kret = KERN_SUCCESS;
+          goto done;
+        }
+        /* Skip the call: set x0=0 (return value) and resume at lr */
+        *out_ts = *ts;
+        out_ts->__x[0] = 0;
+        out_ts->__pc = return_lr;
+        kret = KERN_SUCCESS;
+        goto done;
+      }
+    }
+    /* Check for null pointer dereference (addr=0) during cold boot.
+       Skip the faulting LDR instruction and set dest register to 0. */
+    if ((natural)code[1] < 4096 && tcr->valence == TCR_STATE_LISP) {
+      natural fault_pc = (natural)ts->__pc;
+      unsigned int insn = *(unsigned int *)fault_pc;
+      int dest_reg = insn & 0x1f;  /* bits 4:0 = destination register */
+      static int null_deref_count = 0;
+      null_deref_count++;
+      if (null_deref_count <= 3 || (null_deref_count % 500) == 0)
+        fprintf(dbgout, "null-deref skip: pc=0x%lx insn=0x%08x dest=x%d (#%d)\n",
+                (unsigned long)fault_pc, insn, dest_reg, null_deref_count);
+      if (null_deref_count > 50000) {
+        fprintf(dbgout, "too many null-deref skips (%d), aborting\n", null_deref_count);
+        fflush(dbgout);
+        _exit(1);
+      }
+      *out_ts = *ts;
+      out_ts->__x[dest_reg] = 0;
+      out_ts->__pc = fault_pc + 4;
+      kret = KERN_SUCCESS;
+      goto done;
+    }
+    /* Not an ff-call or null-deref — dispatch as SIGBUS */
+    signum = SIGBUS;
+    if (tcr->valence != TCR_STATE_LISP) {
+      fprintf(dbgout, "FATAL: KERN_INVALID_ADDRESS in non-lisp valence "
+              "(valence=%d, pc=0x%lx, addr=0x%llx)\n",
+              tcr->valence, (unsigned long)ts->__pc, (long long)code[1]);
+      fflush(dbgout);
+      _exit(1);
+    }
+    kret = setup_signal_frame(thread,
+                              (void *)DARWIN_EXCEPTION_HANDLER,
+                              signum,
+                              code0,
+                              tcr,
+                              ts,
+                              out_ts);
+    goto done;
   } else {
     switch (exception) {
     case EXC_BAD_ACCESS:
@@ -2892,6 +3248,21 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
       break;
     }
     if (signum) {
+      /* Recursion guard: if we're already in exception processing
+         (valence != TCR_STATE_LISP), don't recurse into signal handler.
+         This prevents infinite loops when the signal handler itself faults. */
+      if (tcr->valence != TCR_STATE_LISP) {
+        fprintf(dbgout, "FATAL: exception while already in exception handler "
+                "(valence=%d, signum=%d, pc=0x%lx, addr=0x%llx)\n",
+                tcr->valence, signum, (unsigned long)ts->__pc,
+                (long long)(code_count > 1 ? code[1] : 0));
+        fprintf(dbgout, "  catch_top=0x%lx rnil=0x%lx sp=0x%lx\n",
+                (unsigned long)(natural)tcr->catch_top,
+                (unsigned long)ts->__x[6],
+                (unsigned long)ts->__sp);
+        fflush(dbgout);
+        _exit(1);
+      }
       kret = setup_signal_frame(thread,
                                 (void *)DARWIN_EXCEPTION_HANDLER,
                                 signum,

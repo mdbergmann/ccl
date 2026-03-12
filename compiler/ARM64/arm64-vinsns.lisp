@@ -2540,6 +2540,8 @@
 
 ;;; ref-symbol-value-inline: inline TLB lookup with unbound check.
 ;;; TBI: symbol fields accessed via tagged pointer (TBI ignores tag byte).
+;;; Note: on ARM64 with fixnumshift=0, binding-index is a slot index that
+;;; must be scaled by node-size (lsl #3) to get a byte offset into the TLB.
 (define-arm64-vinsn ref-symbol-value-inline (((dest :lisp))
                                              ((src (:lisp (:ne dest))))
                                              ((table :imm)

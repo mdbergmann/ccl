@@ -445,7 +445,7 @@ _spentry(bind)
 	__(cmp imm0,imm1)
         __(bhi 1f)
 	__(uuo_tlb_too_small(imm1))
-1:              
+1:
 	__(cmp imm1,#0)
 	__(ldr imm2,[rcontext,#tcr.tlb_pointer])
 	__(ldr imm0,[rcontext,#tcr.db_link])
@@ -716,7 +716,7 @@ _spentry(nthrow1value)
         __(cmp imm0,imm1)
         __(bhi 1f)
         __(uuo_tlb_too_small(imm1))
-1:              
+1:
         __(ldr temp2,[rcontext,#tcr.tlb_pointer])
         __(ldr imm0,[rcontext,#tcr.db_link])
         __(ldr temp1,[temp2,imm1])
@@ -750,7 +750,7 @@ _spentry(bind_self_boundp_check)
         __(cmp imm0,imm1)
         __(bhi 1f)
         __(uuo_tlb_too_small(imm1))
-1:              
+1:
         __(ldr temp2,[rcontext,#tcr.tlb_pointer])
         __(ldr imm0,[rcontext,#tcr.db_link])
         __(ldr temp1,[temp2,imm1])
@@ -3271,10 +3271,10 @@ local_label(misc_ref_single_float_vector):
 	__(ldr gpr32(imm0),[arg_y,arg_z,lsl #2])
         __(orr arg_z,imm1,imm0)
 	__(ret)
-local_label(misc_ref_simple_string):        
-        __(mov imm1,#tag_character<<tag_shift)        
+local_label(misc_ref_simple_string):
+        __(mov imm1,#tag_character<<tag_shift)
 	__(ldr gpr32(imm0),[arg_y,arg_z,lsl #2])
-	__(orr arg_z,imm1,imm0)
+	__(orr arg_z,imm1,imm0,lsl #charcode_shift)
 	__(ret)
 local_label(misc_ref_s32):        
 	__(ldrsw arg_z,[arg_y,arg_z,lsl #2])
@@ -3407,7 +3407,8 @@ local_label(misc_set_simple_string):
         __(extract_tag(imm0,arg_z))
         __(cmp imm0,#tag_character)
         __(bne local_label(set_bad))
-        __(str gpr32(arg_z),[arg_x,arg_y,lsl #2])
+        __(lsr imm0,arg_z,#charcode_shift)
+        __(str gpr32(imm0),[arg_x,arg_y,lsl #2])
 	__(ret)
 local_label(misc_set_s32):
         __(extract_signed_byte(imm0,arg_z,32))
@@ -3562,6 +3563,10 @@ local_label(throw_push_test):
 local_label(throw_pushed_values):
         __(mov vsp,imm1)
         __(ldr imm0,[temp0,#catch_frame.link])
+        /* Debug: trap if popping last catch frame */
+        __(cbnz imm0,0f)
+        __(hlt #0xFFF9)
+0:
         __(str imm0,[rcontext,#tcr.catch_top])
         __(ldr lr,[sp,#catch_frame.size+lisp_frame.savelr+node_size])
         __(ldp nfn,x29,[sp,#catch_frame.size+lisp_frame.savefn+node_size])
@@ -3578,6 +3583,7 @@ local_label(_nthrow1v_nextframe):
         __(ldr imm1,[rcontext,#tcr.db_link])
         __(set_nargs(1))
         __(blt local_label(_nthrow1v_done))
+        __(cbz temp0,local_label(_nthrow1v_no_catch))
         __(ldr arg_y,[temp0,#catch_frame.link])
         __(ldr imm0,[temp0,#catch_frame.db_link])
         __(cmp imm0,imm1)
@@ -3641,11 +3647,16 @@ C(swap_lr_lisp_frame_temp0_end):
         __(mov imm1,#1)
         __(ldr arg_z,[sp,#2*node_size])
         __(str imm1,[rcontext,#tcr.unwinding])
-        __(ldr temp2,[sp,#3*node_size])
+        /* Load saved temp2 into imm0 first, because restore_lisp_frame
+           will clobber temp2 (temp2=nfn=x10 on ARM64). */
+        __(ldr imm0,[sp,#3*node_size])
         __(add sp,sp,#4*node_size)
         __(restore_lisp_frame())
+        __(mov temp2,imm0)
         __(discard_lisp_fprs())
         __(b local_label(_nthrow1v_nextframe))
+local_label(_nthrow1v_no_catch):
+        __(hlt #0xFFFC)
 local_label(_nthrow1v_done):
         __(mov imm0,#0)
         __(str imm0,[rcontext,#tcr.unwinding])
@@ -3653,7 +3664,7 @@ local_label(_nthrow1v_done):
         /* polling for a deferred interrupt  */
         __(check_pending_interrupt(nargs))
         __(ret)
-_endfn        
+_endfn
 
 _startfn(C(nthrownv))
         new_local_labels()
@@ -3662,6 +3673,7 @@ local_label(nthrownv_nextframe):
         __(ldr temp0,[rcontext,#tcr.catch_top])
         __(ldr imm1,[rcontext,#tcr.db_link])
         __(blt local_label(nthrownv_done))
+        __(cbz temp0,local_label(nthrownv_no_catch))
         __(ldr arg_y,[temp0,#catch_frame.link])
         __(ldr imm0,[temp0,#catch_frame.db_link])
         __(cmp imm0,imm1)
@@ -3754,18 +3766,25 @@ local_label(nthrownv_tpoploop):
 local_label(nthrownv_tpoptest):  
         __(ldr temp2,[temp0,#-node_size]!)
         __(bne local_label(nthrownv_tpoploop))
+        /* Save frame count from temp2 before ldr fn clobbers it
+           (fn=nfn=temp2=x10 on ARM64). */
+        __(mov imm0,temp2)
         __(mov sp,arg_z)
         __(ldr fn,[sp,#lisp_frame.savefn])
         __(ldr lr,[sp,#lisp_frame.savelr])
         __(discard_lisp_frame())
+        __(mov temp2,imm0)
         __(discard_lisp_fprs())
         __(b local_label(nthrownv_nextframe))
-local_label(nthrownv_done):     
+local_label(nthrownv_no_catch):
+        /* catch_top is NULL but frames remain — fatal error */
+        __(hlt #0xFFFC)
+local_label(nthrownv_done):
         __(mov imm0,#0)
         __(str imm0,[rcontext,#tcr.unwinding])
         __(check_pending_interrupt(imm1))
         __(ret)
-_endfn                
+_endfn
 
                
 _startfn(stack_misc_alloc_init_no_room)
