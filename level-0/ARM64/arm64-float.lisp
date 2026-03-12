@@ -277,6 +277,13 @@
   (movk arg_z (:$ (ash arm64::tag-single-float 8)) (:lsl 48))
   (ret))
 
+;;; Convert fixnum to immediate single-float (64-bit path).
+;;; Called by %fixnum-sfloat on 64-bit targets.
+(defarm64lapfunction %int-to-sfloat ((int arg_z))
+  (scvtf s0 int)
+  (fmov arg_z s0)
+  (movk arg_z (:$ (ash arm64::tag-single-float 8)) (:lsl 48))
+  (ret))
 
 ;;; Convert fixnum to double-float (store in result).
 (defarm64lapfunction %int-to-dfloat ((int arg_y) (dfloat arg_z))

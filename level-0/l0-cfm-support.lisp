@@ -609,7 +609,7 @@ return a fixnum representation of that address, else return NIL."
 			  :address n
 			  :unsigned-fullword)))
       (unless (eql 0 addr) addr))
-    #+x8664-target
+    #+(or x8664-target arm64-target)
     (let* ((addr (ff-call (%kernel-import target::kernel-import-FindSymbol)
                           :address handle
                           :address n

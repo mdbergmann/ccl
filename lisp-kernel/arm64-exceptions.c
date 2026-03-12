@@ -839,6 +839,23 @@ handle_protection_violation(ExceptionInformation *xp, siginfo_t *info,
             tcr->vs_area ? (void*)tcr->vs_area->low : NULL,
             tcr->vs_area ? (void*)tcr->vs_area->high : NULL,
             (unsigned long)xpGPR(xp, 25));
+    if ((natural)addr == 0xFFFFFFFFFFFFFFF8ULL) {
+      fprintf(dbgout, "  FAULT@-8: pc=0x%lx lr=0x%lx sp=0x%lx fp=0x%lx\n"
+              "  x6=0x%lx x7=0x%lx x9=0x%lx x10=0x%lx x15=0x%lx x25=0x%lx\n",
+              (unsigned long)(natural)xpPC(xp), (unsigned long)xpGPR(xp, 30),
+              (unsigned long)xpSP(xp), (unsigned long)xpFP(xp),
+              (unsigned long)xpGPR(xp, 6), (unsigned long)xpGPR(xp, 7),
+              (unsigned long)xpGPR(xp, 9), (unsigned long)xpGPR(xp, 10),
+              (unsigned long)xpGPR(xp, 15), (unsigned long)xpGPR(xp, 25));
+      /* Dump instruction at faulting PC */
+      pc faulting_pc = xpPC(xp);
+      if ((natural)faulting_pc > 0x100000000ULL) {
+        opcode *insns = (opcode *)faulting_pc;
+        fprintf(dbgout, "  insns: [%+4d] %08x [%+4d] %08x [%+4d] %08x [%+4d] %08x\n",
+                -4, insns[-1], 0, insns[0], 4, insns[1], 8, insns[2]);
+      }
+      fflush(dbgout);
+    }
     fflush(dbgout);
     if (wf && area != NULL) {
       handler = protection_handlers[area->why];
@@ -1302,11 +1319,91 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
     fflush(dbgout);
   }
   if (errdisp == unbound_marker) {
+    LispObj arg_y_val = xpGPR(xp, 14);
+    LispObj arg_z_val = xpGPR(xp, 15);
+    /* Dump XBADKEYS diagnostics */
+    if (arg_y_val == 0x99) { /* $XBADKEYS = 153 */
+      fprintf(dbgout, "  $XBADKEYS: arg_z (bad keyword list) = %016lx\n",
+              (unsigned long)arg_z_val);
+      /* Walk the consed list of bad keyword pairs */
+      LispObj bl = arg_z_val;
+      int bi = 0;
+      while (fulltag_of(bl) == fulltag_cons && bi < 20) {
+        LispObj key = car(bl);
+        fprintf(dbgout, "    badkey[%d] = %016lx (tag=0x%02lx)", bi, (unsigned long)key, (unsigned long)(key >> 56));
+        /* If it's a symbol (tag 0x63), try to print its name */
+        natural key_raw = key & 0x00FFFFFFFFFFFFFF;
+        if ((key >> 56) == 0x63 && key_raw > 0x100000000LL && key_raw < 0x400000000000LL) {
+          LispObj pn = ((LispObj *)key_raw)[0]; /* pname at slot 0 (slot 1 from tagged) */
+          natural pn_raw = pn & 0x00FFFFFFFFFFFFFF;
+          if (pn_raw > 0x100000000LL && pn_raw < 0x400000000000LL) {
+            LispObj pn_hdr = ((LispObj *)pn_raw)[-1];
+            natural pn_len = pn_hdr & 0x00FFFFFFFFFFFFFF;
+            if (pn_len > 0 && pn_len < 256) {
+              int cs = ((pn_hdr >> 56) & 0x7F) == 7 ? 4 : 1;
+              fprintf(dbgout, " \"");
+              for (int ci = 0; ci < (int)pn_len; ci++)
+                fprintf(dbgout, "%c", ((char *)pn_raw)[ci * cs]);
+              fprintf(dbgout, "\"");
+            }
+          }
+        }
+        fprintf(dbgout, "\n");
+        bl = cdr(bl);
+        bi++;
+      }
+      /* Also dump the caller's fn constants to see the keywords vector */
+      {
+        LispObj *frame = (LispObj *)xpFP(xp);
+        LispObj savefn = frame[2];
+        natural fn_raw = savefn & 0x00FFFFFFFFFFFFFF;
+        if (fn_raw > 0x100000000LL && fn_raw < 0x400000000000LL) {
+          LispObj fn_hdr = ((LispObj *)fn_raw)[-1];
+          natural fn_nslots = fn_hdr & 0x00FFFFFFFFFFFFFF;
+          fprintf(dbgout, "  caller fn=%016lx hdr=%016lx nslots=%lu\n",
+                  (unsigned long)savefn, (unsigned long)fn_hdr, (unsigned long)fn_nslots);
+          /* Slot 2 should be the keywords vector */
+          if (fn_nslots >= 3) {
+            LispObj kwvec = ((LispObj *)fn_raw)[2];
+            fprintf(dbgout, "  kwvec (fn.slot[2]) = %016lx (tag=0x%02lx)\n",
+                    (unsigned long)kwvec, (unsigned long)(kwvec >> 56));
+            natural kv_raw = kwvec & 0x00FFFFFFFFFFFFFF;
+            if (kv_raw > 0x100000000LL && kv_raw < 0x400000000000LL) {
+              LispObj kv_hdr = ((LispObj *)kv_raw)[-1];
+              natural kv_len = kv_hdr & 0x00FFFFFFFFFFFFFF;
+              fprintf(dbgout, "  kwvec hdr=%016lx len=%lu\n",
+                      (unsigned long)kv_hdr, (unsigned long)kv_len);
+              for (natural ki = 0; ki < kv_len && ki < 20; ki++) {
+                LispObj kw = ((LispObj *)kv_raw)[ki];
+                fprintf(dbgout, "    kw[%lu] = %016lx (tag=0x%02lx)", ki,
+                        (unsigned long)kw, (unsigned long)(kw >> 56));
+                natural kw_raw = kw & 0x00FFFFFFFFFFFFFF;
+                if ((kw >> 56) == 0x63 && kw_raw > 0x100000000LL && kw_raw < 0x400000000000LL) {
+                  LispObj pn = ((LispObj *)kw_raw)[0];
+                  natural pn_raw = pn & 0x00FFFFFFFFFFFFFF;
+                  if (pn_raw > 0x100000000LL && pn_raw < 0x400000000000LL) {
+                    LispObj pn_hdr = ((LispObj *)pn_raw)[-1];
+                    natural pn_len = pn_hdr & 0x00FFFFFFFFFFFFFF;
+                    if (pn_len > 0 && pn_len < 256) {
+                      int cs = ((pn_hdr >> 56) & 0x7F) == 7 ? 4 : 1;
+                      fprintf(dbgout, " \"");
+                      for (int ci = 0; ci < (int)pn_len; ci++)
+                        fprintf(dbgout, "%c", ((char *)pn_raw)[ci * cs]);
+                      fprintf(dbgout, "\"");
+                    }
+                  }
+                }
+                fprintf(dbgout, "\n");
+              }
+            }
+          }
+        }
+      }
+      fflush(dbgout);
+    }
     /* During cold boot, %err-disp is unbound.  Try to handle $xnopkg
        (package-not-found) by looking up the package at the C level and
        returning it as the result of %kernel-restart. */
-    LispObj arg_y_val = xpGPR(xp, 14);  /* $xnopkg code */
-    LispObj arg_z_val = xpGPR(xp, 15);  /* package name string */
     if (arg_y_val == 0x82) {  /* $xnopkg = 130 */
       static int xnopkg_count = 0;
       xnopkg_count++;
@@ -1372,6 +1469,35 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
             LispObj savefp  = frame[3];
             fprintf(dbgout, "  popping set-package frame: savevsp=%016lx savelr=%016lx savefn=%016lx savefp=%016lx\n",
                     (unsigned long)savevsp, (unsigned long)savelr, (unsigned long)savefn, (unsigned long)savefp);
+            /* Dump a few instructions at the return address */
+            {
+              opcode *ret_code = (opcode *)(natural)savelr;
+              fprintf(dbgout, "  code at return addr %016lx:\n", (unsigned long)savelr);
+              for (int di = -2; di < 10; di++) {
+                fprintf(dbgout, "    [%+3d] %08x\n", di*4, ret_code[di]);
+              }
+              /* Also dump what's at [fp+16] (caller's savefn for reload-self) */
+              LispObj *fp_frame = (LispObj *)savefp;
+              fprintf(dbgout, "  caller frame at fp=%016lx: savevsp=%016lx savelr=%016lx savefn=%016lx savefp=%016lx\n",
+                      (unsigned long)savefp,
+                      (unsigned long)fp_frame[0], (unsigned long)fp_frame[1],
+                      (unsigned long)fp_frame[2], (unsigned long)fp_frame[3]);
+              /* Current register state at the time of UUO */
+              fprintf(dbgout, "  regs at UUO: rnil(x6)=%016lx rt(x7)=%016lx x0=%016lx x1=%016lx x2=%016lx x3=%016lx\n",
+                      (unsigned long)xpGPR(xp, 6), (unsigned long)xpGPR(xp, 7),
+                      (unsigned long)xpGPR(xp, 0), (unsigned long)xpGPR(xp, 1),
+                      (unsigned long)xpGPR(xp, 2), (unsigned long)xpGPR(xp, 3));
+              fflush(dbgout);
+            }
+            /* Dump vsp contents at return point */
+            {
+              LispObj *vsp_at = (LispObj *)(natural)savevsp;
+              fprintf(dbgout, "  vsp at return (savevsp=%016lx):\n", (unsigned long)savevsp);
+              for (int vi = -2; vi < 6; vi++) {
+                fprintf(dbgout, "    [%+2d] %016lx (tag=0x%02lx)\n",
+                        vi, (unsigned long)vsp_at[vi], (unsigned long)(vsp_at[vi] >> 56));
+              }
+            }
             xpGPR(xp, 25) = savevsp;       /* restore vsp */
             xpGPR(xp, 10) = savefn;        /* restore fn */
             xpGPR(xp, 15) = found_pkg;     /* arg_z = return value */
@@ -2754,10 +2880,14 @@ do_pseudo_sigreturn(mach_port_t thread, TCR *tcr, native_thread_state_t *out)
   xp = tcr->pending_exception_context;
   if (xp) {
     MCONTEXT_T mc = UC_MCONTEXT(xp);
-    fprintf(dbgout, "DBG pseudo_sigreturn: restoring pc=%016lx sp=%016lx x15=%016lx x25=%016lx x10=%016lx\n",
+    fprintf(dbgout, "DBG pseudo_sigreturn: restoring pc=%016lx sp=%016lx x15=%016lx x25=%016lx x10=%016lx\n"
+            "  rnil(x6)=%016lx rt(x7)=%016lx lr=%016lx fp=%016lx x0=%016lx x9=%016lx\n",
             (unsigned long)mc->__ss.__pc, (unsigned long)mc->__ss.__sp,
             (unsigned long)mc->__ss.__x[15], (unsigned long)mc->__ss.__x[25],
-            (unsigned long)mc->__ss.__x[10]);
+            (unsigned long)mc->__ss.__x[10],
+            (unsigned long)mc->__ss.__x[6], (unsigned long)mc->__ss.__x[7],
+            (unsigned long)mc->__ss.__lr, (unsigned long)mc->__ss.__fp,
+            (unsigned long)mc->__ss.__x[0], (unsigned long)mc->__ss.__x[9]);
     fflush(dbgout);
     tcr->pending_exception_context = NULL;
     tcr->valence = TCR_STATE_LISP;
@@ -3128,22 +3258,59 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
           natural saved_vsp = (natural)tcr->save_vsp;
           if (saved_vsp > 0x100000000LL && saved_vsp < 0x800000000000LL) {
             LispObj *vsp_data = (LispObj *)saved_vsp;
-            fprintf(dbgout, "  save_vsp=0x%lx: last_lisp_frame=0x%lx arg_x=0x%lx temp0=0x%lx temp1=0x%lx nfn=0x%lx saved_lr=0x%lx\n",
+            fprintf(dbgout, "  save_vsp=0x%lx: nfn=0x%lx saved_lr=0x%lx\n",
                     (unsigned long)saved_vsp,
-                    (unsigned long)vsp_data[0], (unsigned long)vsp_data[1],
-                    (unsigned long)vsp_data[2], (unsigned long)vsp_data[3],
                     (unsigned long)vsp_data[4], (unsigned long)vsp_data[5]);
+            /* Try to identify the calling function and its constants */
+            LispObj nfn_val = vsp_data[4];
+            natural nfn_tag = nfn_val >> 56;
+            if (nfn_tag != 0) {  /* has TBI tag = lisp object */
+              natural nfn_base = untag(nfn_val) - node_size; /* header address */
+              LispObj *fn_slots = (LispObj *)nfn_base;
+              LispObj fn_header = fn_slots[0];
+              natural fn_num_slots = fn_header & 0x00FFFFFFFFFFFFFFLL;
+              fprintf(dbgout, "  fn header=0x%lx num_slots=%lu\n",
+                      (unsigned long)fn_header, (unsigned long)fn_num_slots);
+              /* Print constants (slots after entrypoint + codevector) */
+              if (fn_num_slots >= 5) {
+                for (int ci = 3; ci <= (int)fn_num_slots && ci <= 8; ci++) {
+                  LispObj cval = fn_slots[ci];
+                  natural ctag = cval >> 56;
+                  fprintf(dbgout, "  fn.slot[%d]=0x%lx (tag=0x%lx)\n",
+                          ci, (unsigned long)cval, (unsigned long)ctag);
+                  /* If this looks like a symbol (tag 0x63), try to print pname */
+                  if (ctag == 0x63) {
+                    natural sym_base = untag(cval) - node_size;
+                    LispObj *sym_slots = (LispObj *)sym_base;
+                    LispObj pname = sym_slots[1]; /* pname is first data slot */
+                    LispObj vcell = sym_slots[2]; /* vcell is second */
+                    fprintf(dbgout, "    sym pname=0x%lx vcell=0x%lx\n",
+                            (unsigned long)pname, (unsigned long)vcell);
+                    /* Try to read pname string characters */
+                    natural pname_tag = pname >> 56;
+                    if (pname_tag != 0) {
+                      natural pn_base = untag(pname) - node_size;
+                      LispObj *pn_slots = (LispObj *)pn_base;
+                      LispObj pn_header = pn_slots[0];
+                      natural pn_len = pn_header & 0x00FFFFFFFFFFFFFFLL;
+                      /* simple-string: 32-bit chars starting at pn_base+8 */
+                      unsigned int *chars = (unsigned int *)(pn_base + node_size);
+                      char buf[64];
+                      int max = pn_len > 60 ? 60 : (int)pn_len;
+                      for (int k = 0; k < max; k++) {
+                        buf[k] = (char)(chars[k] & 0x7F);
+                      }
+                      buf[max] = 0;
+                      fprintf(dbgout, "    pname=\"%s\" (len=%lu)\n", buf, (unsigned long)pn_len);
+                    }
+                  }
+                }
+              }
+            }
           }
           /* Check KERNEL_IMPORTS global */
           natural kimports = (natural)lisp_global(KERNEL_IMPORTS);
           fprintf(dbgout, "  KERNEL_IMPORTS=0x%lx\n", (unsigned long)kimports);
-          if (kimports > 0x100000000LL && kimports < 0x800000000000LL) {
-            /* Print first few entries */
-            natural *table = (natural *)kimports;
-            fprintf(dbgout, "  import_table[0]=0x%lx [8]=0x%lx [31]=0x%lx\n",
-                    (unsigned long)table[0], (unsigned long)table[8],
-                    (unsigned long)table[31]);
-          }
           fflush(dbgout);
         }
         if (ff_nil_count > 100) {
@@ -3204,6 +3371,21 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
       goto done;
     }
     /* Not an ff-call or null-deref — dispatch as SIGBUS */
+    fprintf(dbgout, "KERN_INVALID_ADDRESS→SIGBUS: pc=0x%lx lr=0x%lx addr=0x%llx sp=0x%lx fp=0x%lx\n"
+            "  x6=0x%lx x9=0x%lx x10=0x%lx x15=0x%lx x25=0x%lx valence=%d\n",
+            (unsigned long)ts->__pc, (unsigned long)ts->__lr,
+            (long long)code[1],
+            (unsigned long)ts->__sp, (unsigned long)ts->__fp,
+            (unsigned long)ts->__x[6], (unsigned long)ts->__x[9],
+            (unsigned long)ts->__x[10], (unsigned long)ts->__x[15],
+            (unsigned long)ts->__x[25], tcr->valence);
+    /* Dump instruction at faulting PC if in lisp code */
+    if (ts->__pc > 0x200000000000ULL && ts->__pc < 0x400000000000ULL) {
+      opcode *insns = (opcode *)ts->__pc;
+      fprintf(dbgout, "  insn@pc: [-4]=%08x [0]=%08x [+4]=%08x [+8]=%08x\n",
+              insns[-1], insns[0], insns[1], insns[2]);
+    }
+    fflush(dbgout);
     signum = SIGBUS;
     if (tcr->valence != TCR_STATE_LISP) {
       fprintf(dbgout, "FATAL: KERN_INVALID_ADDRESS in non-lisp valence "

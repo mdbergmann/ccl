@@ -679,7 +679,12 @@
         (setf (u32-ref v (the fixnum (+ o *xload-target-misc-data-offset*))) bits)
         sfloat-addr))
      (64
-      (logior (ash bits 32) single-float-tag)))))
+      (let ((ss (xload-target-subtag-shift)))
+        (if (> ss 0)
+          ;; ARM64 TBI: tag in high byte, IEEE bits in low 32 bits
+          (logior (ash single-float-tag ss) bits)
+          ;; x86-64: tag in low bits, IEEE bits in high 32 bits
+          (logior (ash bits 32) single-float-tag)))))))
         
 (defun xload-make-ivector (space subtag nelements)
   (unless (typep subtag 'fixnum)

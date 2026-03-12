@@ -2843,11 +2843,11 @@ _spentry(keyword_bind)
            the gvector we just created on the cstack. */
         __(add imm0,vsp,key_value_count) /* src, predecrement */
         __(add imm1,sp,#node_size)       /* dest, postincrement */
-        __(mov temp2,key_value_count)
+        __(mov temp3,key_value_count)
         __(b 1f)
 0:      __(ldr arg_x,[imm0,#-node_size]!)
         __(str arg_x,[imm1],#node_size)
-1:      __(subs temp2,temp2,#node_size)
+1:      __(subs temp3,temp3,#node_size)
         __(bge 0b)
         /* Discard the key/value pairs from the vstack. */
         __(add vsp,vsp,key_value_count)
@@ -2901,9 +2901,10 @@ local_label(nextvalpairloop):
 local_label(current_key_allow_other_keys_handled):
         __(getvheader(imm0,temp2))
         __(header_length(arg_x,imm0))
+        __(lsl arg_x,arg_x,#node_shift)   /* count → byte offset (fixnumshift=0) */
         __(add imm0,arg_x,#misc_data_offset)
         __(b local_label(defined_keyword_compare_test))
-local_label(defined_keyword_compare_loop):      
+local_label(defined_keyword_compare_loop):
         __(ldr arg_x,[temp2,imm0])
         __(cmp arg_x,temp1)
         __(bne local_label(defined_keyword_compare_test))
