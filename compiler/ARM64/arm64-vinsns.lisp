@@ -1916,7 +1916,9 @@
   :no-trap
   (stp newcdr newcar (:@ allocptr (:$ 0)))
   (add dest allocptr (:$ arm64::cons-bias))
-  (movk dest (:$ (:apply ash arm64::tag-cons 8)) (:lsl 48)))
+  (movk dest (:$ (:apply ash arm64::tag-cons 8)) (:lsl 48))
+  ;; Clear allocptr high byte — must never carry a TBI tag
+  (and allocptr allocptr (:$ #x00FFFFFFFFFFFFFF)))
 
 
 ;;; --- Stack-allocated cons ---
@@ -2002,7 +2004,9 @@
   (lsr tag Rheader (:$ arm64::tag-shift))
   (eor tag tag (:$ #xC0))
   (lsl tag tag (:$ arm64::tag-shift))
-  (orr dest dest tag))
+  (orr dest dest tag)
+  ;; Clear allocptr high byte — must never carry a TBI tag
+  (and allocptr allocptr (:$ #x00FFFFFFFFFFFFFF)))
 
 
 ;;; --- Generic gvector allocation with element initialization ---
@@ -2035,6 +2039,8 @@
   (eor tag tag (:$ #xC0))
   (lsl tag tag (:$ arm64::tag-shift))
   (orr dest dest tag)
+  ;; Clear allocptr high byte — must never carry a TBI tag
+  (and allocptr allocptr (:$ #x00FFFFFFFFFFFFFF))
   ;; Initialize gvector elements from vstack (last pushed = lowest index)
   ((:not (:pred = nbytes 0))
    (mov immtemp0 (:$ nbytes))
@@ -4303,7 +4309,9 @@
   (str header (:@ allocptr (:$ 0)))
   (str src (:@ allocptr (:$ arm64::complex-double-float.realpart)))
   (add dest allocptr (:$ arm64::misc-bias))
-  (movk dest (:$ (:apply ash arm64::tag-complex-double-float 8)) (:lsl 48)))
+  (movk dest (:$ (:apply ash arm64::tag-complex-double-float 8)) (:lsl 48))
+  ;; Clear allocptr high byte — must never carry a TBI tag
+  (and allocptr allocptr (:$ #x00FFFFFFFFFFFFFF)))
 
 (define-arm64-vinsn complex-single-float-to-complex-single-float
     (((dest :complex-single-float))

@@ -229,8 +229,8 @@
   ;; Tagged pointer = allocptr with ivector-ref tag
   (mov arg_z allocptr)
   (movk arg_z (:$ (ash arm64::subtag-complex-double-float 8)) (:lsl 48))
-  ;; Clear allocptr tag bits (align to dnode)
-  (and allocptr allocptr (:$ (lognot arm64::dnode-mask)))
+  ;; Clear allocptr tag bits and high byte
+  (and allocptr allocptr (:$ #x00FFFFFFFFFFFFFF))
   ;; Store real and imaginary parts
   ;; complex-double-float layout: [header][pad][realpart][imagpart]
   ;; pad at misc-data-offset (0), realpart at +8, imagpart at +16
@@ -264,8 +264,8 @@
   ;; Tagged pointer
   (mov arg_z allocptr)
   (movk arg_z (:$ (ash arm64::subtag-complex-single-float 8)) (:lsl 48))
-  ;; Clear allocptr
-  (and allocptr allocptr (:$ (lognot arm64::dnode-mask)))
+  ;; Clear allocptr tag bits and high byte
+  (and allocptr allocptr (:$ #x00FFFFFFFFFFFFFF))
   ;; Store packed real+imaginary at misc-data-offset (= 0)
   (str imm1 (:@ arg_z (:$ arm64::complex-single-float.realpart)))
   (return-lisp-frame))

@@ -232,8 +232,8 @@
     (uuo-alloc-trap)
     @no-trap
     (mov sentinel allocptr)
-    ;; Clear allocptr low bits to dnode boundary
-    (and allocptr allocptr (:$ -16))
+    ;; Clear allocptr low bits and high byte (TBI tag protection)
+    (and allocptr allocptr (:$ #x00FFFFFFFFFFFFFFF0))
     (ldr obj (:@ a (:$ arm64::area.low)))
     (b @test)
     @loop
@@ -579,8 +579,8 @@ GC notifications."
   ;; Tag the result: effective addr = allocptr, tag = uvector-ref (0x40)
   (mov arg_z allocptr)
   (movk arg_z (:$ #x4000) (:lsl 48))
-  ;; Clear allocptr to dnode boundary
-  (and allocptr allocptr (:$ -16))
+  ;; Clear allocptr low bits and high byte (TBI tag protection)
+  (and allocptr allocptr (:$ #x00FFFFFFFFFFFFFFF0))
   ;; Store the import address in the macptr
   (str imm0 (:@ arg_z (:$ arm64::macptr.address)))
   (ret))

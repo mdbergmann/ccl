@@ -2179,6 +2179,10 @@ pc_luser_xp(ExceptionInformation *xp, TCR *tcr, signed_natural *alloc_disp)
   }
 
   /* ---- Section 2: Allocation fixup ---- */
+  /* Skip if allocptr is VOID_ALLOCPTR (GC sentinel, not an allocation) */
+  if (cur_allocptr == VOID_ALLOCPTR) {
+    return;
+  }
   if (allocptr_tag != tag_positive_fixnum) {
     alloc_instruction_id state = classify_alloc_instruction(xp);
 
@@ -2947,11 +2951,11 @@ do_pseudo_sigreturn(mach_port_t thread, TCR *tcr, native_thread_state_t *out)
   xp = tcr->pending_exception_context;
   if (xp) {
     MCONTEXT_T mc = UC_MCONTEXT(xp);
-    fprintf(dbgout, "DBG pseudo_sigreturn: restoring pc=%016lx sp=%016lx x15=%016lx x25=%016lx x10=%016lx\n"
+    fprintf(dbgout, "DBG pseudo_sigreturn: restoring pc=%016lx sp=%016lx x15=%016lx x25=%016lx x10=%016lx x26=%016lx\n"
             "  rnil(x6)=%016lx rt(x7)=%016lx lr=%016lx fp=%016lx x0=%016lx x9=%016lx\n",
             (unsigned long)mc->__ss.__pc, (unsigned long)mc->__ss.__sp,
             (unsigned long)mc->__ss.__x[15], (unsigned long)mc->__ss.__x[25],
-            (unsigned long)mc->__ss.__x[10],
+            (unsigned long)mc->__ss.__x[10], (unsigned long)mc->__ss.__x[26],
             (unsigned long)mc->__ss.__x[6], (unsigned long)mc->__ss.__x[7],
             (unsigned long)mc->__ss.__lr, (unsigned long)mc->__ss.__fp,
             (unsigned long)mc->__ss.__x[0], (unsigned long)mc->__ss.__x[9]);
@@ -3112,13 +3116,19 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
     static int initfn_dumped = 0;
     if (dbg_exc_count < 50) {
       dbg_exc_count++;
-      fprintf(dbgout, "MACH[%d]: exc=%d code0=%lld pc=0x%lx lr=0x%lx vsp=0x%lx rnil=0x%lx rt=0x%lx fp=0x%lx catch_top=0x%lx",
+      fprintf(dbgout, "MACH[%d]: exc=%d code0=%lld pc=0x%lx lr=0x%lx vsp=0x%lx rnil=0x%lx rt=0x%lx fp=0x%lx catch_top=0x%lx allocptr=0x%lx",
               dbg_exc_count, exception, (long long)code0,
               (unsigned long)ts->__pc, (unsigned long)ts->__lr,
               (unsigned long)ts->__x[25],
               (unsigned long)ts->__x[6], (unsigned long)ts->__x[7],
               (unsigned long)ts->__fp,
-              (unsigned long)(natural)tcr->catch_top);
+              (unsigned long)(natural)tcr->catch_top,
+              (unsigned long)ts->__x[26]);
+      /* Check for allocptr contamination */
+      if ((ts->__x[26] >> 56) != 0 && ts->__x[26] != (natural)VOID_ALLOCPTR) {
+        fprintf(dbgout, "\n  *** ALLOCPTR CONTAMINATED: tag=0x%02lx ***",
+                (unsigned long)(ts->__x[26] >> 56));
+      }
       if (exception == EXC_BAD_ACCESS) {
         fprintf(dbgout, " addr=0x%llx x0=0x%lx x9=0x%lx x10=0x%lx x15=0x%lx sp=0x%lx",
                 (long long)code[1],

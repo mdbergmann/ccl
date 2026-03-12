@@ -564,8 +564,13 @@ define(`mkcatch',`
 
 define(`stack_align',`((($1)+STACK_ALIGN_MASK)&~STACK_ALIGN_MASK)')
 
+/* Clear allocptr low bits (dnode alignment) AND high byte (TBI tag).
+   On ARM64 TBI, allocptr must never carry a tag in byte 7.
+   Contamination in the high byte causes pc_luser_xp to misidentify
+   the allocation state, leading to memory corruption during GC. */
 define(`clear_alloc_tag',`
         __(bic allocptr,allocptr,#dnode_mask)
+        __(and allocptr,allocptr,#0x00FFFFFFFFFFFFFF)
 ')
 
 define(`clear_header_element_count',`
