@@ -39,7 +39,7 @@
   (getvheader imm0 miscobj)
   (header-size temp1 imm0)                  ; element count
   (cbz temp1 @done)                         ; zero elements → return
-  (and imm2 imm0 (:$ #xFF))                ; extract subtag
+  (lsr imm2 imm0 (:$ arm64::subtag-shift)) ; extract subtag (high byte)
   ;; Check for gvector (node-header): bit 5 set in subtag type bits
   (tst imm2 (:$ arm64::gvector-tag-mask))
   (b.ne @node-fill)

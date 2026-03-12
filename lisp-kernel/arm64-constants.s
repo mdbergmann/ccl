@@ -196,6 +196,7 @@ min_32_bit_ivector_tag = tag_s32_vector
 min_64_bit_ivector_tag = tag_s64_vector
 
 max_32_bit_ivector_subtag = xcode_vector_header
+max_64_bit_ivector_subtag = complex_single_float_vector_header
 max_8_bit_ivector_subtag = u8_vector_header
 max_16_bit_ivector_subtag = u16_vector_header
         

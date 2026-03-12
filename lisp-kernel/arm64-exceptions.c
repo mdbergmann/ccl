@@ -951,6 +951,29 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
       fprintf(dbgout, "  TYPE ERROR: value = 0x%lx (tag=0x%02x)\n",
               (unsigned long)ay, (unsigned)(ay >> 56));
     }
+    /* MV protocol diagnostic: dump ret1valaddr and frame chain savelr values */
+    {
+      extern void ret1valn(void);
+      LispObj ret1val_global = lisp_global(RET1VALN);
+      fprintf(dbgout, "  MV-DIAG: ret1valaddr global = %016lx, &ret1valn = %016lx %s\n",
+              (unsigned long)ret1val_global, (unsigned long)&ret1valn,
+              (ret1val_global == (LispObj)&ret1valn) ? "MATCH" : "MISMATCH!");
+      fprintf(dbgout, "  MV-DIAG: sp(xpSP)=%016lx fp(xpFP)=%016lx\n",
+              (unsigned long)xpSP(xp), (unsigned long)xpFP(xp));
+      /* Walk stack frames to show savelr values */
+      LispObj *fp = (LispObj *)xpFP(xp);
+      for (int fi = 0; fi < 8 && (natural)fp > 0x100000000LL && (natural)fp < 0x800000000000LL; fi++) {
+        LispObj savevsp = fp[0];
+        LispObj savelr  = fp[1];
+        LispObj savefn  = fp[2];
+        LispObj savefp  = fp[3];
+        fprintf(dbgout, "  MV-DIAG frame[%d] @%016lx: savelr=%016lx %s savefn=%016lx\n",
+                fi, (unsigned long)fp, (unsigned long)savelr,
+                (savelr == ret1val_global) ? "==RET1VAL" : "",
+                (unsigned long)savefn);
+        fp = (LispObj *)(natural)savefp;
+      }
+    }
     fflush(dbgout);
   }
   /* Dump arg_z (x15) and arg_y (x11) if they look like heap pointers */
@@ -1407,8 +1430,24 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
     if (arg_y_val == 0x82) {  /* $xnopkg = 130 */
       static int xnopkg_count = 0;
       xnopkg_count++;
-      if (xnopkg_count <= 5 || (xnopkg_count % 100) == 0)
-        fprintf(dbgout, "  $xnopkg attempt #%d, LR=%016lx\n", xnopkg_count, (unsigned long)xpGPR(xp, 30));
+      if (xnopkg_count <= 5 || (xnopkg_count % 100) == 0) {
+        fprintf(dbgout, "  $xnopkg attempt #%d, LR=%016lx arg_z=%016lx\n", xnopkg_count,
+                (unsigned long)xpGPR(xp, 30), (unsigned long)arg_z_val);
+        /* Print the package name string */
+        natural sraw = untag(arg_z_val);
+        if (sraw > 0x100000000LL && sraw < 0x400000000000LL) {
+          LispObj shdr = *((LispObj *)sraw - 1);
+          natural slen = header_element_count(shdr);
+          unsigned char ssub = header_subtag(shdr);
+          int scs = (ssub & 0x7F) == 7 ? 4 : 1;
+          if (slen > 0 && slen < 256) {
+            fprintf(dbgout, "    looking for: \"");
+            for (natural si = 0; si < slen; si++)
+              fprintf(dbgout, "%c", ((char *)sraw)[si * scs]);
+            fprintf(dbgout, "\"\n");
+          }
+        }
+      }
       if (xnopkg_count > 500) {
         fprintf(dbgout, "  too many $xnopkg workarounds (%d), aborting\n", xnopkg_count);
         fflush(dbgout);
@@ -1727,7 +1766,35 @@ handle_uuo(ExceptionInformation *xp, siginfo_t *info, opcode the_uuo)
           (unsigned long)xpGPR(xp, 10), (unsigned long)xpGPR(xp, 9),
           (unsigned long)xpGPR(xp, 13), (unsigned long)xpGPR(xp, 14),
           (unsigned long)xpGPR(xp, 15));
+  fprintf(dbgout, "  imm0(x0)=%016lx imm1(x1)=%016lx imm2(x2)=%016lx sp=%016lx fp=%016lx\n",
+          (unsigned long)xpGPR(xp, 0), (unsigned long)xpGPR(xp, 1),
+          (unsigned long)xpGPR(xp, 2), (unsigned long)xpSP(xp), (unsigned long)xpFP(xp));
   fflush(dbgout);
+
+  /* TEMP DIAGNOSTIC: called-for-mv-p mismatch trap */
+  if (HLT_IMM16(the_uuo) == 0x4242) {
+    static int mv_diag_count = 0;
+    mv_diag_count++;
+    extern void ret1valn(void);
+    if (mv_diag_count <= 5) {
+    fprintf(dbgout, "  *** called-for-mv-p MISMATCH #%d ***\n", mv_diag_count);
+    fprintf(dbgout, "  savelr (imm0/x0) = %016lx\n", (unsigned long)xpGPR(xp, 0));
+    fprintf(dbgout, "  ret1valaddr global (imm1/x1) = %016lx\n", (unsigned long)xpGPR(xp, 1));
+    fprintf(dbgout, "  &ret1valn (C symbol) = %016lx\n", (unsigned long)&ret1valn);
+    fprintf(dbgout, "  [sp+8] = %016lx\n", (unsigned long)((LispObj *)xpSP(xp))[1]);
+    /* Walk frame chain */
+    LispObj *fp = (LispObj *)xpFP(xp);
+    for (int fi = 0; fi < 6 && (natural)fp > 0x100000000LL && (natural)fp < 0x800000000000LL; fi++) {
+      fprintf(dbgout, "  frame[%d] @%016lx: savevsp=%016lx savelr=%016lx savefn=%016lx\n",
+              fi, (unsigned long)fp, (unsigned long)fp[0], (unsigned long)fp[1], (unsigned long)fp[2]);
+      fp = (LispObj *)(natural)fp[3];
+    }
+    fflush(dbgout);
+    } /* end if mv_diag_count <= 5 */
+    /* Skip the HLT and continue (fall through to return NIL) */
+    adjust_exception_pc(xp, 4);
+    return true;
+  }
 
   switch (format) {
   case hlt_code_nullary:

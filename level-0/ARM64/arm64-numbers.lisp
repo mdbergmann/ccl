@@ -150,9 +150,11 @@
 
 
 ;;; Check if called for multiple values by comparing saved LR to ret1valaddr.
+;;; Must use x29 (frame pointer) not sp, because the caller may have pushed
+;;; values onto the stack between creating its frame and calling us.
 (defarm64lapfunction called-for-mv-p ()
-  (ldr imm0 (:@ sp (:$ arm64::lisp-frame.savelr)))
-  (ref-global imm1 ret1valaddr)
+  (ldr imm0 (:@ x29 (:$ arm64::lisp-frame.savelr)))   ; imm0 = caller's saved lr via fp
+  (ref-global imm1 ret1valaddr)                         ; imm1 = ret1valaddr global
   (cmp imm0 imm1)
   (mov arg_z rnil)
   (b.ne @done)

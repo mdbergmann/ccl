@@ -1225,23 +1225,35 @@ _spentry(stack_misc_alloc)
         __(test_fixnum(arg_y,imm0))
         __(cbnz imm0,0f)
         __(branch_if_positive(arg_y,1f))
-0:      
+0:
         __(uuo_error_reg_not_xtype(arg_y,xtype_unsigned_byte_56))
 1:
-        __(cmp arg_z,#min_64_bit_ivector_tag)
-        __(lsl imm1,arg_y,#3)
-        __(bge 8f)
-        __(cmp arg_z,#min_32_bit_ivector_tag)
-        __(lsl imm1,arg_y,#2)
-        __(bge 8f)
-        __(cmp arg_z,#min_16_bit_ivector_tag)
-        __(lsl imm1,arg_y,#1)
-        __(bge 8f)
-        __(cmp arg_z,#min_8_bit_ivector_tag)
-        __(mov imm1,arg_y)
-        __(bge 8f)
+        /* arg_z = header subtag (e.g. 0x80=bignum, 0xA0+=gvector).
+           arg_y = element count (raw fixnum, fixnumshift=0).
+           Compute byte size in imm1 based on subtag element-size group.
+           Subtag order: 32-bit(≤0x88) 64-bit(≤0x93) 8-bit(≤0x97) 16-bit(≤0x9B) 128-bit(0x9D) bit(0x9F) gvec(≥0xA0) */
+        __(cmp arg_z,#max_32_bit_ivector_subtag)
+        __(lsl imm1,arg_y,#2)           /* 32-bit: count*4 */
+        __(ble 8f)
+        __(cmp arg_z,#max_64_bit_ivector_subtag)
+        __(lsl imm1,arg_y,#3)           /* 64-bit: count*8 */
+        __(ble 8f)
+        __(cmp arg_z,#max_8_bit_ivector_subtag)
+        __(mov imm1,arg_y)              /* 8-bit: count*1 */
+        __(ble 8f)
+        __(cmp arg_z,#max_16_bit_ivector_subtag)
+        __(lsl imm1,arg_y,#1)           /* 16-bit: count*2 */
+        __(ble 8f)
+        __(cmp arg_z,#subtag_complex_double_float_vector)
+        __(beq 6f)
+        __(tst arg_z,#gvector_tag_mask)
+        __(lsl imm1,arg_y,#3)           /* gvector: node-size (8 bytes) */
+        __(bne 8f)
+        /* bit-vector: count/8 rounded up */
         __(add imm1,arg_y,#7)
         __(lsr imm1,imm1,#3)
+        __(b 8f)
+6:      __(lsl imm1,arg_y,#4)           /* 128-bit: count*16 */
 8:      __(dnode_align(imm1,imm1,node_size))
 9:      
         __(ldr temp0,[rcontext,tcr.cs_limit])
@@ -1250,9 +1262,11 @@ _spentry(stack_misc_alloc)
         __(load_marker(temp0,tag_stack_alloc))
         __(mov temp1,sp)
         __(bls stack_misc_alloc_no_room)
-        __(mov imm2,arg_z)
-        __(eor imm0,arg_z,#uvector_mask)
-        __(lsl imm0,imm0,#subtag_shift)
+        /* arg_z = header subtag (e.g. 0x80 for bignum).
+           imm2 = reference tag = subtag ^ uvector_mask (e.g. 0x40).
+           imm0 = header word: (subtag << subtag_shift) | element_count. */
+        __(eor imm2,arg_z,#uvector_mask)
+        __(lsl imm0,arg_z,#subtag_shift)
         __(orr imm0,imm0,arg_y)
         __(stack_allocate_zeroed_vector(arg_z,imm0,imm1,imm2))
         __(stp temp0,temp1,[sp,#-dnode_size]!)
@@ -2034,33 +2048,42 @@ _spentry(stkgvector)
 /* proper header on it and its contents will be 0.   imm0 contains   */
 /* the object's header (fulltag = fulltag_immheader or fulltag_nodeheader.)  */
 
+/* arg_y = element count (fixnum, fixnumshift=0 so raw integer).
+   arg_z = subtag (fixnum).
+   Allocate a misc object on the heap.
+   ARM64 fixnumshift=0: arg_y IS the element count directly, so we must
+   explicitly scale to byte count for each element-size group. */
 _spentry(misc_alloc)
         __(tst arg_y,#unsigned_byte_24_mask)
         __(bne 9f)
         __(unbox_fixnum(imm0,arg_z))
         __(lsl imm0,imm0,#subtag_shift)
-        __(orr imm0,imm0,arg_y)
-        __(lsr imm1,imm0,#subtag_shift)
+        __(orr imm0,imm0,arg_y)         /* imm0 = header: (subtag << 56) | count */
+        __(lsr imm1,imm0,#subtag_shift)  /* imm1 = subtag */
         __(tst imm1,#gvector_tag_mask)
-        __(mov imm2,arg_y)      /* imm2 = logical size in bytes */
+        __(lsl imm2,arg_y,#3)           /* gvector: count * 8 (node-size) */
         __(bne 1f)
-        __(unbox_fixnum(imm1,arg_z))
+        /* ivector size dispatch — subtag order:
+           32-bit(≤0x88) 64-bit(≤0x93) 8-bit(≤0x97) 16-bit(≤0x9B) 128-bit(0x9D) bit(0x9F) */
         __(cmp imm1,#max_32_bit_ivector_subtag)
+        __(lsl imm2,arg_y,#2)           /* 32-bit: count * 4 */
         __(ble 1f)
-        __(lsr imm2,arg_y,#2)
+        __(cmp imm1,#max_64_bit_ivector_subtag)
+        __(lsl imm2,arg_y,#3)           /* 64-bit: count * 8 */
+        __(ble 1f)
         __(cmp imm1,#max_8_bit_ivector_subtag)
+        __(mov imm2,arg_y)              /* 8-bit: count * 1 */
         __(ble 1f)
-        __(lsr imm2,arg_y,#1)
         __(cmp imm1,#max_16_bit_ivector_subtag)
+        __(lsl imm2,arg_y,#1)           /* 16-bit: count * 2 */
         __(ble 1f)
-        __(lsl imm2,arg_y,#1)
-        __(add imm2,imm2,#node_size)
-        __(cmp imm1,#subtag_double_float_vector)
-        __(beq 1f)
-        __(add imm2,arg_y,#7<<fixnumshift)
-        __(lsr imm2,imm2,#3+fixnumshift)
-        /* imm2 now = byte count.  Add 4 for header, 7 to align, then clear */
-        /* low three bits.  */
+        __(cmp imm1,#subtag_complex_double_float_vector)
+        __(beq 6f)
+        /* bit-vector: (count + 7) / 8 */
+        __(add imm2,arg_y,#7)
+        __(lsr imm2,imm2,#3)
+        __(b 1f)
+6:      __(lsl imm2,arg_y,#4)           /* 128-bit: count * 16 */
 1:
         __(dnode_align(imm2,imm2,node_size))
         __(Misc_Alloc(arg_z,imm0,imm2))
@@ -2313,7 +2336,9 @@ _spentry(stack_misc_alloc_init)
         __(unbox_fixnum(imm0,arg_y))
         __(tst imm0,#gvector_tag_mask)
         __(beq stack_misc_alloc_init_ivector)
-        __(dnode_align(imm1,arg_x,node_size))
+        /* gvector: byte_count = element_count * node_size (8) */
+        __(lsl imm1,arg_x,#3)
+        __(dnode_align(imm1,imm1,node_size))
         __(ldr temp1,[rcontext,#tcr.cs_limit])
         __(sub temp0,sp,imm1)
         __(cmp temp0,temp1)
@@ -3800,25 +3825,29 @@ _startfn(stack_misc_alloc_init_ivector)
         __(lsl imm0,arg_y,#subtag_shift)
         __(orr imm0,imm0,arg_x)
         /* Compute byte count from element count (arg_x) and subtag (arg_y).
-           On ARM64 with fixnumshift=0, arg_x IS the element count. */
+           On ARM64 with fixnumshift=0, arg_x IS the element count.
+           Subtag order: 32-bit(≤0x88) 64-bit(≤0x93) 8-bit(≤0x97) 16-bit(≤0x9B) 128-bit(0x9D) bit(0x9F) */
         __(cmp arg_y,#max_32_bit_ivector_subtag)
         __(bgt 1f)
         __(lsl imm1,arg_x,#2)  /* 32-bit elements: count * 4 */
         __(b 8f)
-1:      __(cmp arg_y,#max_8_bit_ivector_subtag)
+1:      __(cmp arg_y,#max_64_bit_ivector_subtag)
         __(bgt 2f)
+        __(lsl imm1,arg_x,#3)  /* 64-bit elements: count * 8 */
+        __(b 8f)
+2:      __(cmp arg_y,#max_8_bit_ivector_subtag)
+        __(bgt 3f)
         __(mov imm1,arg_x)  /* 8-bit elements: count bytes */
         __(b 8f)
-2:      __(cmp arg_y,#max_16_bit_ivector_subtag)
-        __(bgt 3f)
+3:      __(cmp arg_y,#max_16_bit_ivector_subtag)
+        __(bgt 4f)
         __(lsl imm1,arg_x,#1)  /* 16-bit elements: count * 2 */
         __(b 8f)
-3:      __(cmp arg_y,#subtag_double_float)
-        __(bne 4f)
-        __(lsl imm1,arg_x,#3)  /* double-float: count * 8 */
-        __(add imm1,imm1,#node_size)
+4:      __(cmp arg_y,#subtag_complex_double_float_vector)
+        __(bne 5f)
+        __(lsl imm1,arg_x,#4)  /* 128-bit: count * 16 */
         __(b 8f)
-4:      __(add imm1,arg_x,#7)  /* bit vector: (count+7)/8 */
+5:      __(add imm1,arg_x,#7)  /* bit vector: (count+7)/8 */
         __(lsr imm1,imm1,#3)
 8:      __(dnode_align(imm1,imm1,node_size))
         __(ldr temp0,[rcontext,#tcr.cs_limit])
