@@ -3260,6 +3260,33 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
     CLR_TCR_FLAG(tcr, TCR_FLAG_BIT_PROPAGATE_EXCEPTION);
     kret = 17;
   } else if ((exception == EXC_BAD_ACCESS) && (code0 == KERN_PROTECTION_FAILURE)) {
+    /* First check: if PC has a TBI tag (bits 56-63 != 0), this is a branch
+       to a tagged lisp object (e.g., nil, a symbol), not a legitimate code
+       address.  Treat like ff-call-to-nil: skip the call and resume at lr. */
+    natural pc_tag = (natural)ts->__pc >> 56;
+    if (pc_tag != 0) {
+      /* Branch to tagged lisp pointer.  Check if lr-4 is 'blr x16' (ff-call)
+         or if this is a lisp-level branch-to-nil. */
+      unsigned int *prev_insn = (unsigned int *)((natural)ts->__lr - 4);
+      natural prev_pc = (natural)ts->__lr;
+      static int tagged_branch_count = 0;
+      tagged_branch_count++;
+      if (tagged_branch_count <= 5)
+        fprintf(dbgout, "branch-to-tagged: pc=0x%lx lr=0x%lx tag=0x%lx (#%d)\n",
+                (unsigned long)ts->__pc, (unsigned long)ts->__lr,
+                (unsigned long)pc_tag, tagged_branch_count);
+      if (tagged_branch_count > 50000) {
+        fprintf(dbgout, "too many branch-to-tagged (%d), aborting\n", tagged_branch_count);
+        fflush(dbgout);
+        _exit(1);
+      }
+      /* Skip: set x0=0 and resume at lr */
+      *out_ts = *ts;
+      out_ts->__x[0] = 0;
+      out_ts->__pc = prev_pc;
+      kret = KERN_SUCCESS;
+      goto done;
+    }
     /* W^X page toggle: handle protection faults directly in the Mach
        exception handler without going through the signal machinery.
        code[1] is the fault address on ARM64 macOS. */
@@ -3278,12 +3305,14 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
     /* W^X debug logging removed — handler working correctly */
     if (in_heap || in_static || in_readonly) {
       natural page_start = truncate_to_power_of_2(fault_addr, log2_page_size);
+      natural pc_untagged = (natural)ts->__pc & 0x00FFFFFFFFFFFFFF;
 
       /* Determine if this is an instruction fetch (exec fault) or data write.
          For Mach exceptions, EXC_BAD_ACCESS with KERN_PROTECTION_FAILURE:
-         Check if PC is at the fault address (exec fault) or elsewhere (data fault). */
-      if ((natural)ts->__pc >= page_start &&
-          (natural)ts->__pc < page_start + page_size) {
+         Check if PC is at the fault address (exec fault) or elsewhere (data fault).
+         Must strip TBI tag from PC before comparing to page address. */
+      if (pc_untagged >= page_start &&
+          pc_untagged < page_start + page_size) {
         /* PC is on the faulting page: instruction fetch fault.
            Page is RW, needs RX for code execution. */
         sys_icache_invalidate((void *)page_start, page_size);
@@ -3321,11 +3350,11 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
        If x16 was nil (tagged), we get KERN_INVALID_ADDRESS. */
     natural faulting_pc = (natural)ts->__pc;
     natural return_lr = (natural)ts->__lr;
-    if ((faulting_pc >> 56) != 0) {
-      /* PC has TBI tag — this was a branch to a tagged lisp value.
-         Check if instruction at lr-4 is 'blr x16' (0xd63f0200) */
-      unsigned int *prev_insn = (unsigned int *)(return_lr - 4);
-      if (*prev_insn == 0xd63f0200) {
+    if ((faulting_pc >> 56) != 0 || faulting_pc == 0) {
+      /* PC has TBI tag (branch to tagged lisp value) or is NULL (branch
+         to null C function pointer).  Check if lr-4 is 'blr x16'. */
+      unsigned int *prev_insn = (return_lr > 4) ? (unsigned int *)(return_lr - 4) : NULL;
+      if (prev_insn && *prev_insn == 0xd63f0200) {
         static int ff_nil_count = 0;
         ff_nil_count++;
         if (ff_nil_count <= 5 || (ff_nil_count % 500) == 0) {
@@ -3390,32 +3419,24 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
           fprintf(dbgout, "  KERNEL_IMPORTS=0x%lx\n", (unsigned long)kimports);
           fflush(dbgout);
         }
-        if (ff_nil_count > 100) {
-          /* Stuck in ff-call loop — pop the current lisp frame from the
-             thread state's sp (NOT tcr->last_lisp_frame which may be stale).
-             The lisp frame at sp was pushed by SPeabi_ff_call before blr x16. */
-          natural cur_sp = ts->__sp;
-          LispObj *frame = (LispObj *)cur_sp;
-          fprintf(dbgout, "ff-call loop limit reached (%d) — popping frame at sp=0x%lx\n"
-                  "  savevsp=0x%lx savelr=0x%lx savefn=0x%lx savefp=0x%lx\n",
-                  ff_nil_count, (unsigned long)cur_sp,
-                  (unsigned long)frame[0], (unsigned long)frame[1],
-                  (unsigned long)frame[2], (unsigned long)frame[3]);
+        if (ff_nil_count > 500000) {
+          fprintf(dbgout, "too many ff-call-to-nil (%d), aborting\n", ff_nil_count);
           fflush(dbgout);
-          *out_ts = *ts;
-          /* Pop the lisp frame and return nil to the caller */
-          out_ts->__x[25] = frame[0];  /* vsp = savevsp */
-          out_ts->__x[10] = frame[2];  /* fn = savefn */
-          out_ts->__x[15] = 0x200000200011008ULL;  /* arg_z = nil */
-          out_ts->__pc = frame[1];     /* pc = savelr (return to caller) */
-          out_ts->__sp = cur_sp + 32;  /* pop 32-byte lisp frame */
-          out_ts->__fp = frame[3];     /* fp = savefp */
-          out_ts->__x[6] = 0x200000200011008ULL;   /* rnil */
-          out_ts->__x[7] = 0x200000200011018ULL;   /* rt */
-          tcr->valence = TCR_STATE_LISP;
-          ff_nil_count = 0;  /* reset for next function */
-          kret = KERN_SUCCESS;
-          goto done;
+          _exit(1);
+        }
+        /* After several retries from the same call site, skip past the entire
+           ff-call by restoring from SPeabi_ff_call's vstack frame and returning
+           nil to the lisp caller.  SPeabi_ff_call saves on vstack:
+           [0]=cs_area [8]=arg_x [16]=imm2 [24]=imm1 [32]=fn [40]=lr */
+        {
+          static natural last_ff_nil_lr = 0;
+          static int same_site_count = 0;
+          if (return_lr == last_ff_nil_lr) {
+            same_site_count++;
+          } else {
+            last_ff_nil_lr = return_lr;
+            same_site_count = 1;
+          }
         }
         /* Skip the call: set x0=0 (return value) and resume at lr */
         *out_ts = *ts;

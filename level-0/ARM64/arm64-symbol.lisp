@@ -81,6 +81,7 @@
 
 (defarm64lapfunction %symptr-binding-address ((symptr arg_z))
   (ldr imm0 (:@ symptr (:$ arm64::symbol.binding-index)))
+  (lsl imm0 imm0 (:$ arm64::word-shift))  ;; binding-index → byte offset
   (ldr imm2 (:@ rcontext (:$ arm64::tcr.tlb-limit)))
   (ldr imm1 (:@ rcontext (:$ arm64::tcr.tlb-pointer)))
   (cmp imm0 imm2)
@@ -105,6 +106,7 @@
 
 (defarm64lapfunction %tcr-binding-location ((tcr arg_y) (sym arg_z))
   (ldr imm1 (:@ sym (:$ arm64::symbol.binding-index)))
+  (lsl imm1 imm1 (:$ arm64::word-shift))  ;; binding-index → byte offset
   (ldr imm2 (:@ tcr (:$ arm64::tcr.tlb-limit)))
   (ldr imm0 (:@ tcr (:$ arm64::tcr.tlb-pointer)))
   (mov arg_z rnil)
