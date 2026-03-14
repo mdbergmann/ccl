@@ -441,7 +441,7 @@ _spentry(mkunwind)
 /* Non-null symbol in arg_y, new value in arg_z          */
 _spentry(bind)
 	__(ldr imm1,[arg_y,#symbol.binding_index])
-	__(lsl imm1,imm1,#fixnumshift_to_node_shift)
+	/* Bug 124: binding-index is already a byte offset (fixnumshift=0, increment=8) */
 	__(ldr imm0,[rcontext,#tcr.tlb_limit])
 	__(cmp imm0,imm1)
         __(bhi 1f)
@@ -711,7 +711,7 @@ _spentry(nthrow1value)
 /* arg_z = symbol: bind it to its current value          */
  _spentry(bind_self)
         __(ldr imm1,[arg_z,#symbol.binding_index])
-        __(lsl imm1,imm1,#fixnumshift_to_node_shift)
+        /* Bug 124: binding-index is already a byte offset */
         __(ldr imm0,[rcontext,#tcr.tlb_limit])
         __(cmp imm1,#0)
         __(beq 9f)
@@ -746,7 +746,7 @@ _spentry(bind_nil)
 /* Bind symbol in arg_z to its current value;  trap if symbol is unbound */
 _spentry(bind_self_boundp_check)
         __(ldr imm1,[arg_z,#symbol.binding_index])
-        __(lsl imm1,imm1,#fixnumshift_to_node_shift)
+        /* Bug 124: binding-index is already a byte offset */
         __(ldr imm0,[rcontext,#tcr.tlb_limit])
         __(cmp imm1,#0)
         __(beq 9f)
@@ -1194,7 +1194,7 @@ _spentry(progvsave)
         __(ldr imm1,[rcontext,#tcr.db_link])
 3:      __(_car(temp0,arg_y))
         __(ldr imm0,[temp0,#symbol.binding_index])
-        __(lsl imm0,imm0,#fixnumshift_to_node_shift)
+        /* Bug 124: binding-index is already a byte offset */
         __(ldr imm2,[rcontext,#tcr.tlb_limit])
         __(_cdr(arg_y,arg_y))
         __(cmp imm2,imm0)
@@ -2459,7 +2459,7 @@ _endsubp(udiv64by32)
 /* unbound_marker), arg_y = symbol, imm1 = symbol.binding-index  */
 _spentry(specref)
         __(ldr imm1,[arg_z,#symbol.binding_index])
-        __(lsl imm1,imm1,#fixnumshift_to_node_shift)
+        /* Bug 124: binding-index is already a byte offset */
         __(ldr imm0,[rcontext,#tcr.tlb_limit])
         __(cmp imm1,imm0)
         __(ldr temp0,[rcontext,#tcr.tlb_pointer])
@@ -2473,7 +2473,7 @@ _spentry(specref)
 
 _spentry(specrefcheck)
         __(ldr imm1,[arg_z,#symbol.binding_index])
-        __(lsl imm1,imm1,#fixnumshift_to_node_shift)
+        /* Bug 124: binding-index is already a byte offset */
         __(ldr imm0,[rcontext,#tcr.tlb_limit])
         __(cmp imm1,imm0)
         __(csel imm1,xzr,imm1,hs)
@@ -2491,7 +2491,7 @@ _spentry(specrefcheck)
 /* arg_y = special symbol, arg_z = new value.          */
 _spentry(specset)
         __(ldr imm1,[arg_y,#symbol.binding_index])
-        __(lsl imm1,imm1,#fixnumshift_to_node_shift)
+        /* Bug 124: binding-index is already a byte offset */
         __(ldr imm0,[rcontext,#tcr.tlb_limit])
         __(ldr imm2,[rcontext,#tcr.tlb_pointer])
         __(cmp imm1,imm0)

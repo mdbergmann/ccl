@@ -810,12 +810,79 @@ handle_protection_violation(ExceptionInformation *xp, siginfo_t *info,
     uint32_t esr = UC_MCONTEXT(xp)->__es.__esr;
     uint32_t ec = (esr >> 26) & 0x3F;
     struct area *dyn = (struct area *)((struct area *)all_areas)->succ;
-    Boolean in_heap = ((addr >= dyn->low && addr < dyn->high) ||
-                       (addr >= static_space_start &&
-                        addr < static_space_limit));
+    /* Bug 123 fix: strip TBI tag from addr before heap bounds check */
+    natural addr_raw = (natural)addr & 0x00FFFFFFFFFFFFFFULL;
+    Boolean in_heap = ((addr_raw >= dyn->low && addr_raw < dyn->high) ||
+                       (addr_raw >= (natural)static_space_start &&
+                        addr_raw < (natural)static_space_limit));
+
+    if (!in_heap) {
+      fprintf(dbgout, "W^X: addr=%p NOT in heap. dyn=[%p..%p) static=[%p..%p)\n",
+              addr, (void*)dyn->low, (void*)dyn->high,
+              (void*)(natural)static_space_start, (void*)(natural)static_space_limit);
+      {
+        struct area *adyn = (struct area *)((struct area *)all_areas)->succ;
+        fprintf(dbgout, "  active_dyn: low=%p active=%p high=%p\n",
+                (void*)adyn->low, (void*)adyn->active, (void*)adyn->high);
+      }
+      /* Dump code around faulting PC — extended range */
+      {
+        opcode *fpc = (opcode *)xpPC(xp);
+        if ((natural)fpc > 0x100000000ULL) {
+          int ci;
+          fprintf(dbgout, "  code@pc-128:\n");
+          for (ci=-32; ci<=16; ci++) {
+            if (ci == 0) fprintf(dbgout, " >>>");
+            fprintf(dbgout, " %08x", fpc[ci]);
+            if (ci == 0) fprintf(dbgout, "<<<");
+            if ((ci % 8) == 7) fprintf(dbgout, "\n");
+          }
+          fprintf(dbgout, "\n");
+        }
+      }
+      /* Dump registers and vector header for diagnosis */
+      {
+        natural x14_raw = xpGPR(xp, 14) & 0x00FFFFFFFFFFFFFFULL;
+        fprintf(dbgout, "  regs: x9=0x%lx x10=0x%lx x11=0x%lx x14=0x%lx x15=0x%lx x25=0x%lx\n",
+                (unsigned long)xpGPR(xp, 9), (unsigned long)xpGPR(xp, 10),
+                (unsigned long)xpGPR(xp, 11), (unsigned long)xpGPR(xp, 14),
+                (unsigned long)xpGPR(xp, 15), (unsigned long)xpGPR(xp, 25));
+        /* If X14 looks like a heap pointer, dump vector header at X14-8 */
+        if (x14_raw >= dyn->low && x14_raw < dyn->high) {
+          LispObj *vec_hdr = (LispObj *)(x14_raw - 8);
+          LispObj hdr = *vec_hdr;
+          natural element_count = header_element_count(hdr);
+          natural subtag = header_subtag(hdr);
+          fprintf(dbgout, "  vector@0x%lx: hdr=0x%lx subtag=0x%lx count=%lu (0x%lx)\n",
+                  (unsigned long)x14_raw, (unsigned long)hdr, (unsigned long)subtag,
+                  (unsigned long)element_count, (unsigned long)element_count);
+          /* Dump stack slots around vsp for context */
+          {
+            LispObj *vsp_ptr = (LispObj *)xpGPR(xp, 25);
+            int si;
+            fprintf(dbgout, "  vsp dump:");
+            for (si=0; si<12; si++)
+              fprintf(dbgout, " [%d]=0x%lx", si, (unsigned long)vsp_ptr[si]);
+            fprintf(dbgout, "\n");
+            /* Dump header of object at vsp[0] if it looks like a tagged uvector */
+            {
+              natural v0 = (natural)vsp_ptr[0];
+              natural v0_tag = v0 >> 56;
+              if (v0_tag >= 0x40 && v0_tag <= 0x7F) {
+                natural v0_raw = v0 & 0x00FFFFFFFFFFFFFFULL;
+                LispObj v0_hdr = ((LispObj *)(v0_raw - 8))[0];
+                fprintf(dbgout, "  vsp[0] obj hdr=0x%lx subtag=0x%lx count=%lu\n",
+                        (unsigned long)v0_hdr, (unsigned long)(v0_hdr >> 56),
+                        (unsigned long)(v0_hdr & 0x00FFFFFFFFFFFFFFULL));
+              }
+            }
+          }
+        }
+      }
+    }
 
     if (in_heap) {
-      natural page_start = truncate_to_power_of_2((natural)addr, log2_page_size);
+      natural page_start = truncate_to_power_of_2(addr_raw, log2_page_size);
 
       if (ec == 0x20 || ec == 0x21) {
         /* Instruction Abort: page is RW, needs RX for code execution */
@@ -1233,32 +1300,19 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
     if (tcr) {
       fprintf(dbgout, "  tcr=%p tlb_pointer=%016lx tlb_limit=%ld\n",
               tcr, (unsigned long)tcr->tlb_pointer, (long)tcr->tlb_limit);
-      /* On ARM64 (fixnumshift=0), binding_idx is a slot index, NOT a byte offset.
-         The buggy inline code in the boot image uses it directly as byte offset.
-         The correct byte offset is binding_idx * node_size. */
-      natural byte_offset_correct = (natural)binding_idx * node_size;
-      natural byte_offset_buggy = (natural)binding_idx;  /* what inline code does */
-      fprintf(dbgout, "  binding_idx=%ld correct_byte_off=%lu buggy_byte_off=%lu tlb_limit=%lu\n",
-              (long)binding_idx, (unsigned long)byte_offset_correct,
-              (unsigned long)byte_offset_buggy, (unsigned long)tcr->tlb_limit);
-      if (byte_offset_buggy < (natural)tcr->tlb_limit) {
-        /* Show what the buggy inline code actually reads */
-        LispObj buggy_val = *(LispObj *)((char *)tcr->tlb_pointer + byte_offset_buggy);
-        fprintf(dbgout, "  TLB@buggy_off[%lu]=%016lx (ntlb=%016lx)\n",
-                (unsigned long)byte_offset_buggy, (unsigned long)buggy_val,
+      /* On ARM64 (fixnumshift=0), binding_idx IS a byte offset (l0-symbol increments by 8).
+         Bug 124 fix: removed extra lsl #3 from spentry/symbol.lisp that double-scaled. */
+      natural byte_offset = (natural)binding_idx;
+      fprintf(dbgout, "  binding_idx=%ld (=byte_offset) tlb_limit=%lu\n",
+              (long)binding_idx, (unsigned long)tcr->tlb_limit);
+      if (byte_offset < (natural)tcr->tlb_limit) {
+        LispObj tlb_val = *(LispObj *)((char *)tcr->tlb_pointer + byte_offset);
+        fprintf(dbgout, "  TLB@[%lu]=%016lx (ntlb=%016lx)\n",
+                (unsigned long)byte_offset, (unsigned long)tlb_val,
                 (unsigned long)no_thread_local_binding_marker);
-        if (buggy_val != no_thread_local_binding_marker) {
-          fprintf(dbgout, "  WARNING: buggy TLB read gives non-NTLB value!\n");
-          pkglist = buggy_val;
+        if (tlb_val != no_thread_local_binding_marker) {
+          pkglist = tlb_val;
         }
-      }
-      if (byte_offset_correct < (natural)tcr->tlb_limit) {
-        LispObj correct_val = *(LispObj *)((char *)tcr->tlb_pointer + byte_offset_correct);
-        fprintf(dbgout, "  TLB@correct_off[%lu]=%016lx\n",
-                (unsigned long)byte_offset_correct, (unsigned long)correct_val);
-      } else {
-        fprintf(dbgout, "  correct byte offset %lu exceeds tlb_limit %lu (would use vcell)\n",
-                (unsigned long)byte_offset_correct, (unsigned long)tcr->tlb_limit);
       }
     }
     fprintf(dbgout, "  effective %%all-packages%% = %016lx (tag=0x%02lx)\n",
@@ -1269,17 +1323,11 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
       LispObj pkg_bidx = nrs_PACKAGE.binding_index;
       fprintf(dbgout, "  *package* vcell=%016lx binding_idx=%ld\n",
               (unsigned long)pkg_vcell, (long)pkg_bidx);
-      natural pkg_byte_off = (natural)pkg_bidx * node_size;
-      natural pkg_buggy_off = (natural)pkg_bidx;
-      if (pkg_buggy_off < (natural)tcr->tlb_limit) {
-        LispObj bv = *(LispObj *)((char *)tcr->tlb_pointer + pkg_buggy_off);
-        fprintf(dbgout, "  *package* TLB@buggy[%lu]=%016lx\n",
-                (unsigned long)pkg_buggy_off, (unsigned long)bv);
-      }
+      natural pkg_byte_off = (natural)pkg_bidx;  /* already a byte offset */
       if (pkg_byte_off < (natural)tcr->tlb_limit) {
-        LispObj cv = *(LispObj *)((char *)tcr->tlb_pointer + pkg_byte_off);
-        fprintf(dbgout, "  *package* TLB@correct[%lu]=%016lx\n",
-                (unsigned long)pkg_byte_off, (unsigned long)cv);
+        LispObj pv = *(LispObj *)((char *)tcr->tlb_pointer + pkg_byte_off);
+        fprintf(dbgout, "  *package* TLB@[%lu]=%016lx\n",
+                (unsigned long)pkg_byte_off, (unsigned long)pv);
       }
       /* Check *early-boot* too */
       fprintf(dbgout, "  checking first 20 TLB slots for non-NTLB values:\n");
@@ -3160,17 +3208,152 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
                         (unsigned long)sym[1], (unsigned long)sym[6], (unsigned long)sym[3]);
               }
             }
+            /* Priority: dump slot[6] callee (the 3-arg hash function call) */
+            if (nslots > 6) {
+              LispObj s6 = fn[6];
+              natural s6_raw = s6 & 0x00FFFFFFFFFFFFFF;
+              fprintf(dbgout, "\n  === SLOT[6] target: 0x%lx raw=0x%lx ===", (unsigned long)s6, (unsigned long)s6_raw);
+              if (s6_raw > 0x100000000ULL && s6_raw < 0x400000000000ULL) {
+                LispObj *s6_obj = (LispObj *)s6_raw;
+                fprintf(dbgout, "\n    [0]=0x%lx [1]=0x%lx [2]=0x%lx [3]=0x%lx [4]=0x%lx [5]=0x%lx [6]=0x%lx",
+                        (unsigned long)s6_obj[0], (unsigned long)s6_obj[1], (unsigned long)s6_obj[2],
+                        (unsigned long)s6_obj[3], (unsigned long)s6_obj[4], (unsigned long)s6_obj[5],
+                        (unsigned long)s6_obj[6]);
+                /* pname at [0] */
+                natural pn = s6_obj[0] & 0x00FFFFFFFFFFFFFF;
+                if (pn > 0x100000000ULL && pn < 0x400000000000ULL) {
+                  unsigned char *chars = (unsigned char *)pn;
+                  fprintf(dbgout, "\n    pname=\"");
+                  int ci;
+                  for (ci = 0; ci < 40; ci++) {
+                    unsigned char ch = chars[ci * 4];
+                    if (ch == 0) break;
+                    if (ch >= 0x20 && ch < 0x7f) fputc(ch, dbgout);
+                    else fputc('.', dbgout);
+                  }
+                  fprintf(dbgout, "\"");
+                }
+                /* fcell at [2] — dump its code */
+                LispObj fc = s6_obj[2];
+                natural fc_raw = fc & 0x00FFFFFFFFFFFFFF;
+                if (fc_raw > 0x100000000ULL && fc_raw < 0x400000000000ULL) {
+                  LispObj *callee = (LispObj *)fc_raw;
+                  natural cep = callee[0] & 0x00FFFFFFFFFFFFFF;
+                  fprintf(dbgout, "\n    fcell=0x%lx ep=0x%lx", (unsigned long)fc, (unsigned long)cep);
+                  if (cep > 0x200000000ULL && cep < 0x400000000000ULL) {
+                    opcode *ep = (opcode *)cep;
+                    fprintf(dbgout, " code:");
+                    int ci2;
+                    for (ci2 = 0; ci2 < 24; ci2++) {
+                      fprintf(dbgout, " %08x", ep[ci2]);
+                    }
+                  }
+                }
+              }
+              fflush(dbgout);
+            }
+            /* Dump callee info for slots that look like symbols (to identify called functions) */
+            {
+              int si;
+              for (si = 2; si < nslots && si < 10; si++) {
+                LispObj slot_val = fn[si];
+                natural slot_raw = slot_val & 0x00FFFFFFFFFFFFFF;
+                natural slot_tag = slot_val >> 56;
+                if (slot_raw > 0x100000000ULL && slot_raw < 0x400000000000ULL) {
+                  LispObj *slot_obj = (LispObj *)slot_raw;
+                  fprintf(dbgout, "\n  slot[%d] tag=0x%02lx", si, (unsigned long)slot_tag);
+                  /* Try to read pname (offset 0 from tagged = slot[0]) for symbols */
+                  LispObj pname = slot_obj[0];
+                  natural pname_raw = pname & 0x00FFFFFFFFFFFFFF;
+                  fprintf(dbgout, " pname_raw=0x%lx", (unsigned long)pname_raw);
+                  if (pname_raw > 0x100000000ULL && pname_raw < 0x400000000000ULL) {
+                    LispObj *pstr = (LispObj *)pname_raw;
+                    LispObj pstr_hdr = *(pstr - 1);
+                    unsigned char *chars = (unsigned char *)pstr;
+                    int maxc = 40;
+                    fprintf(dbgout, " hdr=0x%lx \"", (unsigned long)pstr_hdr);
+                    int ci;
+                    for (ci = 0; ci < maxc; ci++) {
+                      unsigned char ch = chars[ci * 4]; /* 32-bit chars, low byte */
+                      if (ch == 0) break;
+                      if (ch >= 0x20 && ch < 0x7f) fputc(ch, dbgout);
+                      else fputc('.', dbgout);
+                    }
+                    fprintf(dbgout, "\"");
+                  }
+                  /* Always try fcell at offset 16 for callee code dump */
+                  LispObj fcell = slot_obj[2]; /* offset 16 = symbol.fcell */
+                  natural fcell_raw = fcell & 0x00FFFFFFFFFFFFFF;
+                  if (fcell_raw > 0x100000000ULL && fcell_raw < 0x400000000000ULL) {
+                    LispObj *callee = (LispObj *)fcell_raw;
+                    natural callee_ep = callee[0] & 0x00FFFFFFFFFFFFFF;
+                    if (callee_ep > 0x200000000ULL && callee_ep < 0x400000000000ULL) {
+                      opcode *ep = (opcode *)callee_ep;
+                      fprintf(dbgout, "\n    callee ep=0x%lx code:", (unsigned long)callee_ep);
+                      int ci2;
+                      for (ci2 = 0; ci2 < 20; ci2++) {
+                        fprintf(dbgout, " %08x", ep[ci2]);
+                      }
+                    }
+                  }
+                }
+              }
+            }
           }
-          /* Dump code around crash PC for KERN_INVALID_ADDRESS in lisp code */
+          /* Dump code from function entrypoint to crash PC + margin */
           {
             natural pc_raw = ts->__pc & 0x00FFFFFFFFFFFFFF;
             if (pc_raw > 0x200000000ULL && pc_raw < 0x400000000000ULL) {
-              opcode *pc_code = (opcode *)(pc_raw - 32);  /* 8 instrs before */
+              /* Try to get entrypoint from nfn (x10) slot[0] */
+              natural nfn_raw = ts->__x[10] & 0x00FFFFFFFFFFFFFF;
+              natural ep_raw = 0;
+              if (nfn_raw > 0x100000000ULL && nfn_raw < 0x400000000000ULL) {
+                LispObj *nfn_obj = (LispObj *)nfn_raw;
+                ep_raw = nfn_obj[0] & 0x00FFFFFFFFFFFFFF;  /* slot[0] = entrypoint */
+              }
+              if (ep_raw == 0 || ep_raw > pc_raw) ep_raw = pc_raw - 32;
+              int total_instrs = ((pc_raw - ep_raw) / 4) + 80;
+              if (total_instrs > 300) total_instrs = 300;
+              opcode *ep_code = (opcode *)ep_raw;
+              int crash_idx = (pc_raw - ep_raw) / 4;
               int ci;
-              fprintf(dbgout, "\n  code dump around crash pc=0x%lx:\n", (unsigned long)pc_raw);
-              for (ci = 0; ci < 24; ci++) {
-                char marker = ((ci == 8) ? '>' : ' ');
-                fprintf(dbgout, "   %c[%+3d] 0x%lx: %08x\n", marker, (ci-8)*4, (unsigned long)(pc_raw + (ci-8)*4), pc_code[ci]);
+              fprintf(dbgout, "\n  code dump ep=0x%lx to pc=0x%lx (+%d instrs):\n",
+                      (unsigned long)ep_raw, (unsigned long)pc_raw, total_instrs);
+              for (ci = 0; ci < total_instrs; ci++) {
+                char marker = ((ci == crash_idx) ? '>' : ' ');
+                fprintf(dbgout, "   %c[%+4d] 0x%lx: %08x\n", marker, (ci - crash_idx)*4,
+                        (unsigned long)(ep_raw + ci*4), ep_code[ci]);
+              }
+            }
+            /* Dump macptr contents if x9 looks like a macptr */
+            {
+              natural x9 = ts->__x[9];
+              natural x9_tag = x9 >> 56;
+              natural x9_raw = x9 & 0x00FFFFFFFFFFFFFF;
+              if ((x9_tag & 0x40) && x9_raw > 0x100000000ULL && x9_raw < 0x400000000000ULL) {
+                LispObj *obj = (LispObj *)x9_raw;
+                fprintf(dbgout, "  macptr at x9=0x%lx (raw=0x%lx):\n", (unsigned long)x9, (unsigned long)x9_raw);
+                fprintf(dbgout, "    header  = 0x%lx\n", (unsigned long)obj[-1]);
+                fprintf(dbgout, "    address = 0x%lx\n", (unsigned long)obj[0]);
+                fprintf(dbgout, "    domain  = 0x%lx\n", (unsigned long)obj[1]);
+                fprintf(dbgout, "    type    = 0x%lx\n", (unsigned long)obj[2]);
+                /* Scan heap from allocptr upward to find all macptrs */
+                {
+                  natural ap = ts->__x[26] & 0x00FFFFFFFFFFFFFF;
+                  if (ap > 0x100000000ULL && ap < 0x400000000000ULL) {
+                    LispObj *scan = (LispObj *)ap;
+                    int found = 0;
+                    fprintf(dbgout, "    heap scan from allocptr=0x%lx (32 dwords):\n", (unsigned long)ap);
+                    int si;
+                    for (si = 0; si < 32; si++) {
+                      LispObj w = scan[si];
+                      char mark = ' ';
+                      if ((w >> 56) == 0x8a && (w & 0xFF) == 3) mark = 'M'; /* macptr header */
+                      fprintf(dbgout, "    %c[%+3d] 0x%lx: 0x%lx\n", mark, si*8, (unsigned long)(ap + si*8), (unsigned long)w);
+                    }
+                  }
+                }
+                fflush(dbgout);
               }
             }
             /* Also dump lisp frame contents from SP and walk frame chain */
@@ -3326,6 +3509,48 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
       kret = KERN_SUCCESS;
     } else {
       /* Protection fault outside heap (e.g. vstack guard) — dispatch as SIGBUS */
+      /* Dump function name from x10 (nfn) for debugging */
+      {
+        natural nfn_raw = ts->__x[10] & 0x00FFFFFFFFFFFFFFULL;
+        if (nfn_raw >= (natural)heap_start && nfn_raw < (natural)a->high) {
+          /* Function object: slot 0=entrypoint, slot 1=codevector, ... */
+          /* Try to find lfun-info or name in the function's constants */
+          LispObj *fn_slots = (LispObj *)nfn_raw;
+          /* Slot 2 is usually the function name or lfun-info */
+          fprintf(dbgout, "  fn@0x%lx slots:", (unsigned long)nfn_raw);
+          int fi;
+          for (fi = 0; fi < 8 && (natural)(fn_slots + fi) < (natural)a->high; fi++) {
+            fprintf(dbgout, " [%d]=0x%lx", fi, (unsigned long)fn_slots[fi]);
+          }
+          fprintf(dbgout, "\n");
+          /* If slot[2] looks like a symbol (TBI tag 0x63=tag-symbol), read its pname */
+          natural s2 = fn_slots[2];
+          natural s2_tag = s2 >> 56;
+          if (s2_tag == 0x63) {
+            natural sym_raw = s2 & 0x00FFFFFFFFFFFFFFULL;
+            LispObj *sym = (LispObj *)sym_raw;
+            /* Symbol pname is slot 0 (misc-data-offset=0 on ARM64) */
+            LispObj pname = sym[0];
+            natural pname_raw = pname & 0x00FFFFFFFFFFFFFFULL;
+            /* pname should be in heap or readonly area */
+            if (pname_raw >= 0x200000000ULL && pname_raw < (natural)a->high) {
+              /* Read string header at pname_raw - 8 (misc-header-offset=-8) */
+              LispObj pname_hdr = ((LispObj *)(pname_raw - 8))[0];
+              natural pname_len = pname_hdr & 0x00FFFFFFFFFFFFFFULL;
+              if (pname_len > 64) pname_len = 64;
+              char *pname_data = (char *)pname_raw;
+              fprintf(dbgout, "  fn name: '");
+              int pi;
+              for (pi = 0; pi < (int)pname_len && pname_data[pi] >= 0x20 && pname_data[pi] < 0x7f; pi++)
+                fputc(pname_data[pi], dbgout);
+              fprintf(dbgout, "' (len=%lu)\n", (unsigned long)pname_len);
+            }
+          } else {
+            fprintf(dbgout, "  slot[2] tag=0x%lx (expected 0x63 for symbol)\n",
+                    (unsigned long)s2_tag);
+          }
+        }
+      }
       signum = SIGBUS;
       if (tcr->valence != TCR_STATE_LISP) {
         fprintf(dbgout, "FATAL: protection fault while in exception handler "

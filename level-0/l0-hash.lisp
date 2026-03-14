@@ -1955,7 +1955,11 @@ before doing so.")
           (nhash.vector.cache-value vector) nil
           (nhash.vector.cache-idx vector) nil
           (nhash.vector.size vector) size
-          (nhash.vector.size-reciprocal vector) (floor (ash 1 (- target::nbits-in-word target::fixnumshift)) size))))
+          ;; Reciprocal for fast-mod-3 Barrett reduction.
+          ;; ARM64 fast-mod-3 uses hardware UDIV (ignores reciprocal), and
+          ;; (ash 1 64) overflows ARM64 fixnum range anyway.
+          (nhash.vector.size-reciprocal vector) #+arm64-target 0
+                                                #-arm64-target (floor (ash 1 (- target::nbits-in-word target::fixnumshift)) size))))
 
 (defun assert-hash-table-readonly (hash)
   (unless (typep hash 'hash-table)

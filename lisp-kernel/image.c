@@ -496,80 +496,21 @@ load_openmcl_image(int fd, openmcl_image_file_header *h)
           relocate_area_contents(a, bias);
         }
         fprintf(dbgout, "  dynamic relocation done, resizing heap\n");
+        fprintf(dbgout, "  BEFORE resize: a->low=0x%lx a->active=0x%lx a->high=0x%lx threshold=0x%lx\n",
+                (unsigned long)a->low, (unsigned long)a->active, (unsigned long)a->high,
+                (unsigned long)lisp_heap_gc_threshold);
 	resize_dynamic_heap(a->active, lisp_heap_gc_threshold);
+        fprintf(dbgout, "  AFTER resize: a->low=0x%lx a->active=0x%lx a->high=0x%lx\n",
+                (unsigned long)a->low, (unsigned long)a->active, (unsigned long)a->high);
 	xMakeDataExecutable(a->low, a->active - a->low);
         fprintf(dbgout, "  AREA_DYNAMIC done\n");
 	break;
       }
     }
   }
-#if defined(ARM64) && (fixnumshift == 0)
-  /* ARM64 TLB binding index scaling fix.
-     On ARM64 with fixnumshift=0, binding indices stored in symbols are
-     slot indices (fixnums), but the inline TLB lookup code (compiled
-     into the boot image) uses them directly as byte offsets.
-     Pre-scale all binding indices by node_size so the inline code works.
-
-     Walk the static, readonly, and dynamic areas to find every symbol.
-     These are the three areas that contain objects from the image. */
-  {
-    natural max_scaled_idx = 0;
-    int nsyms_scaled = 0;
-
-    /* Scan a single area for symbols and scale their binding indices */
-#define SCALE_BINDING_INDICES_IN_AREA(area_low, area_high) do { \
-    LispObj *p = (LispObj *)(area_low); \
-    LispObj *end = (LispObj *)(area_high); \
-    while (p < end) { \
-      LispObj hdr = *p; \
-      unsigned ft = fulltag_of(hdr); \
-      if (immheader_tag_p(ft)) { \
-        p = (LispObj *)skip_over_ivector((natural)p, hdr); \
-      } else if (nodeheader_tag_p(ft)) { \
-        unsigned st = header_subtag(hdr); \
-        natural nslots = hdr & 0x00FFFFFFFFFFFFFFLL; \
-        if (st == subtag_symbol && nslots >= 7) { \
-          LispObj bidx = p[7]; \
-          if (bidx > 0 && bidx < 0x00FFFFFFLL) { \
-            LispObj scaled = bidx * node_size; \
-            p[7] = scaled; \
-            nsyms_scaled++; \
-            if ((natural)scaled > max_scaled_idx) \
-              max_scaled_idx = (natural)scaled; \
-          } \
-        } \
-        p += 1 + nslots; \
-        if ((natural)p & (dnode_size - 1)) p++; \
-      } else { \
-        p += 2; \
-      } \
-    } \
-  } while(0)
-
-    /* Static area: NRS symbols and other statics */
-    {
-      area *a;
-      for (a = active_dynamic_area->succ; a && a != active_dynamic_area; a = a->succ) {
-        if (a->code == AREA_STATIC && a->low && a->active > a->low) {
-          SCALE_BINDING_INDICES_IN_AREA(a->low, a->active);
-          break;
-        }
-      }
-    }
-    /* Readonly area */
-    if (readonly_area && readonly_area->low && readonly_area->active > readonly_area->low) {
-      SCALE_BINDING_INDICES_IN_AREA(readonly_area->low, readonly_area->active);
-    }
-    /* Dynamic area */
-    if (active_dynamic_area && active_dynamic_area->low &&
-        active_dynamic_area->active > active_dynamic_area->low) {
-      SCALE_BINDING_INDICES_IN_AREA(active_dynamic_area->low, active_dynamic_area->active);
-    }
-#undef SCALE_BINDING_INDICES_IN_AREA
-    fprintf(dbgout, "  TLB scaling: %d symbols scaled, max_scaled_idx=%lu\n",
-            nsyms_scaled, (unsigned long)max_scaled_idx);
-  }
-#endif
+  /* Bug 124: TLB binding-index scaling REMOVED.
+     On ARM64 with fixnumshift=0, l0-symbol.lisp increments binding-index by 8
+     (= node_size), so indices are already byte offsets. No image-load scaling needed. */
   fprintf(dbgout, "  load_openmcl_image returning image_nil=0x%lx\n", (unsigned long)image_nil);
   return image_nil;
 }

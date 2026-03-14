@@ -2557,13 +2557,24 @@ xFindSymbol(void* handle, char *name)
 #endif
 #ifdef DARWIN
   void *result;
+  static int xfind_count = 0;
 
   if ((handle == NULL) || (handle == ((void *) -1))) {
     handle = RTLD_DEFAULT;
-  }    
+  }
   result = dlsym(handle, name);
   if ((result == NULL) && (*name == '_')) {
     result = dlsym(handle, name+1);
+  }
+  xfind_count++;
+  if (xfind_count <= 40) {
+    fprintf(dbgout, "xFindSymbol[%d]: name=%p \"%.40s\" hex=",
+            xfind_count, (void*)name, name ? name : "(null)");
+    if (name) {
+      int j; for(j=0; j<16; j++) fprintf(dbgout, "%02x ", (unsigned char)name[j]);
+    }
+    fprintf(dbgout, " result=%p\n", result);
+    fflush(dbgout);
   }
   return result;
 #endif

@@ -431,14 +431,14 @@
      ((v :lisp)
       (scaled-idx :u64))
      ())
-  (ldr dest (:@ v scaled-idx)))
+  (ldr32 dest (:@ v scaled-idx)))
 
 (define-arm64-vinsn (misc-ref-c-u32 :predicatable)
     (((dest :u32))
      ((v :lisp)
       (idx :u32const))
      ())
-  (ldr dest (:@ v (:$ (:apply + arm64::misc-data-offset (:apply ash idx 2))))))
+  (ldr32 dest (:@ v (:$ (:apply + arm64::misc-data-offset (:apply ash idx 2))))))
 
 (define-arm64-vinsn (misc-ref-s32 :predicatable)
     (((dest :s32))
@@ -459,28 +459,28 @@
      ((val :u32)
       (v :lisp)
       (idx :u32const)))
-  (str val (:@ v (:$ (:apply + arm64::misc-data-offset (:apply ash idx 2))))))
+  (str32 val (:@ v (:$ (:apply + arm64::misc-data-offset (:apply ash idx 2))))))
 
 (define-arm64-vinsn (misc-set-c-s32 :predicatable)
     (()
      ((val :s32)
       (v :lisp)
       (idx :u32const)))
-  (str val (:@ v (:$ (:apply + arm64::misc-data-offset (:apply ash idx 2))))))
+  (str32 val (:@ v (:$ (:apply + arm64::misc-data-offset (:apply ash idx 2))))))
 
 (define-arm64-vinsn (misc-set-u32 :predicatable)
     (()
      ((val :u32)
       (v :lisp)
       (scaled-idx :u64)))
-  (str val (:@ v scaled-idx)))
+  (str32 val (:@ v scaled-idx)))
 
 (define-arm64-vinsn (misc-set-s32 :predicatable)
     (()
      ((val :s32)
       (v :lisp)
       (scaled-idx :u64)))
-  (str val (:@ v scaled-idx)))
+  (str32 val (:@ v scaled-idx)))
 
 
 ;;; --- 16-bit unsigned/signed ---
@@ -1279,7 +1279,7 @@
   (cmp temp (:$ arm64::subtag-bignum))
   (b.ne :bad)
   ;; 1-digit bignum: value must be non-negative u32
-  (ldr dest (:@ src (:$ arm64::misc-data-offset)))
+  (ldr32 dest (:@ src (:$ arm64::misc-data-offset)))
   (tst dest (:$ (:apply lognot #xffffffff)))
   (b.eq :got-it)
   :bad
@@ -1309,7 +1309,7 @@
   (ubfx header header (:$ 0) (:$ arm64::subtag-shift))
   (cmp header (:$ 1))
   (b.ne :bad)
-  (ldr dest (:@ src (:$ arm64::misc-data-offset)))
+  (ldrsw dest (:@ src (:$ arm64::misc-data-offset)))
   (b :got-it)
   :bad
   (uuo-error-reg-not-xtype src (:$ arm64::xtype-s32))
@@ -2546,8 +2546,8 @@
 
 ;;; ref-symbol-value-inline: inline TLB lookup with unbound check.
 ;;; TBI: symbol fields accessed via tagged pointer (TBI ignores tag byte).
-;;; Note: on ARM64 with fixnumshift=0, binding-index is a slot index that
-;;; must be scaled by node-size (lsl #3) to get a byte offset into the TLB.
+;;; Bug 124: binding-index is already a byte offset (fixnumshift=0, l0-symbol
+;;; increments by 8), so NO scaling needed — use directly as TLB offset.
 (define-arm64-vinsn ref-symbol-value-inline (((dest :lisp))
                                              ((src (:lisp (:ne dest))))
                                              ((table :imm)
@@ -2783,18 +2783,18 @@
      ((src :address)
       (index :s16const)))
   ((:pred >= index 0)
-   (ldr dest (:@ src (:$ index))))
+   (ldr32 dest (:@ src (:$ index))))
   ((:pred < index 0)
-   (ldur dest (:@ src (:$ index)))))
+   (ldur32 dest (:@ src (:$ index)))))
 
 (define-arm64-vinsn (mem-ref-c-signed-fullword :predicatable)
     (((dest :s64))
      ((src :address)
       (index :s16const)))
   ((:pred >= index 0)
-   (ldr dest (:@ src (:$ index))))
+   (ldrsw dest (:@ src (:$ index))))
   ((:pred < index 0)
-   (ldur dest (:@ src (:$ index)))))
+   (ldursw dest (:@ src (:$ index)))))
 
 (define-arm64-vinsn (mem-ref-c-natural :predicatable)
     (((dest :u64))
@@ -2809,13 +2809,13 @@
     (((dest :u64))
      ((src :address)
       (index :s64)))
-  (ldr dest (:@ src index)))
+  (ldr32 dest (:@ src index)))
 
 (define-arm64-vinsn (mem-ref-signed-fullword :predicatable)
     (((dest :s64))
      ((src :address)
       (index :s64)))
-  (ldr dest (:@ src index)))
+  (ldrsw dest (:@ src index)))
 
 (define-arm64-vinsn (mem-ref-natural :predicatable)
     (((dest :u64))
@@ -3003,16 +3003,16 @@
       (src :address)
       (index :s16const)))
   ((:pred >= index 0)
-   (str val (:@ src (:$ index))))
+   (str32 val (:@ src (:$ index))))
   ((:pred < index 0)
-   (stur val (:@ src (:$ index)))))
+   (stur32 val (:@ src (:$ index)))))
 
 (define-arm64-vinsn (mem-set-fullword :predicatable)
     (()
      ((val :u64)
       (src :address)
       (index :s64)))
-  (str val (:@ src index)))
+  (str32 val (:@ src index)))
 
 (define-arm64-vinsn (mem-set-c-halfword :predicatable)
     (()
@@ -3834,8 +3834,16 @@
 (define-arm64-vinsn add-immediate-set-flags (((dest :imm)
                                               (flags :crf))
                                              ((src :imm)
-                                              (imm :s32const)))
-  (adds dest src (:$ imm)))
+                                              (imm :s32const))
+                                             ((tag :u64)))
+  ;; Bug 120 fix: ADDS alone only sets Z when result=0, which causes
+  ;; arm642-check-fixnum-overflow (BNE = overflow) to false-positive
+  ;; on every nonzero result.  Must use LSL/ASR/CMP to detect actual
+  ;; 56-bit fixnum overflow, matching fixnum-add-set-flags.
+  (add dest src (:$ imm))
+  (lsl tag dest (:$ 8))
+  (asr tag tag (:$ 8))
+  (cmp tag dest))
 
 (define-arm64-vinsn (natural-shift-left :predicatable) (((dest :u64))
                                                          ((src :u64)
@@ -4059,13 +4067,13 @@
   (add offset idx (:$ arm64::misc-data-offset))
   (strb code (:@ str offset)))
 
-;;; 32-bit string access
+;;; 32-bit string access — use ldr32/str32 for 32-bit element width
 (define-arm64-vinsn (%schar32 :predicatable) (((dest :lisp))
                                                ((str :lisp)
                                                 (idx :imm))
                                                ((temp :u32)))
   (add temp idx (:$ (:apply ash arm64::misc-data-offset -2)))
-  (ldr temp (:@ str (:lsl temp 2)))
+  (ldr32 temp (:@ str (:lsl temp 2)))
   (lsl dest temp (:$ arm64::charcode-shift))
   (movk dest (:$ (:apply ash arm64::tag-character 8)) (:lsl 48)))
 
@@ -4074,7 +4082,7 @@
                                                      (idx :imm))
                                                     ((temp :u32)))
   (add temp idx (:$ (:apply ash arm64::misc-data-offset -2)))
-  (ldr dest (:@ str (:lsl temp 2))))
+  (ldr32 dest (:@ str (:lsl temp 2))))
 
 (define-arm64-vinsn %set-schar32 (()
                                    ((str :lisp)
@@ -4084,7 +4092,7 @@
                                     (offset :u32)))
   (lsr temp char (:$ arm64::charcode-shift))
   (add offset idx (:$ (:apply ash arm64::misc-data-offset -2)))
-  (str temp (:@ str (:lsl offset 2))))
+  (str32 temp (:@ str (:lsl offset 2))))
 
 (define-arm64-vinsn %set-scharcode32 (()
                                        ((str :lisp)
@@ -4092,7 +4100,7 @@
                                         (code :imm))
                                        ((offset :u32)))
   (add offset idx (:$ (:apply ash arm64::misc-data-offset -2)))
-  (str code (:@ str (:lsl offset 2))))
+  (str32 code (:@ str (:lsl offset 2))))
 
 ;;; --- Unboxing ---
 
@@ -4166,7 +4174,7 @@
                                   ((word-offset :imm)
                                    (bit-shift :imm)))
   (lsr word-offset bit-offset (:$ 5))
-  (ldr dest (:@ src (:lsl word-offset 2)))
+  (ldr32 dest (:@ src (:lsl word-offset 2)))
   (and bit-shift bit-offset (:$ 31))
   (lsr dest dest bit-shift)
   (and dest dest (:$ 1)))
@@ -4177,7 +4185,7 @@
                                          ((word-offset :imm)
                                           (bit-shift :imm)))
   (lsr word-offset bit-offset (:$ 5))
-  (ldr dest (:@ src (:lsl word-offset 2)))
+  (ldr32 dest (:@ src (:lsl word-offset 2)))
   (and bit-shift bit-offset (:$ 31))
   (lsr dest dest bit-shift)
   (and dest dest (:$ 1)))
@@ -4191,7 +4199,7 @@
                                    (mask :u32)
                                    (word :u32)))
   (lsr word-offset bit-offset (:$ 5))
-  (ldr word (:@ src (:lsl word-offset 2)))
+  (ldr32 word (:@ src (:lsl word-offset 2)))
   (and bit-shift bit-offset (:$ 31))
   (mov mask (:$ 1))
   (lsl mask mask bit-shift)
@@ -4202,7 +4210,7 @@
   :clear
   (bic word word mask)
   :store
-  (str word (:@ src (:lsl word-offset 2))))
+  (str32 word (:@ src (:lsl word-offset 2))))
 
 ;;; --- Float operations ---
 

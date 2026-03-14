@@ -2699,7 +2699,11 @@
                    (#.hard-reg-class-gpr-mode-s8
                     (! s8->fixnum dest src))
                    (#.hard-reg-class-gpr-mode-address
-                    (! macptr->heap dest src))))
+                    (! macptr->heap dest src))
+                   (#.hard-reg-class-gpr-mode-u64
+                    (! makeu64))
+                   (#.hard-reg-class-gpr-mode-s64
+                    (! makes64))))
                 ((#.hard-reg-class-gpr-mode-u32
                   #.hard-reg-class-gpr-mode-address)
                  (case src-mode
@@ -2716,7 +2720,9 @@
                          (! deref-macptr dest src)))))
                    ((#.hard-reg-class-gpr-mode-u32
                      #.hard-reg-class-gpr-mode-s32
-                     #.hard-reg-class-gpr-mode-address)
+                     #.hard-reg-class-gpr-mode-address
+                     #.hard-reg-class-gpr-mode-u64
+                     #.hard-reg-class-gpr-mode-s64)
                     (unless (eql dest-gpr src-gpr)
                       (! copy-gpr dest src)))
                    ((#.hard-reg-class-gpr-mode-u16
@@ -2731,7 +2737,9 @@
                     (! unbox-s32 dest src))
                    ((#.hard-reg-class-gpr-mode-u32
                      #.hard-reg-class-gpr-mode-s32
-                     #.hard-reg-class-gpr-mode-address)
+                     #.hard-reg-class-gpr-mode-address
+                     #.hard-reg-class-gpr-mode-u64
+                     #.hard-reg-class-gpr-mode-s64)
                     (unless (eql dest-gpr src-gpr)
                       (! copy-gpr dest src)))
                    (#.hard-reg-class-gpr-mode-u16
@@ -2776,6 +2784,16 @@
                  (case src-mode
                    (#.hard-reg-class-gpr-mode-node
                     (! unbox-s8 dest src))
+                   (t
+                    (unless (eql dest-gpr src-gpr)
+                      (! copy-gpr dest src)))))
+                ((#.hard-reg-class-gpr-mode-u64
+                  #.hard-reg-class-gpr-mode-s64)
+                 (case src-mode
+                   (#.hard-reg-class-gpr-mode-node
+                    (if (eql dest-mode hard-reg-class-gpr-mode-s64)
+                      (! gets64)
+                      (! getu64)))
                    (t
                     (unless (eql dest-gpr src-gpr)
                       (! copy-gpr dest src))))))

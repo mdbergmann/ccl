@@ -81,7 +81,7 @@
 
 (defarm64lapfunction %symptr-binding-address ((symptr arg_z))
   (ldr imm0 (:@ symptr (:$ arm64::symbol.binding-index)))
-  (lsl imm0 imm0 (:$ arm64::word-shift))  ;; binding-index → byte offset
+  ;; Bug 124: binding-index is already a byte offset (fixnumshift=0, increment=8)
   (ldr imm2 (:@ rcontext (:$ arm64::tcr.tlb-limit)))
   (ldr imm1 (:@ rcontext (:$ arm64::tcr.tlb-pointer)))
   (cmp imm0 imm2)
@@ -106,7 +106,7 @@
 
 (defarm64lapfunction %tcr-binding-location ((tcr arg_y) (sym arg_z))
   (ldr imm1 (:@ sym (:$ arm64::symbol.binding-index)))
-  (lsl imm1 imm1 (:$ arm64::word-shift))  ;; binding-index → byte offset
+  ;; Bug 124: binding-index is already a byte offset (fixnumshift=0, increment=8)
   (ldr imm2 (:@ tcr (:$ arm64::tcr.tlb-limit)))
   (ldr imm0 (:@ tcr (:$ arm64::tcr.tlb-pointer)))
   (mov arg_z rnil)
@@ -131,17 +131,18 @@
     (b.eq @done)
     @loop
     (subs len len (:$ 1))
-    ;; 32-bit elements: load 64 bits (2 elements), step by 8 bytes.
-    ;; This hashes pairs of characters, but the hash quality doesn't
-    ;; need to exactly match ARM32.
-    (ldr nextw (:@ str offset))
-    (add offset offset (:$ 8))
+    ;; Bug 126: 32-bit character elements — use 32-bit load, step by 4 bytes.
+    ;; Previous code used 64-bit LDR stepping by 8, reading past string bounds.
+    (ldr32 nextw (:@ str offset))
+    (add offset offset (:$ 4))
     (ror accum accum (:$ 27))
     (eor accum accum nextw)
     (b.ne @loop)
-    ;; Strip top bits: shift left 8, then right 8 to clear top byte (tag).
-    (lsl accum accum (:$ 8))
-    (lsr arg_z accum (:$ 8))
+    ;; Bug 126: Mask to 29 bits to ensure mixup-hash-code intermediate
+    ;; values stay within ARM64 most-positive-fixnum (55 bits).
+    ;; (ash hash 15) + hash can reach 29+15+1=45 bits, safely under 55.
+    (and accum accum (:$ #x1FFFFFFF))
+    (mov arg_z accum)
     @done
     (ret)))
 
@@ -150,21 +151,22 @@
         (accum imm0)
         (offset imm2))
     (cmp len (:$ 0))
-    ;; start is already a fixnum (= raw index on ARM64), scale by 8 for 64-bit loads
-    (lsl offset start (:$ 3))
+    ;; Bug 126: start is a fixnum (=raw index on ARM64), scale by 4 for 32-bit char loads
+    (lsl offset start (:$ 2))
     (add offset offset (:$ arm64::misc-data-offset))
     (mov accum (:$ 0))
     (b.eq @done)
     @loop
     (subs len len (:$ 1))
-    (ldr nextw (:@ str offset))
-    (add offset offset (:$ 8))
+    ;; Bug 126: 32-bit character elements — use 32-bit load, step by 4 bytes.
+    (ldr32 nextw (:@ str offset))
+    (add offset offset (:$ 4))
     (ror accum accum (:$ 27))
     (eor accum accum nextw)
     (b.ne @loop)
-    ;; Strip top bits
-    (lsl accum accum (:$ 8))
-    (lsr arg_z accum (:$ 8))
+    ;; Bug 126: Mask to 29 bits (same as %pname-hash).
+    (and accum accum (:$ #x1FFFFFFF))
+    (mov arg_z accum)
     @done
     (ret)))
 

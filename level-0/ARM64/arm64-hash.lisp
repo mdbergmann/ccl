@@ -35,16 +35,13 @@
 
 
 (defarm64lapfunction fast-mod-3 ((number arg_x) (divisor arg_y) (recip arg_z))
-  ;; ARM64: fixnumshift=0, so values are raw fixnums.
-  ;; Multiply number by reciprocal (high half gives quotient estimate),
-  ;; then compute remainder.
-  (smulh imm1 number recip)
-  (mul imm0 imm1 divisor)
-  (sub number number imm0)
-  (sub number number divisor)
-  (asr imm0 number (:$ (1- arm64::nbits-in-word)))
-  (and divisor divisor imm0)
-  (add arg_z number divisor)
+  ;; ARM64: Use hardware UDIV+MSUB instead of SMULH-based Barrett reduction.
+  ;; With fixnumshift=0 and 8-bit TBI tags, the reciprocal from
+  ;; (floor (ash 1 64) size) overflows the fixnum range (max 2^55-1),
+  ;; producing a bignum pointer that corrupts the SMULH computation.
+  ;; ARM64 has fast hardware divide, so just use that.
+  (udiv imm0 number divisor)
+  (msub arg_z imm0 divisor number)
   (ret))
 
 (defarm64lapfunction %dfloat-hash ((key arg_z))
