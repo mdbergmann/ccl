@@ -292,14 +292,21 @@
           (ensure-binding-index symbol))
         (%epushval s symbol)))))
 
-(defvar *package-refs*)
-(setq *package-refs* (make-hash-table :test #'equal))
-(defvar *package-refs-lock*)
-(setq *package-refs-lock* (make-lock))
+(defvar *package-refs* nil)
+(defvar *package-refs-lock* nil)
+
+;;; Bug 131: *package-refs* was created at top-level with :test #'equal,
+;;; but during early boot the EQUAL function may not yet be defined
+;;; (its %defun cold-load function may not have run).  Create lazily.
+(defun %ensure-package-refs ()
+  (unless *package-refs*
+    (setq *package-refs* (make-hash-table :test #'equal))
+    (setq *package-refs-lock* (make-lock))))
 
 (defun register-package-ref (name)
-  (unless (typep name 'string)
+  (unless (stringp name)
     (report-bad-arg name 'string))
+  (%ensure-package-refs)
   (let* ((ref
           (or (gethash name *package-refs*)
               (with-lock-grabbed (*package-refs-lock*)
@@ -321,8 +328,10 @@
 (defun package-%locally-nicknamed-by (package) (declare (ignore package)) '())
 
 (defun find-package (name)
-  (require-type name '(or package character symbol string))
-  (cond ((typep name 'package)
+  ;; Bug 132: Use packagep instead of typep during early boot
+  (unless (or (packagep name) (characterp name) (symbolp name) (stringp name))
+    (report-bad-arg name '(or package character symbol string)))
+  (cond ((packagep name)
          name)
         ((package-%local-nicknames *package*)
          (pkg-arg name nil nil))
@@ -348,7 +357,7 @@
 
 (defun %find-pkg (name &optional (len (length name)))
   (declare (fixnum len))
-  (require-type name 'string)
+  (unless (stringp name) (report-bad-arg name 'string))
   (with-package-list-read-lock
     (dolist (p %all-packages%)
       (if (dolist (pkgname (pkg.names p))
@@ -361,10 +370,11 @@
           (return p)))))
 
 (defun pkg-arg (thing &optional deleted-ok (errorp t))
-  (require-type thing '(or package character symbol string))
-  (let* ((xthing (cond ((or (symbolp thing) (typep thing 'character))
+  (unless (or (packagep thing) (characterp thing) (symbolp thing) (stringp thing))
+    (report-bad-arg thing '(or package character symbol string)))
+  (let* ((xthing (cond ((or (symbolp thing) (characterp thing))
                         (string thing))
-                       ((typep thing 'string)
+                       ((stringp thing)
                         (ensure-simple-string thing))
                        (t
                         thing))))

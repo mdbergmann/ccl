@@ -2327,13 +2327,17 @@ _spentry(add_values)
 /* Calls out to %init-misc, which does the rest of the work.  */
 
 _spentry(misc_alloc_init)
+        /* Bug 135: Save initval to vstack — temp2 (x12) is NOT callee-saved
+           on ARM64 and gets clobbered by SPmisc_alloc.
+           Must vpush BEFORE build_lisp_frame so that restore_lisp_frame
+           preserves the modified vsp. */
+        __(vpush1(arg_z))    /* push initval to vstack */
         __(build_lisp_frame())
-        __(mov temp2,arg_z)  /* initval  */
         __(mov arg_z,arg_y)  /* subtag  */
         __(mov arg_y,arg_x)  /* element-count  */
         __(bl _SPmisc_alloc)
         __(restore_lisp_frame())
-        __(mov arg_y,temp2)
+        __(vpop1(arg_y))     /* pop initval from vstack */
 initialize_vector:              
         __(ref_nrs_symbol(fname,init_misc))
         __(set_nargs(2))

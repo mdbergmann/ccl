@@ -3554,6 +3554,27 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
           }
         }
       }
+      /* Bug 133 diagnostic: dump hash-vector from x11 if it's in dynamic area */
+      {
+        natural x11 = ts->__x[11];
+        natural x11_raw = x11 & 0x00FFFFFFFFFFFFFFULL;
+        natural x11_tag = x11 >> 56;
+        if (x11_tag == 0x67 && x11_raw >= (natural)heap_start && x11_raw < (natural)a->high) {
+          LispObj *hv = (LispObj *)x11_raw;
+          LispObj hv_hdr = *(hv - 1);
+          natural hv_count = hv_hdr & 0x00FFFFFFFFFFFFFFULL;
+          fprintf(dbgout, "  Bug133: hash-vector x11=0x%lx raw=0x%lx hdr=0x%lx count=%lu\n",
+                  (unsigned long)x11, (unsigned long)x11_raw, (unsigned long)hv_hdr, (unsigned long)hv_count);
+          /* Dump overhead slots 0-13 */
+          int hi;
+          for (hi = 0; hi < 14 && (natural)(hv + hi) < (natural)a->high; hi++) {
+            fprintf(dbgout, "    hv[%d]=0x%lx\n", hi, (unsigned long)hv[hi]);
+          }
+          fprintf(dbgout, "  x14(entries)=0x%lx x15(length)=0x%lx x0(byteoff)=0x%lx\n",
+                  (unsigned long)ts->__x[14], (unsigned long)ts->__x[15], (unsigned long)ts->__x[0]);
+          fflush(dbgout);
+        }
+      }
       signum = SIGBUS;
       if (tcr->valence != TCR_STATE_LISP) {
         fprintf(dbgout, "FATAL: protection fault while in exception handler "

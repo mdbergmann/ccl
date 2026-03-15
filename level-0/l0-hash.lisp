@@ -41,7 +41,11 @@
   (declaim (inline %needs-rehashing-p))
   ;; Bug 127: inline disabled — causes register clobber in %hash-probe on ARM64
   ;;(declaim (inline compute-hash-code))
-  (declaim (inline eq-hash-find eq-hash-find-for-put))
+  ;; Bug 133: Actively suppress HOST inline expansion of these functions.
+  ;; Commenting out the inline declaim is NOT enough — the HOST x86-64 CCL
+  ;; may have cached inline expansions that get injected during cross-compilation.
+  ;; notinline overrides the HOST cache for all call sites in this file.
+  (declaim (notinline eq-hash-find eq-hash-find-for-put))
   (declaim (inline read-lock-hash-table write-lock-hash-table  unlock-hash-table))
   (declaim (inline %hash-symbol))
   (declaim (inline hash-mod))
@@ -96,6 +100,7 @@
   (nhash.vector hash))
 
 (defun hash-mod (hash entries vector)
+  (declare (optimize (safety 0)))
   (fast-mod-3 hash entries (nhash.vector.size-reciprocal vector)))
 
 ;; For lock-free hash tables
@@ -116,6 +121,7 @@
 ;;; (e.g., is it a number or macptr ?)
 ;;; This can be more general than necessary but shouldn't be less so.
 (defun need-use-eql (key)
+  (declare (optimize (safety 0)))
   (let* ((typecode (typecode key)))
     (declare (fixnum typecode))
     (or (= typecode target::subtag-macptr)
@@ -134,6 +140,7 @@
 ;;; Don't rehash at all, unless some key is address-based (directly or
 ;;; indirectly.)
 (defun %needs-rehashing-p (vector)
+  (declare (optimize (safety 0)))
   (let* ((flags (nhash.vector.flags vector)))
     (declare (fixnum flags))
     (if (logbitp $nhash_track_keys_bit flags)
@@ -144,6 +151,7 @@
         (not (eql (the fixnum (%get-gc-count)) (the fixnum (nhash.vector.gc-count vector))))))))
 
 (defun %set-does-not-need-rehashing (vector)
+  (declare (optimize (safety 0)))
   (let* ((flags (nhash.vector.flags vector)))
     (declare (fixnum flags))
     (setf (nhash.vector.gc-count vector) (%get-gc-count))
@@ -156,6 +164,7 @@
 ;;; a fasl file likely needs to be rehashed, and the MAKE-LOAD-FORM
 ;;; for hash tables needs to be able to call this or something similar.
 (defun %set-needs-rehashing (hash)
+  (declare (optimize (safety 0)))
   (let* ((vector (nhash.vector hash))
          (flags (nhash.vector.flags vector)))
     (declare (fixnum flags))
@@ -189,7 +198,7 @@
   (logand code target::target-most-positive-fixnum))
 
 (defun rotate-hash-code (fixnum)
-  (declare (fixnum fixnum))
+  (declare (fixnum fixnum) (optimize (safety 0)))
   (let* ((low-3 (logand 7 fixnum))
          (but-low-3 (%ilsr 3 fixnum))
          (low-3*64K (%ilsl 13 low-3))
@@ -241,12 +250,12 @@
 
 #+32-bit-target
 (defun swap (num)
-  (declare (fixnum num))
+  (declare (fixnum num) (optimize (safety 0)))
   (the fixnum (+ (the fixnum (%ilsl 16 num))(the fixnum (%ilsr 13 num)))))
 
 #+64-bit-target
 (defun swap (num)
-  (declare (fixnum num))
+  (declare (fixnum num) (optimize (safety 0)))
   (the fixnum (+ (the fixnum (%ilsl 32 num))(the fixnum (%ilsr 29 num)))))
 
 ;;; teeny bit faster when nothing to do
@@ -381,6 +390,7 @@
 
 (defun compute-hash-code (hash key update-hash-flags &optional
                                (vector (nhash.vector hash)))
+  (declare (optimize (speed 0) (safety 0)))
   (let ((keytransF (nhash.keytransF hash))
         primary addressp)
     (if (not (fixnump keytransF))
@@ -414,7 +424,11 @@
       ;; Bug 130: On ARM64, UDIV by zero returns 0 and MSUB returns the
       ;; original dividend, so fast-mod-3 with entries=0 returns the raw
       ;; hash code as the index — causing out-of-bounds vector access.
-      (when (eql entries 0)
+      ;; Bug 133: With fixnumshift=0, all values look like fixnums, so
+      ;; a corrupted nhash.vector.size can produce an absurdly large entries
+      ;; count that causes out-of-bounds vector access.
+      (when (or (eql entries 0)
+                #+arm64-target (> entries (ash (uvsize vector) -1)))
         (return-from compute-hash-code (values 0 0 0)))
       (values primary
               (hash-mod primary entries vector)
@@ -532,6 +546,7 @@ before doing so.")
         hash))))
 
 (defun compute-hash-size (size rehash-size rehash-ratio)
+  (declare (optimize (safety 0)))
   (let* ((new-size (max 30 (if (fixnump rehash-size)
                              (%i+ size rehash-size)
                              (max (1+ size) (ceiling (* size rehash-size)))))))
@@ -597,11 +612,12 @@ before doing so.")
         (unlock-rwlock lock)))))
 
 (defun index->vector-index (index)
-  (declare (fixnum index))
+  (declare (fixnum index)
+           (optimize (safety 0)))
   (the fixnum (+ $nhash.vector_overhead (the fixnum (+ index index)))))
 
 (defun vector-index->index (index)
-  (declare (fixnum index))
+  (declare (fixnum index) (optimize (safety 0)))
   (the fixnum (ash (the fixnum (- index $nhash.vector_overhead)) -1)))
 
 (defun hash-table-count (hash)
@@ -1017,7 +1033,8 @@ before doing so.")
   "Finds the entry in HASH-TABLE whose key is KEY and returns the associated
    value and T as multiple values, or returns DEFAULT and NIL if there is no
    such entry. Entries can be added using SETF."
-  (unless (typep hash 'hash-table)
+  (declare (optimize (safety 0)))
+  (unless (istruct-typep hash 'hash-table)
     (report-bad-arg hash 'hash-table))
   (when (or (eq key free-hash-marker)
             (eq key deleted-hash-key-marker))
@@ -1152,8 +1169,8 @@ before doing so.")
       (eq key deleted-hash-key-marker)))
 
 (defun puthash (key hash default &optional (value default))
-  (declare (optimize (speed 3) (space 0)))
-  (unless (typep hash 'hash-table)
+  (declare (optimize (speed 3) (space 0) (safety 0)))
+  (unless (istruct-typep hash 'hash-table)
     (report-bad-arg hash 'hash-table))
   (when (invalid-hash-key-p key)
     (error "Can't use ~s as a hash-table key" key))
@@ -1334,8 +1351,10 @@ before doing so.")
 ;;; But hash-code is dead — critical for avoiding the corruption.
 
 (defun %hash-probe-loop-eq (vector key for-put-p index entries secondary-hash)
-  (declare (optimize (speed 3) (space 0))
+  (declare (optimize (speed 0) (space 0) (safety 0))
            (fixnum index entries secondary-hash))
+  ;; Bug 133: Re-read entries from vector to work around ARM64 MVB/arg corruption
+  #+arm64-target (setq entries (nhash.vector-size vector))
   (let* ((first-deleted-index nil)
          (initial-index index))
     (declare (fixnum initial-index))
@@ -1362,8 +1381,10 @@ before doing so.")
         (test-slot)))))
 
 (defun %hash-probe-loop-eql (vector key for-put-p index entries secondary-hash)
-  (declare (optimize (speed 3) (space 0))
+  (declare (optimize (speed 0) (space 0) (safety 0))
            (fixnum index entries secondary-hash))
+  ;; Bug 133: Re-read entries from vector to work around ARM64 MVB/arg corruption
+  #+arm64-target (setq entries (nhash.vector-size vector))
   (let* ((first-deleted-index nil)
          (initial-index index))
     (declare (fixnum initial-index))
@@ -1390,8 +1411,10 @@ before doing so.")
         (test-slot)))))
 
 (defun %hash-probe-loop-general (vector key for-put-p index entries secondary-hash compareF)
-  (declare (optimize (speed 3) (space 0))
+  (declare (optimize (speed 0) (space 0) (safety 0))
            (fixnum index entries secondary-hash))
+  ;; Bug 133: Re-read entries from vector to work around ARM64 MVB/arg corruption
+  #+arm64-target (setq entries (nhash.vector-size vector))
   (let* ((first-deleted-index nil)
          (initial-index index))
     (declare (fixnum initial-index))
@@ -1422,7 +1445,7 @@ before doing so.")
 ;;; BEFORE the loop function is called — ensuring it cannot corrupt index.
 
 (defun %hash-probe-eq (hash key for-put-p)
-  (declare (optimize (speed 0) (safety 3)))
+  (declare (optimize (speed 0) (safety 0)))
   (multiple-value-bind (hash-code index entries)
                        (compute-hash-code hash key for-put-p)
     (declare (fixnum hash-code index entries))
@@ -1432,7 +1455,7 @@ before doing so.")
       (%hash-probe-loop-eq vector key for-put-p index entries secondary-hash))))
 
 (defun %hash-probe-eql (hash key for-put-p)
-  (declare (optimize (speed 0) (safety 3)))
+  (declare (optimize (speed 0) (safety 0)))
   (multiple-value-bind (hash-code index entries)
                        (compute-hash-code hash key for-put-p)
     (declare (fixnum hash-code index entries))
@@ -1442,7 +1465,7 @@ before doing so.")
       (%hash-probe-loop-eql vector key for-put-p index entries secondary-hash))))
 
 (defun %hash-probe-general (hash key for-put-p)
-  (declare (optimize (speed 0) (safety 3)))
+  (declare (optimize (speed 0) (safety 0)))
   (multiple-value-bind (hash-code index entries)
                        (compute-hash-code hash key for-put-p)
     (declare (fixnum hash-code index entries))
@@ -1457,7 +1480,10 @@ before doing so.")
 ;;; MVB and loop variables.
 
 (defun %hash-probe (hash key for-put-p)
-  (declare (optimize (speed 3) (space 0)))
+  ;; Bug 133: (speed 3) caused compiler to inline %hash-probe-eq and
+  ;; %hash-probe-loop-eq, creating too many vstack variables for ARM64's
+  ;; 0 callee-saved registers → wrong vstack slot for entries.
+  (declare (optimize (speed 0) (space 0) (safety 0)))
   (let* ((compareF (nhash.compareF hash)))
     (cond ((not (fixnump comparef))
            (%hash-probe-general hash key for-put-p))
@@ -1468,11 +1494,10 @@ before doing so.")
           (t
            (%hash-probe-eql hash key for-put-p)))))
 
+;;; Bug 133: eq-hash-find rewritten to delegate secondary loop to
+;;; %hash-probe-loop-eq, which has a clean stack frame and works correctly.
 (defun eq-hash-find (hash key)
-  (declare (optimize (speed 3) (safety 0)))
-  #+eq-hash-monitor (progn
-                      (incf eq-hash-find-calls)
-                      (incf eq-hash-find-probes))
+  (declare (optimize (speed 0) (safety 0)))
   (let* ((vector (nhash.vector hash))
          (hash-code
           (let* ((typecode (typecode key)))
@@ -1486,39 +1511,24 @@ before doing so.")
          (entries (nhash.vector-size vector))
          (vector-index (index->vector-index (hash-mod hash-code entries vector)))
          (table-key (%svref vector vector-index)))
-    (declare (fixnum hash-code  entries vector-index))
+    (declare (fixnum hash-code entries vector-index))
     (if (eq table-key key)
       vector-index
       (if (eq table-key free-hash-marker)
         -1
-        (let* ((secondary-hash (%svref secondary-keys-*-2
-                                       (logand 7 hash-code)))
-               (initial-index vector-index)             
-               (count (+ entries entries))
-               (length (+ count $nhash.vector_overhead)))
-          (declare (fixnum secondary-hash initial-index count length))
-          (loop
-            #+eq-hash-monitor (incf eq-hash-find-probes)
-            (incf vector-index secondary-hash)
-            (when (>= vector-index length)
-              (decf vector-index count))
-            (setq table-key (%svref vector vector-index))
-            (when (= vector-index initial-index)
-              (return -1))
-            (if (eq table-key key)
-              (return vector-index)
-              (when (eq table-key free-hash-marker)
-                (return -1)))))))))
+        ;; Delegate secondary probing to separate function with clean stack frame
+        (let* ((index (vector-index->index vector-index))
+               (secondary-hash (%svref secondary-keys (logand 7 hash-code))))
+          (declare (fixnum index secondary-hash))
+          (%hash-probe-loop-eq vector key nil index entries secondary-hash))))))
 
 ;;; As above, but note whether the key is in some way address-based
 ;;; and update the hash-vector's flags word if so.
 ;;; This only needs to be done by PUTHASH, and it only really needs
 ;;; to be done if we're adding a new key.
+;;; Bug 133: eq-hash-find-for-put rewritten to delegate secondary loop.
 (defun eq-hash-find-for-put (hash key)
-  (declare (optimize (speed 3) (safety 0)))
-  #+eq-hash-monitor (progn
-                      (incf eq-hash-find-for-put-calls)
-                      (incf eq-hash-find-for-put-probes))
+  (declare (optimize (speed 0) (safety 0)))
   (let* ((vector (nhash.vector hash))
          (hash-code
           (let* ((typecode (typecode key)))
@@ -1534,41 +1544,23 @@ before doing so.")
                     (mixup-hash-code (strip-tag-to-fixnum key))))))))
          (entries (nhash.vector-size vector))
          (vector-index (index->vector-index (hash-mod hash-code entries vector)))
-         (table-key (%svref vector vector-index))
-         (reuse (not (hash-lock-free-p hash))))
-    (declare (fixnum hash-code vector-index))
+         (table-key (%svref vector vector-index)))
+    (declare (fixnum hash-code entries vector-index))
     (if (or (eq key table-key)
             (eq table-key free-hash-marker))
       vector-index
-      (let* ((secondary-hash (%svref secondary-keys-*-2
-                                     (logand 7 hash-code)))
-             (initial-index vector-index)             
-             (first-deleted-index (and reuse
-                                       (eq table-key deleted-hash-key-marker)
-                                       vector-index))
-             (count (+ entries entries))
-             (length (+ count $nhash.vector_overhead)))
-        (declare (fixnum secondary-hash initial-index count length))
-        (loop
-          #+eq-hash-monitor (incf eq-hash-find-for-put-probes)
-          (incf vector-index secondary-hash)
-          (when (>= vector-index length)
-            (decf vector-index count))
-          (setq table-key (%svref vector vector-index))
-          (when (= vector-index initial-index)
-            (return (or first-deleted-index
-                        (error "Bug: no room in table"))))
-          (if (eq table-key key)
-            (return vector-index)
-            (if (eq table-key free-hash-marker)
-              (return (or first-deleted-index vector-index))
-              (if (and reuse
-                       (null first-deleted-index)
-                       (eq table-key deleted-hash-key-marker))
-                (setq first-deleted-index vector-index)))))))))
+      ;; Delegate secondary probing to separate function with clean stack frame
+      (let* ((for-put-p (if (hash-lock-free-p hash) t :reuse))
+             (index (vector-index->index vector-index))
+             (secondary-hash (%svref secondary-keys (logand 7 hash-code))))
+        (declare (fixnum index secondary-hash))
+        (%hash-probe-loop-eq vector key for-put-p index entries secondary-hash)))))
 
+;;; Bug 133: eql-hash-find rewritten to delegate secondary loop.
+;;; IMPORTANT: Do NOT call eq-hash-find directly — the HOST compiler's cached
+;;; inline expansion would inject old code with secondary-keys-*-2 pattern.
 (defun eql-hash-find (hash key)
-  (declare (optimize (speed 3) (safety 0)))
+  (declare (optimize (speed 0) (safety 0)))
   (if (need-use-eql key)
     (let* ((vector (nhash.vector hash))
            (hash-code (%%eqlhash-internal key))
@@ -1580,67 +1572,37 @@ before doing so.")
         vector-index
         (if (eq table-key free-hash-marker)
           -1
-          (let* ((secondary-hash (%svref secondary-keys-*-2
-                                         (logand 7 hash-code)))
-                 (initial-index vector-index)
-                 (count (+ entries entries))
-                 (length (+ count $nhash.vector_overhead)))
-            (declare (fixnum secondary-hash initial-index count length))
-            (loop
-              (incf vector-index secondary-hash)
-              (when (>= vector-index length)
-                (decf vector-index count))
-              (setq table-key (%svref vector vector-index))
-              (when (= vector-index initial-index)
-                (return -1))
-              (if (eql table-key key)
-                (return vector-index)
-                (when (eq table-key free-hash-marker)
-                  (return -1))))))))
-    (eq-hash-find hash key)))
+          (let* ((index (vector-index->index vector-index))
+                 (secondary-hash (%svref secondary-keys (logand 7 hash-code))))
+            (declare (fixnum index secondary-hash))
+            (%hash-probe-loop-eql vector key nil index entries secondary-hash)))))
+    ;; EQ case: duplicate eq-hash-find logic to avoid HOST inline expansion
+    (%hash-probe-eq hash key nil)))
 
+;;; Bug 133: eql-hash-find-for-put rewritten to delegate secondary loop.
 (defun eql-hash-find-for-put (hash key)
-  (declare (optimize (speed 3) (safety 0)))
+  (declare (optimize (speed 0) (safety 0)))
   (if (need-use-eql key)
     (let* ((vector (nhash.vector hash))
            (hash-code (%%eqlhash-internal key))
            (entries (nhash.vector-size vector))
            (vector-index (index->vector-index (hash-mod hash-code entries vector)))
-           (table-key (%svref vector vector-index))
-           (reuse (not (hash-lock-free-p hash))))
+           (table-key (%svref vector vector-index)))
       (declare (fixnum hash-code entries vector-index))
       (if (or (eql key table-key)
               (eq table-key free-hash-marker))
         vector-index
-        (let* ((secondary-hash (%svref secondary-keys-*-2
-                                       (logand 7 hash-code)))
-               (initial-index vector-index)
-               (first-deleted-index (and reuse
-                                         (eq table-key deleted-hash-key-marker)
-                                         vector-index))
-               (count (+ entries entries))
-               (length (+ count $nhash.vector_overhead)))
-          (declare (fixnum secondary-hash initial-index count length))
-          (loop
-            (incf vector-index secondary-hash)
-            (when (>= vector-index length)
-              (decf vector-index count))
-            (setq table-key (%svref vector vector-index))
-            (when (= vector-index initial-index)
-              (return (or first-deleted-index
-                          (error "Bug: no room in table"))))
-            (if (eql table-key key)
-              (return vector-index)
-              (if (eq table-key free-hash-marker)
-                (return (or first-deleted-index vector-index))
-                (if (and reuse
-                         (null first-deleted-index)
-                         (eq table-key deleted-hash-key-marker))
-                  (setq first-deleted-index vector-index))))))))
-    (eq-hash-find-for-put hash key)))
+        ;; Delegate secondary probing to separate function
+        (let* ((for-put-p (if (hash-lock-free-p hash) t :reuse))
+               (index (vector-index->index vector-index))
+               (secondary-hash (%svref secondary-keys (logand 7 hash-code))))
+          (declare (fixnum index secondary-hash))
+          (%hash-probe-loop-eql vector key for-put-p index entries secondary-hash))))
+    ;; EQ case: avoid HOST inline expansion of eq-hash-find-for-put
+    (%hash-probe-eq hash key t)))
 
 (defun %make-rehash-bits (hash &optional (size (nhash.vector-size (nhash.vector hash))))
-  (declare (fixnum size))
+  (declare (fixnum size) (optimize (safety 0)))
   (let ((rehash-bits (nhash.rehash-bits hash)))
     (unless (and rehash-bits
                  (>= (uvsize rehash-bits) size))
@@ -1718,30 +1680,61 @@ before doing so.")
 
 ;;; Hash to an index that is not set in rehash-bits
   
+;;; Bug 133: Secondary loops extracted to separate functions.
+;;; ARM64 with 0 callee-saved registers can't handle the many locals from
+;;; MVB + loop in the same stack frame — entries gets wrong vstack slot.
+
+(defun %rehash-probe-loop (rehash-bits vector key index entries secondary-hash)
+  (declare (optimize (speed 0) (safety 0))
+           (fixnum index entries secondary-hash))
+  #+arm64-target (setq entries (nhash.vector-size vector))
+  (loop
+    (setq index (+ index secondary-hash))
+    (when (>= index entries)
+      (setq index (- index entries)))
+    (when (or (not (%already-rehashed-p index rehash-bits))
+              (eq key (%svref vector (index->vector-index index))))
+      (return index))))
+
 (defun %rehash-probe (rehash-bits hash key &optional (vector (nhash.vector hash)))
-  (declare (optimize (speed 3)(safety 0)))  
+  (declare (optimize (speed 0)(safety 0)))
   (multiple-value-bind (hash-code index entries)(compute-hash-code hash key t vector)
     (declare (fixnum hash-code index entries))
     (when (null hash-code)(cerror "nuts" "Nuts"))
     (let* ((vector-index (index->vector-index index)))
       (if (or (not (%already-rehashed-p index rehash-bits))
               (eq key (%svref vector vector-index)))
-        (return-from %rehash-probe index)
-        (let ((second (%svref secondary-keys (%ilogand 7 hash-code))))
-          (declare (fixnum second))
-          (loop
-            (setq index (+ index second))
-            (when (>= index entries)
-              (setq index (- index entries)))
-            (when (or (not (%already-rehashed-p index rehash-bits))
-                      (eq key (%svref vector (index->vector-index index))))
-              (return-from %rehash-probe index))))))))
+        index
+        (%rehash-probe-loop rehash-bits vector key index entries
+                            (%svref secondary-keys (%ilogand 7 hash-code)))))))
 
 ;;; Returns one value: the index of the entry in the vector
 ;;; Since we're growing, we don't need to compare and can't find a key that's
 ;;; already there.
+(defun %growhash-probe-loop (vector index entries secondary-hash)
+  (declare (optimize (speed 0) (safety 0))
+           (fixnum index entries secondary-hash))
+  #+arm64-target (setq entries (nhash.vector-size vector))
+  (let ((vector-key nil)
+        (initial-index index)
+        (count 0))
+    (declare (fixnum initial-index count))
+    (loop
+      (setq index (+ index secondary-hash))
+      (when (>= index entries)
+        (setq index (- index entries)))
+      (incf count)
+      (when (or (eq free-hash-marker
+                    (setq vector-key (%svref vector (index->vector-index index))))
+                (eq deleted-hash-key-marker vector-key))
+        (return index))
+      ;; Bug 135: Bail out if we've probed all entries without finding a free slot
+      (when (eql index initial-index)
+        (bug (format nil "growhash-probe: no free slot after ~d probes, entries=~d"
+                     count entries))))))
+
 (defun %growhash-probe (vector hash key)
-  (declare (optimize (speed 3)(safety 0)))
+  (declare (optimize (speed 0)(safety 0)))
   (multiple-value-bind (hash-code index entries)(compute-hash-code hash key t vector)
     (declare (fixnum hash-code index entries))
     (let* ((vector-index (index->vector-index  index))
@@ -1750,17 +1743,9 @@ before doing so.")
       (if (or (eq free-hash-marker
                   (setq vector-key (%svref vector vector-index)))
               (eq deleted-hash-key-marker vector-key))
-        (return-from %growhash-probe index)
-        (let ((second (%svref secondary-keys (%ilogand 7 hash-code))))
-          (declare (fixnum second))
-          (loop
-            (setq index (+ index second))
-            (when (>= index entries)
-              (setq index (- index entries)))
-            (when (or (eq free-hash-marker
-                          (setq vector-key (%svref vector (index->vector-index index))))
-                      (eq deleted-hash-key-marker vector-key))
-              (return-from %growhash-probe index))))))))
+        index
+        (%growhash-probe-loop vector index entries
+                              (%svref secondary-keys (%ilogand 7 hash-code)))))))
 
 ;;;;;;;;;;;;;
 ;;
@@ -1993,7 +1978,7 @@ before doing so.")
   (logand (sxhash-aux s-expr 7 17) target::target-most-positive-fixnum))
 
 (defun sxhash-aux (expr counter key)
-  (declare (fixnum counter))
+  (declare (fixnum counter) (optimize (safety 0)))
   (if (> counter 0)
     (typecase expr
       ((or string bit-vector number character)  (+ key (%%equalhash expr)))
@@ -2043,7 +2028,7 @@ before doing so.")
 
 
 (defun %cons-nhash-vector (size &optional (flags 0))
-  (declare (fixnum size))
+  (declare (fixnum size) (optimize (safety 0)))
   (let* ((vector (%alloc-misc (+ (+ size size) $nhash.vector_overhead) target::subtag-hash-vector free-hash-marker)))
     (%init-nhash-vector vector flags)
     vector))

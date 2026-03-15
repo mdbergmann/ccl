@@ -815,7 +815,19 @@
     (error "~& Not a symbol address: #x~x" addr))
   (setq addr (xload-apply-tag addr *xload-target-fulltag-misc*))
   (if (= (xload-%svref addr -1) (xload-symbol-header))
-    (setf (xload-%svref addr target::symbol.fcell-cell) def)
+    (progn
+      ;; DEBUG Bug 131: trace xload-fset for EQUAL
+      (let* ((pname-addr (xload-%svref addr target::symbol.pname-cell))
+             (name (ignore-errors (xload-get-string pname-addr))))
+        (when (and name (string= name "EQUAL"))
+          (let ((old-fcell (xload-%svref addr target::symbol.fcell-cell)))
+            (format t "~&;;; DEBUG xload-fset: sym=~x def=~x fcell-cell-index=~s~%"
+                    addr def target::symbol.fcell-cell)
+            (format t ";;;   old fcell value: ~x  new fcell value: ~x~%" old-fcell def)
+            ;; Check if old is %unbound-function%
+            (format t ";;;   *xload-target-unbound-marker* = ~x~%"
+                    (ignore-errors *xload-target-unbound-marker*)))))
+      (setf (xload-%svref addr target::symbol.fcell-cell) def))
     (error "Not a symbol: #x~x" addr)))
 
 (defun (setf xload-symbol-plist) (new addr)
@@ -1793,6 +1805,13 @@
   (let* ((fun (%fasl-expr s))
          (doc (%fasl-expr s)))
     (let* ((sym (xload-lfun-name fun)))
+      ;; DEBUG Bug 131: trace $fasl-defun for EQUAL
+      (when sym
+        (let* ((symv (xload-apply-tag sym *xload-target-fulltag-misc*))
+               (pname-addr (xload-%svref symv target::symbol.pname-cell))
+               (name (ignore-errors (xload-get-string pname-addr))))
+          (when (and name (string= name "EQUAL"))
+            (format t "~&;;; DEBUG $fasl-defun: sym=~x fun=~x name=~a~%" sym fun name))))
       (unless (= doc *xload-target-nil*)
         (xload-set-documentation sym 'function doc))
       (xload-record-source-file sym 'function)
