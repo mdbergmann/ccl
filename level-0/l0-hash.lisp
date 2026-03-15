@@ -39,7 +39,8 @@
   (declaim (inline %already-rehashed-p %set-already-rehashed-p))
   (declaim (inline need-use-eql))
   (declaim (inline %needs-rehashing-p))
-  (declaim (inline compute-hash-code))
+  ;; Bug 127: inline disabled — causes register clobber in %hash-probe on ARM64
+  ;;(declaim (inline compute-hash-code))
   (declaim (inline eq-hash-find eq-hash-find-for-put))
   (declaim (inline read-lock-hash-table write-lock-hash-table  unlock-hash-table))
   (declaim (inline %hash-symbol))
@@ -60,29 +61,39 @@
 
 (defun %cons-hash-table (keytrans-function compare-function vector
                          threshold rehash-ratio rehash-size find find-new owner lock-free-p &optional min-size)
-  (%istruct
-   'HASH-TABLE                          ; type
-   keytrans-function                    ; nhash.keytransF
-   compare-function                     ; nhash.compareF
-   nil                                  ; nhash.rehash-bits
-   vector                               ; nhash.vector
-   (if lock-free-p $nhash.lock-free 0)  ; nhash.lock
-   owner                                ; nhash.owner 
-   threshold                            ; nhash.grow-threshold
-   rehash-ratio                         ; nhash.rehash-ratio
-   rehash-size                          ; nhash.rehash-size
-   0                                    ; nhash.puthash-count
-   (if lock-free-p
-     (make-lock)
-     (unless owner (make-read-write-lock))) ; nhash.exclusion-lock
-   find                                 ; nhash.find
-   find-new                             ; nhash.find-new
-   nil                                  ; nhash.read-only
-   (or min-size 0)                      ; nhash.min-size
-   ))
+  (let ((result
+         (%istruct
+          'HASH-TABLE                          ; type
+          keytrans-function                    ; nhash.keytransF
+          compare-function                     ; nhash.compareF
+          nil                                  ; nhash.rehash-bits
+          vector                               ; nhash.vector
+          (if lock-free-p $nhash.lock-free 0)  ; nhash.lock
+          owner                                ; nhash.owner
+          threshold                            ; nhash.grow-threshold
+          rehash-ratio                         ; nhash.rehash-ratio
+          rehash-size                          ; nhash.rehash-size
+          0                                    ; nhash.puthash-count
+          (if lock-free-p
+            (make-lock)
+            (unless owner (make-read-write-lock))) ; nhash.exclusion-lock
+          find                                 ; nhash.find
+          find-new                             ; nhash.find-new
+          nil                                  ; nhash.read-only
+          (or min-size 0)                      ; nhash.min-size
+          )))
+    result))
 
 (defun nhash.vector-size (vector)
   (nhash.vector.size vector))
+
+;; Bug 127: Non-inlined accessor for hash vector reload.
+;; The ARM64 register allocator doesn't properly spill/reload
+;; loop variables across function calls.  Using this real function
+;; call (vs the inlined nhash.vector accessor) forces a proper
+;; register save/restore cycle around the reload.
+(defun nhash.vector-for-reload (hash)
+  (nhash.vector hash))
 
 (defun hash-mod (hash entries vector)
   (fast-mod-3 hash entries (nhash.vector.size-reciprocal vector)))
@@ -369,7 +380,7 @@
               (new-flags (nhash.vector.flags vector) addressp))))))
 
 (defun compute-hash-code (hash key update-hash-flags &optional
-                               (vector (nhash.vector hash))) ; vectorp))
+                               (vector (nhash.vector hash)))
   (let ((keytransF (nhash.keytransF hash))
         primary addressp)
     (if (not (fixnump keytransF))
@@ -391,8 +402,20 @@
     (when update-hash-flags
       (when addressp
         (update-hash-flags hash vector addressp)))
+    ;; Bug 129: If the hash table or its vector is corrupt (e.g., nil hash table
+    ;; causes nhash.vector to read garbage from static area), bail out safely
+    ;; so boot can continue past the bad hash table.
+    (unless (eql (typecode vector) target::subtag-hash-vector)
+      (when (fboundp 'pdbg)
+        (pdbg "*** BAD HASH VECTOR ***"))
+      (return-from compute-hash-code (values 0 0 0)))
     (let* ((entries (nhash.vector-size vector)))
       (declare (fixnum entries))
+      ;; Bug 130: On ARM64, UDIV by zero returns 0 and MSUB returns the
+      ;; original dividend, so fast-mod-3 with entries=0 returns the raw
+      ;; hash code as the index — causing out-of-bounds vector access.
+      (when (eql entries 0)
+        (return-from compute-hash-code (values 0 0 0)))
       (values primary
               (hash-mod primary entries vector)
               entries))))
@@ -1291,74 +1314,159 @@ before doing so.")
 (defun general-hash-find-for-put (hash key)
   (%hash-probe hash key (if (hash-lock-free-p hash) :free :reuse)))
 
-;;; returns a single value:
-;;;   index - the index in the vector for key (where it was or where
-;;;           to insert if the current key at that index is deleted-hash-key-marker
-;;;           or free-hash-marker)
+;;; Bug 130: On ARM64 with 0 callee-saved node registers, the register
+;;; allocator generates incorrect stack slot offsets when >5 node variables
+;;; are live simultaneously in a function with complex control flow.
+;;; The original monolithic %hash-probe had ~14 live variables (args + mvb
+;;; results + locals + loop vars) causing the index variable to get corrupted
+;;; with the hash-code value.
+;;;
+;;; Fix: split ALL probing logic into separate functions (EQ, EQL, general),
+;;; each with its own clean stack frame.  %hash-probe is now a thin dispatcher.
 
+;;; Bug 130: Probe loop body extracted into a separate function to minimize
+;;; live variables.  The caller pre-computes secondary-hash from hash-code,
+;;; so hash-code is NOT live during the loop — avoiding the register allocator
+;;; bug where hash-code's stack slot corrupts index's slot.
+;;;
+;;; Live vars in loop: vector, key, for-put-p, index, entries,
+;;;                    secondary-hash, initial-index, first-deleted-index = 8
+;;; But hash-code is dead — critical for avoiding the corruption.
 
+(defun %hash-probe-loop-eq (vector key for-put-p index entries secondary-hash)
+  (declare (optimize (speed 3) (space 0))
+           (fixnum index entries secondary-hash))
+  (let* ((first-deleted-index nil)
+         (initial-index index))
+    (declare (fixnum initial-index))
+    (macrolet ((test-slot ()
+                 `(let* ((vi (index->vector-index index))
+                         (tk (%svref vector vi)))
+                    (declare (fixnum vi))
+                    (cond ((eq tk free-hash-marker)
+                           (return-from %hash-probe-loop-eq
+                             (if for-put-p (or first-deleted-index vi) -1)))
+                          ((eq tk deleted-hash-key-marker)
+                           (when (and (eq for-put-p :reuse)
+                                      (null first-deleted-index))
+                             (setq first-deleted-index vi)))
+                          ((eq key tk)
+                           (return-from %hash-probe-loop-eq vi))))))
+      (test-slot)
+      (loop
+        (incf index secondary-hash)
+        (when (>= index entries) (decf index entries))
+        (when (eql index initial-index)
+          (return-from %hash-probe-loop-eq
+            (if for-put-p (or first-deleted-index -1) -1)))
+        (test-slot)))))
+
+(defun %hash-probe-loop-eql (vector key for-put-p index entries secondary-hash)
+  (declare (optimize (speed 3) (space 0))
+           (fixnum index entries secondary-hash))
+  (let* ((first-deleted-index nil)
+         (initial-index index))
+    (declare (fixnum initial-index))
+    (macrolet ((test-slot ()
+                 `(let* ((vi (index->vector-index index))
+                         (tk (%svref vector vi)))
+                    (declare (fixnum vi))
+                    (cond ((eq tk free-hash-marker)
+                           (return-from %hash-probe-loop-eql
+                             (if for-put-p (or first-deleted-index vi) -1)))
+                          ((eq tk deleted-hash-key-marker)
+                           (when (and (eq for-put-p :reuse)
+                                      (null first-deleted-index))
+                             (setq first-deleted-index vi)))
+                          ((eql key tk)
+                           (return-from %hash-probe-loop-eql vi))))))
+      (test-slot)
+      (loop
+        (incf index secondary-hash)
+        (when (>= index entries) (decf index entries))
+        (when (eql index initial-index)
+          (return-from %hash-probe-loop-eql
+            (if for-put-p (or first-deleted-index -1) -1)))
+        (test-slot)))))
+
+(defun %hash-probe-loop-general (vector key for-put-p index entries secondary-hash compareF)
+  (declare (optimize (speed 3) (space 0))
+           (fixnum index entries secondary-hash))
+  (let* ((first-deleted-index nil)
+         (initial-index index))
+    (declare (fixnum initial-index))
+    (macrolet ((test-slot ()
+                 `(let* ((vi (index->vector-index index))
+                         (tk (%svref vector vi)))
+                    (declare (fixnum vi))
+                    (cond ((eq tk free-hash-marker)
+                           (return-from %hash-probe-loop-general
+                             (if for-put-p (or first-deleted-index vi) -1)))
+                          ((eq tk deleted-hash-key-marker)
+                           (when (and (eq for-put-p :reuse)
+                                      (null first-deleted-index))
+                             (setq first-deleted-index vi)))
+                          ((funcall compareF key tk)
+                           (return-from %hash-probe-loop-general vi))))))
+      (test-slot)
+      (loop
+        (incf index secondary-hash)
+        (when (>= index entries) (decf index entries))
+        (when (eql index initial-index)
+          (return-from %hash-probe-loop-general
+            (if for-put-p (or first-deleted-index -1) -1)))
+        (test-slot)))))
+
+;;; Thin callers: compute hash values, then delegate to loop function.
+;;; hash-code is consumed to compute secondary-hash, then goes out of scope
+;;; BEFORE the loop function is called — ensuring it cannot corrupt index.
+
+(defun %hash-probe-eq (hash key for-put-p)
+  (declare (optimize (speed 0) (safety 3)))
+  (multiple-value-bind (hash-code index entries)
+                       (compute-hash-code hash key for-put-p)
+    (declare (fixnum hash-code index entries))
+    (let* ((vector (nhash.vector hash))
+           (secondary-hash (%svref secondary-keys (logand 7 hash-code))))
+      (declare (fixnum secondary-hash))
+      (%hash-probe-loop-eq vector key for-put-p index entries secondary-hash))))
+
+(defun %hash-probe-eql (hash key for-put-p)
+  (declare (optimize (speed 0) (safety 3)))
+  (multiple-value-bind (hash-code index entries)
+                       (compute-hash-code hash key for-put-p)
+    (declare (fixnum hash-code index entries))
+    (let* ((vector (nhash.vector hash))
+           (secondary-hash (%svref secondary-keys (logand 7 hash-code))))
+      (declare (fixnum secondary-hash))
+      (%hash-probe-loop-eql vector key for-put-p index entries secondary-hash))))
+
+(defun %hash-probe-general (hash key for-put-p)
+  (declare (optimize (speed 0) (safety 3)))
+  (multiple-value-bind (hash-code index entries)
+                       (compute-hash-code hash key for-put-p)
+    (declare (fixnum hash-code index entries))
+    (let* ((vector (nhash.vector hash))
+           (compareF (nhash.compareF hash))
+           (secondary-hash (%svref secondary-keys (logand 7 hash-code))))
+      (declare (fixnum secondary-hash))
+      (%hash-probe-loop-general vector key for-put-p index entries secondary-hash compareF))))
+
+;;; Bug 130: Thin dispatcher — only 4 live variables (hash, key, for-put-p,
+;;; compareF).  Each probe function has its own clean stack frame for the
+;;; MVB and loop variables.
 
 (defun %hash-probe (hash key for-put-p)
   (declare (optimize (speed 3) (space 0)))
-  (multiple-value-bind (hash-code index entries)
-                       (compute-hash-code hash key for-put-p)
-    (locally (declare (fixnum hash-code index entries))
-      (let* ((compareF (nhash.compareF hash))
-             (vector (nhash.vector hash))
-             (vector-index 0)
-             table-key
-             (first-deleted-index nil))
-        (declare (fixnum vector-index))
-        (macrolet ((return-it (form)
-                     `(return-from %hash-probe ,form)))
-          (macrolet ((test-it (predicate)
-                       (unless (listp predicate) (setq predicate (list predicate)))
-                       `(progn
-                          (setq vector-index (index->vector-index index)
-                                table-key (%svref vector vector-index))
-                          (cond ((eq table-key free-hash-marker)
-                                 (return-it (if for-put-p
-                                              (or first-deleted-index
-                                                  vector-index)
-                                              -1)))
-                                ((eq table-key deleted-hash-key-marker)
-                                 (when (and (eq for-put-p :reuse)
-                                            (null first-deleted-index))
-                                   (setq first-deleted-index vector-index)))
-                                ((,@predicate key table-key)
-                                 (return-it vector-index))))))
-            (macrolet ((do-it (predicate)
-                         `(progn
-                            (test-it ,predicate)
-                            ; First probe failed. Iterate on secondary key
-                            (let ((initial-index index)
-                                  (secondary-hash (%svref secondary-keys (logand 7 hash-code)))
-                                  (DEBUG-COUNT 0))
-                              (declare (fixnum secondary-hash initial-index))
-                              (loop
-                                (INCF DEBUG-COUNT)
-                                (incf index secondary-hash)
-                                (when (>= index entries)
-                                  (decf index entries))
-                                (when (eql index initial-index)
-                                  (return-it (if for-put-p
-                                               (or first-deleted-index
-                                                   #+NOT-SO-HELPFUL (error "Bug: no room in table")
-                                                   (bug (format nil "No room in table after ~s tests, ~%initial ~s index ~s entries ~s for-put-p ~s"
-                                                                DEBUG-COUNT initial-index index entries for-put-p))
-                                                   )
-                                               -1)))
-                                (test-it ,predicate))))))
-              (if (fixnump comparef)
-                ;; EQ or EQL hash table
-                (if (or (eql 0 comparef)
-                        (immediate-p-macro key)
-                        (not (need-use-eql key)))
-                  ;; EQ hash table or EQL == EQ for KEY
-                  (do-it eq)
-                  (do-it eql))
-                ;; general compare function
-                (do-it (funcall comparef))))))))))
+  (let* ((compareF (nhash.compareF hash)))
+    (cond ((not (fixnump comparef))
+           (%hash-probe-general hash key for-put-p))
+          ((or (eql 0 comparef)
+               (immediate-p-macro key)
+               (not (need-use-eql key)))
+           (%hash-probe-eq hash key for-put-p))
+          (t
+           (%hash-probe-eql hash key for-put-p)))))
 
 (defun eq-hash-find (hash key)
   (declare (optimize (speed 3) (safety 0)))

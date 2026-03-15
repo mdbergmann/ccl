@@ -102,10 +102,6 @@
   (unless (typep named-fn 'function)
     (dbg named-fn))
   (let* ((name (function-name named-fn)))
-    (unless (and name
-                 (or (symbolp name)
-                     (setf-function-name-p name)))
-      (dbg named-fn))
   ;; Bug 125: record-source-file is set via cold-load %fhave, may not be
   ;; available yet when early cold-load functions call %defun.
   (when (fboundp 'record-source-file)

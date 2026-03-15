@@ -847,36 +847,39 @@ handle_protection_violation(ExceptionInformation *xp, siginfo_t *info,
                 (unsigned long)xpGPR(xp, 9), (unsigned long)xpGPR(xp, 10),
                 (unsigned long)xpGPR(xp, 11), (unsigned long)xpGPR(xp, 14),
                 (unsigned long)xpGPR(xp, 15), (unsigned long)xpGPR(xp, 25));
-        /* If X14 looks like a heap pointer, dump vector header at X14-8 */
-        if (x14_raw >= dyn->low && x14_raw < dyn->high) {
-          LispObj *vec_hdr = (LispObj *)(x14_raw - 8);
-          LispObj hdr = *vec_hdr;
-          natural element_count = header_element_count(hdr);
-          natural subtag = header_subtag(hdr);
-          fprintf(dbgout, "  vector@0x%lx: hdr=0x%lx subtag=0x%lx count=%lu (0x%lx)\n",
-                  (unsigned long)x14_raw, (unsigned long)hdr, (unsigned long)subtag,
-                  (unsigned long)element_count, (unsigned long)element_count);
-          /* Dump stack slots around vsp for context */
-          {
-            LispObj *vsp_ptr = (LispObj *)xpGPR(xp, 25);
-            int si;
-            fprintf(dbgout, "  vsp dump:");
-            for (si=0; si<12; si++)
-              fprintf(dbgout, " [%d]=0x%lx", si, (unsigned long)vsp_ptr[si]);
+        /* Dump hash vector overhead slots from x9 (the vector base in %hash-probe) */
+        {
+          natural x9_raw = xpGPR(xp, 9) & 0x00FFFFFFFFFFFFFFULL;
+          /* Check if x9 points to somewhere in the full heap (including tenured) */
+          natural heap_start = 0x302000000000ULL;  /* known dynamic area base */
+          natural heap_end = (natural)dyn->high;
+          if (x9_raw >= heap_start && x9_raw < heap_end) {
+            LispObj *vec = (LispObj *)x9_raw;
+            LispObj hdr = ((LispObj *)(x9_raw - 8))[0];
+            int vi;
+            fprintf(dbgout, "  hash-vector@0x%lx hdr=0x%lx (subtag=0x%lx count=%lu):\n",
+                    (unsigned long)x9_raw, (unsigned long)hdr,
+                    (unsigned long)(hdr >> 56),
+                    (unsigned long)(hdr & 0x00FFFFFFFFFFFFFFULL));
+            fprintf(dbgout, "  overhead slots [0..13]:");
+            for (vi = 0; vi < 14; vi++)
+              fprintf(dbgout, " [%d]=0x%lx", vi, (unsigned long)vec[vi]);
             fprintf(dbgout, "\n");
-            /* Dump header of object at vsp[0] if it looks like a tagged uvector */
-            {
-              natural v0 = (natural)vsp_ptr[0];
-              natural v0_tag = v0 >> 56;
-              if (v0_tag >= 0x40 && v0_tag <= 0x7F) {
-                natural v0_raw = v0 & 0x00FFFFFFFFFFFFFFULL;
-                LispObj v0_hdr = ((LispObj *)(v0_raw - 8))[0];
-                fprintf(dbgout, "  vsp[0] obj hdr=0x%lx subtag=0x%lx count=%lu\n",
-                        (unsigned long)v0_hdr, (unsigned long)(v0_hdr >> 56),
-                        (unsigned long)(v0_hdr & 0x00FFFFFFFFFFFFFFULL));
-              }
-            }
+            fprintf(dbgout, "  entries(slot12)=%ld size-recip(slot13)=0x%lx\n",
+                    (long)vec[12], (unsigned long)vec[13]);
+          } else {
+            fprintf(dbgout, "  x9_raw=0x%lx NOT in heap [0x%lx..0x%lx)\n",
+                    (unsigned long)x9_raw, (unsigned long)heap_start, (unsigned long)heap_end);
           }
+        }
+        /* Dump stack slots around vsp for context */
+        {
+          LispObj *vsp_ptr = (LispObj *)xpGPR(xp, 25);
+          int si;
+          fprintf(dbgout, "  vsp dump:");
+          for (si=0; si<16; si++)
+            fprintf(dbgout, " [%d]=0x%lx", si, (unsigned long)vsp_ptr[si]);
+          fprintf(dbgout, "\n");
         }
       }
     }

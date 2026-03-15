@@ -48,10 +48,18 @@
 ;;; for both ref-constant (function immediates) and nfn (current function).
 ;;; If the allocator assigns x10 for temp use, it clobbers nfn, and
 ;;; subsequent ref-constant vinsns will load from address 0 → crash.
+;;;
+;;; NOTE: temp3 = fname = x9 is also NOT included here.
+;;; Bug 127: fname is used implicitly by call-known-symbol to hold the
+;;; target symbol.  Before each symbol call, the compiler loads the symbol
+;;; into x9 via ref-constant, clobbering any local variable the allocator
+;;; placed there.  Although :call vinsns mark all registers as clobbered,
+;;; the register allocator's linear-scan approach doesn't always insert
+;;; proper spill/reload around loop back-edges that cross function calls.
+;;; Excluding x9 from allocatable temps avoids this class of bugs entirely.
 (defconstant arm64-temp-node-regs
   (make-mask arm64::temp0
              arm64::temp1
-             arm64::temp3
              arm64::arg_x
              arm64::arg_y
              arm64::arg_z))

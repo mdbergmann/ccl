@@ -51,10 +51,12 @@ define(`jump_builtin',`
    re-enter the function through its now-valid entrypoint.
    This is called when a newly-created closure is invoked for the
    first time — its entrypoint initially points here.
-   Must be the first entry in the subprims table. */
+   Must be the first entry in the subprims table.
+   Bug 128: Must strip TBI tag — br/blr do NOT honor TBI on macOS ARM64. */
 _spentry(fix_nfn_entrypoint)
-        __(ldr temp2,[nfn,#node_size])             /* load slot 1 = code vector */
-        __(str temp2,[nfn,#_function.entrypoint])   /* store into slot 0 */
+        __(ldr temp2,[nfn,#node_size])             /* load slot 1 = code vector (tagged) */
+        __(and temp2,temp2,#0x00FFFFFFFFFFFFFF)    /* strip TBI tag for br/blr */
+        __(str temp2,[nfn,#_function.entrypoint])   /* store untagged into slot 0 */
         __(br temp2)                                /* branch to code */
 _endsubp(fix_nfn_entrypoint)
 
@@ -1296,7 +1298,11 @@ _spentry(gvector)
         __(lsl imm0,imm0,#subtag_shift)
         __(orr imm0,imm0,nargs,lsr #node_shift)
         __(dnode_align(imm1,nargs,node_size))
-        __(Misc_Alloc(arg_z,imm0,imm1))
+        /* Bug 127: Derive correct TBI ref tag from subtag.
+           arg_z still holds the raw subtag; compute ref_tag in temp0
+           before Misc_Alloc overwrites arg_z with the result pointer. */
+        __(eor temp0,arg_z,#0xC0)
+        __(Misc_Alloc(arg_z,imm0,imm1,temp0))
         __(mov imm1,nargs)
         __(add imm2,imm1,#misc_data_offset)
         __(b 2f)
@@ -2090,7 +2096,11 @@ _spentry(misc_alloc)
 6:      __(lsl imm2,arg_y,#4)           /* 128-bit: count * 16 */
 1:
         __(dnode_align(imm2,imm2,node_size))
-        __(Misc_Alloc(arg_z,imm0,imm2))
+        /* Bug 127: Derive correct TBI ref tag from header subtag.
+           imm1 still holds the subtag (set at line above).
+           ref_tag = subtag XOR 0xC0 (converts header bit to ref bit). */
+        __(eor imm1,imm1,#0xC0)
+        __(Misc_Alloc(arg_z,imm0,imm2,imm1))
         __(ret)
 9:
         __(uuo_error_reg_not_xtype(arg_y,xtype_unsigned_byte_24))

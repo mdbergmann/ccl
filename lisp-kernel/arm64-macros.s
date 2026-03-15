@@ -327,13 +327,18 @@ define(`vpop_argregs',`
 macro_label(done):
         ')
 
+/* Bug 128: ARM32 uses conditional str (strhi/strhs) which are independently
+   conditioned.  ARM64 has no conditional execution, so we use explicit
+   branches.  The previous code had a bug: after pushing arg_x, the bne
+   at notx still checked the original cmp flags, skipping arg_y for
+   nargs > 2*node_size (3+ args).  Fix: use blo/beq two-way dispatch. */
 define(`vpush_argregs_nz',`
         new_macro_labels()
         __(cmp nargs,#2*node_size)
-        __(bls macro_label(notx))
+        __(blo macro_label(justz))
+        __(beq macro_label(notx))
         __(vpush1(arg_x))
 macro_label(notx):
-        __(bne macro_label(justz))
         __(vpush1(arg_y))
 macro_label(justz):
         __(vpush1(arg_z))
@@ -343,10 +348,10 @@ define(`vpush_argregs',`
 	new_macro_labels()
         __(cbz nargs,macro_label(done))
         __(cmp nargs,#2*node_size)
-        __(bls macro_label(notx))
+        __(blo macro_label(justz))
+        __(beq macro_label(notx))
         __(vpush1(arg_x))
 macro_label(notx):
-        __(bne macro_label(justz))
         __(vpush1(arg_y))
 macro_label(justz):
         __(vpush1(arg_z))
