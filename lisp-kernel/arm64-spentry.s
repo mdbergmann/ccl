@@ -407,13 +407,6 @@ _spentry(builtin_aset1)
 
 	/*  Call nfn if it's either a symbol or function */
 _spentry(funcall)
-        /* Bug 151 diag */
-        __(ldr imm0,[x29,#lisp_frame.savefn])
-        __(cbnz imm0,0f)
-        __(ldr imm0,[x29,#lisp_frame.savelr])
-        __(cbnz imm0,0f)
-        __(hlt #0xFFF3)
-0:
 	__(funcall_nfn())
 
 /* Subprims for catch, throw, unwind_protect.  */
@@ -431,10 +424,6 @@ _spentry(mkcatchmv)
 	__(ret)
 
 _spentry(mkunwind)
-        /* Bug 151 diag: check nfn at SPmkunwind entry */
-        __(cbnz nfn,0f)
-        __(hlt #0xFFF1)  /* nfn=0 at SPmkunwind entry */
-0:
         __(mov imm2,#-fixnumone)
         __(mov imm1,#INTERRUPT_LEVEL_BINDING_INDEX)
         __(ldr temp0,[rcontext,#tcr.tlb_pointer])
@@ -455,13 +444,6 @@ _spentry(mkunwind)
 /* This never affects the symbol's vcell  */
 /* Non-null symbol in arg_y, new value in arg_z          */
 _spentry(bind)
-        /* Bug 151 diag */
-        __(ldr imm0,[x29,#lisp_frame.savefn])
-        __(cbnz imm0,0f)
-        __(ldr imm0,[x29,#lisp_frame.savelr])
-        __(cbnz imm0,0f)
-        __(hlt #0xFFF3)
-0:
 	__(ldr imm1,[arg_y,#symbol.binding_index])
 	/* Bug 124: binding-index is already a byte offset (fixnumshift=0, increment=8) */
 	__(ldr imm0,[rcontext,#tcr.tlb_limit])
@@ -884,13 +866,6 @@ C(egc_rplacd_did_store):
 	.globl C(egc_gvset)
         .globl C(egc_gvset_did_store)
 _spentry(gvset)
-        /* Bug 151 diag: verify caller's frame */
-        __(ldr imm0,[x29,#lisp_frame.savefn])
-        __(cbnz imm0,0f)
-        __(ldr imm0,[x29,#lisp_frame.savelr])
-        __(cbnz imm0,0f)
-        __(hlt #0xFFF3)
-0:
 C(egc_gvset):
         __(cmp arg_z,arg_x)
 	__(lsl imm0,arg_y,#word_shift)
@@ -1264,7 +1239,13 @@ _spentry(stack_misc_alloc)
         /* arg_z = header subtag (e.g. 0x80=bignum, 0xA0+=gvector).
            arg_y = element count (raw fixnum, fixnumshift=0).
            Compute byte size in imm1 based on subtag element-size group.
-           Subtag order: 32-bit(≤0x88) 64-bit(≤0x93) 8-bit(≤0x97) 16-bit(≤0x9B) 128-bit(0x9D) bit(0x9F) gvec(≥0xA0) */
+           Subtag order: 32-bit(≤0x88) 64-bit(≤0x93) 8-bit(≤0x97) 16-bit(≤0x9B) 128-bit(0x9D) bit(0x9F) gvec(≥0xA0)
+           Bug 153: simple-base-string (subtag 0x87) has 8-bit elements but falls
+           in the 32-bit subtag range due to CL-ivector interleaving.  Handle it
+           before the generic 32-bit comparison. */
+        __(cmp arg_z,#subtag_simple_base_string)
+        __(mov imm1,arg_y)              /* 8-bit: count*1 */
+        __(beq 8f)
         __(cmp arg_z,#max_32_bit_ivector_subtag)
         __(lsl imm1,arg_y,#2)           /* 32-bit: count*4 */
         __(ble 8f)
@@ -1319,13 +1300,6 @@ stack_misc_alloc_no_room:
 /* objects.  */
 
 _spentry(gvector)
-        /* Bug 151 diag: verify caller's frame */
-        __(ldr imm0,[x29,#lisp_frame.savefn])
-        __(cbnz imm0,0f)
-        __(ldr imm0,[x29,#lisp_frame.savelr])
-        __(cbnz imm0,0f)
-        __(hlt #0xFFF3)
-0:
         __(sub nargs,nargs,#node_size)
         __(ldr arg_z,[vsp,nargs])
         __(unbox_fixnum(imm0,arg_z))
@@ -1337,13 +1311,6 @@ _spentry(gvector)
            before Misc_Alloc overwrites arg_z with the result pointer. */
         __(eor temp0,arg_z,#0xC0)
         __(Misc_Alloc(arg_z,imm0,imm1,temp0))
-        /* Bug 151 diag: check frame after allocation (alloc trap may have fired) */
-        __(ldr temp0,[x29,#lisp_frame.savefn])
-        __(cbnz temp0,8f)
-        __(ldr temp0,[x29,#lisp_frame.savelr])
-        __(cbnz temp0,8f)
-        __(hlt #0xFFF4)  /* frame zeroed AFTER Misc_Alloc in gvector */
-8:
         __(mov imm1,nargs)
         __(add imm2,imm1,#misc_data_offset)
         __(b 2f)
@@ -1356,13 +1323,6 @@ _spentry(gvector)
         __(vpop1(temp0))        /* Note the intentional fencepost: */
                                 /* discard the subtype as well.  */
         __(bge 1b)
-        /* Bug 151 diag: check frame before gvector returns */
-        __(ldr imm0,[x29,#lisp_frame.savefn])
-        __(cbnz imm0,9f)
-        __(ldr imm0,[x29,#lisp_frame.savelr])
-        __(cbnz imm0,9f)
-        __(hlt #0xFFF5)  /* frame zeroed at end of gvector data copy */
-9:
         __(ret)
 
 _spentry(fitvals)
@@ -1397,14 +1357,6 @@ _spentry(nthvalue)
 /* arguments.  nargs is preserved, all arguments wind up on the  */
 /* vstack.  */
 _spentry(default_optional_args)
-        /* Bug 151 diag: verify caller's frame at x29 is intact */
-        __(ldr imm2,[x29,#lisp_frame.savefn])
-        __(cbnz imm2,0f)
-        __(ldr imm2,[x29,#lisp_frame.savelr])
-        __(cbnz imm2,0f)
-        /* Both savefn and savelr are 0 — frame is zeroed! */
-        __(hlt #0xFFF3)
-0:
         __(vpush_argregs())
         __(cmp nargs,imm0)
         __(mov arg_z,rnil)
@@ -1439,13 +1391,6 @@ _spentry(opt_supplied_p)
 /* Cons a list of length nargs  and vpush it.  */
 /* Use this entry point to heap-cons a simple &rest arg.  */
 _spentry(heap_rest_arg)
-        /* Bug 151 diag: verify caller's frame at x29 is intact */
-        __(ldr imm2,[x29,#lisp_frame.savefn])
-        __(cbnz imm2,0f)
-        __(ldr imm2,[x29,#lisp_frame.savelr])
-        __(cbnz imm2,0f)
-        __(hlt #0xFFF3)  /* frame zeroed at heap_rest_arg entry */
-0:
         __(vpush_argregs())
         __(mov imm1,nargs)
         __(mov arg_z,rnil)
@@ -1590,6 +1535,9 @@ local_label(out):
         __(add sp,sp,imm0)
 9:      __(ret)
 local_label(ivector):
+        /* Bug 153: simple-base-string (0x87) is 8-bit but in 32-bit subtag range */
+        __(cmp imm1,#subtag_simple_base_string)
+        __(beq local_label(out))   /* 8-bit: size = count (no shift) */
         __(cmp imm1,#max_32_bit_ivector_subtag)
         __(bls local_label(word))
         __(cmp imm1,#max_8_bit_ivector_subtag)
@@ -2137,7 +2085,11 @@ _spentry(misc_alloc)
         __(lsl imm2,arg_y,#3)           /* gvector: count * 8 (node-size) */
         __(bne 1f)
         /* ivector size dispatch — subtag order:
-           32-bit(≤0x88) 64-bit(≤0x93) 8-bit(≤0x97) 16-bit(≤0x9B) 128-bit(0x9D) bit(0x9F) */
+           32-bit(≤0x88) 64-bit(≤0x93) 8-bit(≤0x97) 16-bit(≤0x9B) 128-bit(0x9D) bit(0x9F)
+           Bug 153: simple-base-string (0x87) is 8-bit but in 32-bit range */
+        __(cmp imm1,#subtag_simple_base_string)
+        __(mov imm2,arg_y)              /* 8-bit: count * 1 */
+        __(beq 1f)
         __(cmp imm1,#max_32_bit_ivector_subtag)
         __(lsl imm2,arg_y,#2)           /* 32-bit: count * 4 */
         __(ble 1f)
@@ -3673,10 +3625,6 @@ local_label(throw_push_test):
 local_label(throw_pushed_values):
         __(mov vsp,imm1)
         __(ldr imm0,[temp0,#catch_frame.link])
-        /* Debug: trap if popping last catch frame */
-        __(cbnz imm0,0f)
-        __(hlt #0xFFF9)
-0:
         __(str imm0,[rcontext,#tcr.catch_top])
         __(ldr lr,[sp,#catch_frame.size+lisp_frame.savelr+node_size])
         __(ldp nfn,x29,[sp,#catch_frame.size+lisp_frame.savefn+node_size])
@@ -3912,8 +3860,13 @@ _startfn(stack_misc_alloc_init_ivector)
         __(orr imm0,imm0,arg_x)
         /* Compute byte count from element count (arg_x) and subtag (arg_y).
            On ARM64 with fixnumshift=0, arg_x IS the element count.
-           Subtag order: 32-bit(≤0x88) 64-bit(≤0x93) 8-bit(≤0x97) 16-bit(≤0x9B) 128-bit(0x9D) bit(0x9F) */
-        __(cmp arg_y,#max_32_bit_ivector_subtag)
+           Subtag order: 32-bit(≤0x88) 64-bit(≤0x93) 8-bit(≤0x97) 16-bit(≤0x9B) 128-bit(0x9D) bit(0x9F)
+           Bug 153: simple-base-string (0x87) is 8-bit but in 32-bit range */
+        __(cmp arg_y,#subtag_simple_base_string)
+        __(bne 0f)
+        __(mov imm1,arg_x)     /* 8-bit: count * 1 */
+        __(b 8f)
+0:      __(cmp arg_y,#max_32_bit_ivector_subtag)
         __(bgt 1f)
         __(lsl imm1,arg_x,#2)  /* 32-bit elements: count * 4 */
         __(b 8f)
