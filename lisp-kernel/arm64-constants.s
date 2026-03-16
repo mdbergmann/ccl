@@ -566,9 +566,10 @@ nzvc_c = 1
 
 /* On ARM64 with 56-bit fixnums, "unsigned_byte_24" fits if bits outside
    the low 24 value bits (plus any tag bits) are clear.  With fixnumshift=0,
-   bits 55:24 must be zero.  This mask checks bits that should be clear
-   in a boxed unsigned-byte-24 value. */
-unsigned_byte_24_mask = 0x00ffffff00000000
+   bits 63:24 must be zero (including the TBI tag byte in bits 63:56,
+   which is 0x00 for fixnums).  This mask checks all bits that should
+   be clear in a boxed unsigned-byte-24 value. */
+unsigned_byte_24_mask = 0xffffffffff000000
 
 /* Extended type codes — used in UUO traps for type errors.
    These are NOT subtag bytes; they are synthetic codes > 255

@@ -1253,7 +1253,7 @@
               (etab (pkg.etab p)))
           (when (consp itab) (%resize-htab itab))
           (when (consp etab) (%resize-htab etab))))
-      ;;; Bug 138: skip documentation for now — apply triggers $XNOSPREAD on corrupt list
+      ;;; Bug 138: skip documentation for now
       (setq *xload-cold-load-documentation* nil)
       ;; Can't bind any specials until this happens
       (let* ((max 0))

@@ -1262,7 +1262,11 @@
   jvm-init
   lisp-lstat
   lisp-realpath
+  ;; Dummy sentinel entry — must be last
+  last-kernel-import
 )
+
+(defconstant num-kernel-imports (ash kernel-import-last-kernel-import (- word-shift)))
 
 
 ;;; Nil-relative symbol offset.

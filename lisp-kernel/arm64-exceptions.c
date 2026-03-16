@@ -143,10 +143,29 @@ allocptr_displacement(ExceptionInformation *xp)
          cmp allocptr, x1              ; [-2]
          b.hi around                   ; [-1]
          hlt #0                        ; [0]
-       Check both positions. */
-    int offsets[] = {-3, -4};
+       Check both positions.  Misc_Alloc has an EXTRA sub $3,$3,#node_size
+       before the sub allocptr,allocptr,$3, making SUB_REG at [-4]:
+         sub imm2, imm2, #node_size    ; [-5]
+         sub allocptr, allocptr, imm2  ; [-4]
+         cmp allocptr, allocbase       ; [-3]
+         b.hi around                   ; [-2]
+         b around_hdr_store            ; [-1]  (optional)
+         hlt #0                        ; [0]
+       So check offsets -3, -4, -5. */
+    int offsets[] = {-3, -4, -5};
     int i;
-    for (i = 0; i < 2; i++) {
+    {
+      static int disp_dbg = 0;
+      if (disp_dbg < 10) {
+        disp_dbg++;
+        fprintf(dbgout, "  allocptr_disp[%d]: pc=%p instr[-5..0]=", disp_dbg, program_counter);
+        for (int j = -5; j <= 0; j++)
+          fprintf(dbgout, " %08x", program_counter[j]);
+        fprintf(dbgout, "\n");
+        fflush(dbgout);
+      }
+    }
+    for (i = 0; i < 3; i++) {
       prev_instr = program_counter[offsets[i]];
 
       if (IS_SUB_IMM_FROM_ALLOCPTR(prev_instr)) {
@@ -156,7 +175,21 @@ allocptr_displacement(ExceptionInformation *xp)
 
       if (IS_SUB_REG_FROM_ALLOCPTR(prev_instr)) {
         unsigned rm = (prev_instr >> 16) & 0x1F;
-        return -((signed_natural)xpGPR(xp, rm));
+        /* Strip TBI tag from the size register — on ARM64 TBI, a tagged
+           value in the size register would cause catastrophic misbehavior.
+           The size should be a small positive integer (no tag). */
+        natural size_val = xpGPR(xp, rm) & 0x00FFFFFFFFFFFFFFULL;
+        {
+          static int reg_dbg = 0;
+          if (reg_dbg < 10) {
+            reg_dbg++;
+            fprintf(dbgout, "  SUB_REG match at [%d]: insn=0x%08x rm=x%u raw=0x%lx stripped=0x%lx\n",
+                    offsets[i], prev_instr, rm, (unsigned long)xpGPR(xp, rm),
+                    (unsigned long)size_val);
+            fflush(dbgout);
+          }
+        }
+        return -((signed_natural)size_val);
       }
     }
 
@@ -387,6 +420,29 @@ handle_alloc_trap(ExceptionInformation *xp, TCR *tcr, Boolean *notify)
 
   cur_allocptr = xpGPR(xp, allocptr);
   disp = allocptr_displacement(xp);
+
+  {
+    static int alloc_dbg = 0;
+    if (alloc_dbg < 20) {
+      alloc_dbg++;
+      area *da = active_dynamic_area;
+      fprintf(dbgout, "alloc-trap[%d]: allocptr=0x%lx allocbase=0x%lx disp=%ld (0x%lx)\n",
+              alloc_dbg, (unsigned long)cur_allocptr,
+              (unsigned long)xpGPR(xp, allocbase), (long)disp, (unsigned long)disp);
+      fprintf(dbgout, "  regs: x0=0x%lx x1=0x%lx x2=0x%lx x3=0x%lx x14=0x%lx x15=0x%lx\n",
+              (unsigned long)xpGPR(xp, 0), (unsigned long)xpGPR(xp, 1),
+              (unsigned long)xpGPR(xp, 2), (unsigned long)xpGPR(xp, 3),
+              (unsigned long)xpGPR(xp, 14), (unsigned long)xpGPR(xp, 15));
+      if (da) {
+        fprintf(dbgout, "  dynarea: low=0x%lx active=0x%lx high=0x%lx\n",
+                (unsigned long)(natural)da->low, (unsigned long)(natural)da->active,
+                (unsigned long)(natural)da->high);
+      } else {
+        fprintf(dbgout, "  *** active_dynamic_area is NULL! ***\n");
+      }
+      fflush(dbgout);
+    }
+  }
 
   if (disp == 0) {
     return false;
@@ -977,29 +1033,42 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
   fprintf(dbgout, "  nfn(x10)=%016lx fname(x9)=%016lx arg_z(x15)=%016lx\n",
           (unsigned long)xpGPR(xp, 10), (unsigned long)xpGPR(xp, 9),
           (unsigned long)xpGPR(xp, 15));
-  /* Try to print the symbol name from x9 (fname) */
+  /* Try to print the symbol name from x9 (fname) and its fcell */
   {
     LispObj fname_tagged = xpGPR(xp, 9);
     natural fname_raw = fname_tagged & 0x00FFFFFFFFFFFFFF;
+    fprintf(dbgout, "  fname: tagged=0x%lx raw=0x%lx\n",
+            (unsigned long)fname_tagged, (unsigned long)fname_raw);
     if (fname_raw > 0x100000000 && fname_raw < 0x400000000000) {
-      LispObj pname_tagged = ((LispObj *)fname_raw)[0]; /* symbol.pname */
+      /* Dump raw 64-bit words at the fname address */
+      LispObj *sym = (LispObj *)fname_raw;
+      fprintf(dbgout, "  fname raw data: [-1]=%016lx [0]=%016lx [1]=%016lx [2]=%016lx [3]=%016lx [4]=%016lx [5]=%016lx [6]=%016lx\n",
+              (unsigned long)sym[-1], (unsigned long)sym[0], (unsigned long)sym[1],
+              (unsigned long)sym[2], (unsigned long)sym[3], (unsigned long)sym[4],
+              (unsigned long)sym[5], (unsigned long)sym[6]);
+      LispObj pname_tagged = sym[0]; /* symbol.pname */
+      LispObj vcell = sym[1]; /* symbol.vcell */
+      LispObj fcell = sym[2]; /* symbol.fcell */
       natural pname_raw = pname_tagged & 0x00FFFFFFFFFFFFFF;
+      fprintf(dbgout, "  pname: tagged=0x%lx raw=0x%lx\n",
+              (unsigned long)pname_tagged, (unsigned long)pname_raw);
       if (pname_raw > 0x100000000 && pname_raw < 0x400000000000) {
         LispObj pname_hdr = ((LispObj *)pname_raw)[-1];
         natural pname_len = pname_hdr & 0x00FFFFFFFFFFFFFF;
         char *pname_data = (char *)pname_raw;
-        fprintf(dbgout, "  pname: tagged=0x%lx raw=0x%lx hdr=0x%lx len=%lu\n",
-                (unsigned long)pname_tagged, (unsigned long)pname_raw,
+        fprintf(dbgout, "  pname hdr=0x%lx len=%lu\n",
                 (unsigned long)pname_hdr, (unsigned long)pname_len);
         if (pname_len > 0 && pname_len < 256) {
           unsigned char pname_subtag = (pname_hdr >> 56) & 0xFF;
-          int char_size = (pname_subtag & 0x7F) == 7 ? 4 : 1; /* simple-string=4, base-string=1 */
+          int char_size = (pname_subtag & 0x7F) == 7 ? 4 : 1;
           int pi;
           fprintf(dbgout, "  fname symbol name(%d-byte chars): \"", char_size);
           for (pi = 0; pi < (int)pname_len; pi++)
             fprintf(dbgout, "%c", pname_data[pi * char_size]);
           fprintf(dbgout, "\"\n");
         }
+      } else {
+        fprintf(dbgout, "  pname raw out of range\n");
       }
     }
   }
@@ -1623,9 +1692,53 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
         }
       }
     }
-    fprintf(dbgout, "handle_error: %%err-disp is unbound — aborting.\n");
-    fflush(dbgout);
-    _exit(1);
+    /* During early boot, %err-disp is unbound.  Handle errors at kernel level. */
+    {
+      static int early_err_count = 0;
+      early_err_count++;
+
+      if (early_err_count <= 30 || (early_err_count % 100) == 0) {
+        fprintf(dbgout, "early-boot-err #%d: arg1=%u arg2=0x%x PC=%016lx LR=%016lx\n",
+                early_err_count, arg1, arg2,
+                (unsigned long)(natural)xpPC(xp), (unsigned long)xpGPR(xp, 30));
+        if (arg1 == 0 && arg2 != 0) {
+          /* UUO-based error: decode the HLT instruction */
+          unsigned imm16 = HLT_IMM16(arg2);
+          fprintf(dbgout, "  UUO: imm16=0x%x fmt=%u reg=x%u info=%u\n",
+                  imm16, imm16 & 7, (imm16 >> 3) & 0x1F, (imm16 >> 8) & 0xFF);
+        } else {
+          fprintf(dbgout, "  non-UUO error: code=%u\n", arg1);
+        }
+        fflush(dbgout);
+      }
+      if (early_err_count > 500) {
+        fprintf(dbgout, "early-boot-err: too many errors (%d), aborting\n", early_err_count);
+        fflush(dbgout);
+        _exit(1);
+      }
+
+      if (arg1 == 0 && arg2 != 0) {
+        /* UUO error */
+        unsigned imm16 = HLT_IMM16(arg2);
+        unsigned fmt = imm16 & 7;
+        unsigned info = (imm16 >> 8) & 0xFF;
+        if (fmt == hlt_code_unary_misc && info == uuo_misc_not_callable) {
+          /* UDF: return NIL to caller */
+          xpPC(xp) = (pc)(natural)xpGPR(xp, 30);
+          xpGPR(xp, 15) = lisp_nil;
+          xpGPR(xp, 5) = 1;
+          *bumpP = 0;
+          return true;
+        }
+        /* Other UUO errors: skip HLT and continue */
+        *bumpP = 4;
+        return true;
+      }
+      /* Non-UUO errors (alloc failure, stack overflow, etc.): abort */
+      fprintf(dbgout, "early-boot-err: fatal non-UUO error %u, aborting\n", arg1);
+      fflush(dbgout);
+      _exit(1);
+    }
   }
   if (is_uvector_fulltag(fulltag_of(errdisp)) &&
       (header_subtag(header_of(errdisp)) == subtag_macptr)) {
