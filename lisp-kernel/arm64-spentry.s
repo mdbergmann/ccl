@@ -1240,12 +1240,8 @@ _spentry(stack_misc_alloc)
            arg_y = element count (raw fixnum, fixnumshift=0).
            Compute byte size in imm1 based on subtag element-size group.
            Subtag order: 32-bit(≤0x88) 64-bit(≤0x93) 8-bit(≤0x97) 16-bit(≤0x9B) 128-bit(0x9D) bit(0x9F) gvec(≥0xA0)
-           Bug 153: simple-base-string (subtag 0x87) has 8-bit elements but falls
-           in the 32-bit subtag range due to CL-ivector interleaving.  Handle it
-           before the generic 32-bit comparison. */
-        __(cmp arg_z,#subtag_simple_base_string)
-        __(mov imm1,arg_y)              /* 8-bit: count*1 */
-        __(beq 8f)
+           Note: simple-base-string (0x87) is correctly in the 32-bit group
+           because char-code-limit=#x110000 means 32-bit character elements. */
         __(cmp arg_z,#max_32_bit_ivector_subtag)
         __(lsl imm1,arg_y,#2)           /* 32-bit: count*4 */
         __(ble 8f)
@@ -1535,9 +1531,6 @@ local_label(out):
         __(add sp,sp,imm0)
 9:      __(ret)
 local_label(ivector):
-        /* Bug 153: simple-base-string (0x87) is 8-bit but in 32-bit subtag range */
-        __(cmp imm1,#subtag_simple_base_string)
-        __(beq local_label(out))   /* 8-bit: size = count (no shift) */
         __(cmp imm1,#max_32_bit_ivector_subtag)
         __(bls local_label(word))
         __(cmp imm1,#max_8_bit_ivector_subtag)
@@ -2085,11 +2078,7 @@ _spentry(misc_alloc)
         __(lsl imm2,arg_y,#3)           /* gvector: count * 8 (node-size) */
         __(bne 1f)
         /* ivector size dispatch — subtag order:
-           32-bit(≤0x88) 64-bit(≤0x93) 8-bit(≤0x97) 16-bit(≤0x9B) 128-bit(0x9D) bit(0x9F)
-           Bug 153: simple-base-string (0x87) is 8-bit but in 32-bit range */
-        __(cmp imm1,#subtag_simple_base_string)
-        __(mov imm2,arg_y)              /* 8-bit: count * 1 */
-        __(beq 1f)
+           32-bit(≤0x88) 64-bit(≤0x93) 8-bit(≤0x97) 16-bit(≤0x9B) 128-bit(0x9D) bit(0x9F) */
         __(cmp imm1,#max_32_bit_ivector_subtag)
         __(lsl imm2,arg_y,#2)           /* 32-bit: count * 4 */
         __(ble 1f)
@@ -3860,13 +3849,8 @@ _startfn(stack_misc_alloc_init_ivector)
         __(orr imm0,imm0,arg_x)
         /* Compute byte count from element count (arg_x) and subtag (arg_y).
            On ARM64 with fixnumshift=0, arg_x IS the element count.
-           Subtag order: 32-bit(≤0x88) 64-bit(≤0x93) 8-bit(≤0x97) 16-bit(≤0x9B) 128-bit(0x9D) bit(0x9F)
-           Bug 153: simple-base-string (0x87) is 8-bit but in 32-bit range */
-        __(cmp arg_y,#subtag_simple_base_string)
-        __(bne 0f)
-        __(mov imm1,arg_x)     /* 8-bit: count * 1 */
-        __(b 8f)
-0:      __(cmp arg_y,#max_32_bit_ivector_subtag)
+           Subtag order: 32-bit(≤0x88) 64-bit(≤0x93) 8-bit(≤0x97) 16-bit(≤0x9B) 128-bit(0x9D) bit(0x9F) */
+        __(cmp arg_y,#max_32_bit_ivector_subtag)
         __(bgt 1f)
         __(lsl imm1,arg_x,#2)  /* 32-bit elements: count * 4 */
         __(b 8f)

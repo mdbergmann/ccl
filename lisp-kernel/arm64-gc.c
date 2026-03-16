@@ -259,9 +259,7 @@ ivector_total_size_and_suffix(LispObj header, natural *suffix_dnodes_out)
   natural element_count = header_element_count(header);
   natural total_size_in_bytes;
 
-  if (subtag == subtag_simple_base_string) {
-    total_size_in_bytes = 8 + element_count;  /* 8-bit elements */
-  } else if (subtag <= max_32_bit_ivector_subtag) {
+  if (subtag <= max_32_bit_ivector_subtag) {
     total_size_in_bytes = 8 + (element_count << 2);
   } else if (subtag <= max_64_bit_ivector_subtag) {
     total_size_in_bytes = 8 + (element_count << 3);
@@ -295,9 +293,7 @@ skip_over_ivector(natural start, LispObj header)
   natural element_count = header_element_count(header);
   natural nbytes;
 
-  if (subtag == subtag_simple_base_string) {
-    nbytes = element_count;  /* 8-bit elements */
-  } else if (subtag <= max_32_bit_ivector_subtag) {
+  if (subtag <= max_32_bit_ivector_subtag) {
     nbytes = element_count << 2;
   } else if (subtag <= max_64_bit_ivector_subtag) {
     nbytes = element_count << 3;
@@ -1254,9 +1250,7 @@ compact_dynamic_heap()
           elements = header_element_count(node);
           subtag = header_subtag(node);
 
-          if (subtag == subtag_simple_base_string) {
-            imm_dnodes = ((elements + 8 + (dnode_size - 1)) >> dnode_shift);
-          } else if (subtag <= max_32_bit_ivector_subtag) {
+          if (subtag <= max_32_bit_ivector_subtag) {
             imm_dnodes = (((elements << 2) + 8 + (dnode_size - 1)) >> dnode_shift);
           } else if (subtag <= max_64_bit_ivector_subtag) {
             imm_dnodes = (((elements << 3) + 8 + (dnode_size - 1)) >> dnode_shift);
@@ -1314,9 +1308,7 @@ unboxed_bytes_in_range(LispObj *start, LispObj *end)
       } else {
         subtag = header_subtag(header);
 
-        if (subtag == subtag_simple_base_string) {
-          bytes = 8 + elements;  /* 8-bit elements */
-        } else if (subtag <= max_32_bit_ivector_subtag) {
+        if (subtag <= max_32_bit_ivector_subtag) {
           bytes = 8 + (elements << 2);
         } else if (subtag <= max_64_bit_ivector_subtag) {
           bytes = 8 + (elements << 3);

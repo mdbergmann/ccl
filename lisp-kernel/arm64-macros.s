@@ -539,10 +539,6 @@ define(`mkcatch',`
         new_macro_labels()
         __(push_lisp_fprs(imm0))
 	__(build_lisp_frame())
-        /* Bug 151 diag: trap if mkcatch saves nfn=0 */
-        __(cbnz nfn,macro_label(nfnok))
-        __(hlt #0xFFF0)
-macro_label(nfnok):
         __(make_header(imm1,catch_frame.element_count,catch_frame_header))
         __(mov imm2,#catch_frame.element_count<<word_shift)
         __(dnode_align(imm2,imm2,node_size))

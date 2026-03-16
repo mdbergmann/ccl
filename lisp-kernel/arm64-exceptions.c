@@ -1486,6 +1486,15 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
   if (errdisp == unbound_marker) {
     LispObj arg_y_val = xpGPR(xp, 14);
     LispObj arg_z_val = xpGPR(xp, 15);
+    {
+      static int ubound_dbg = 0;
+      if (ubound_dbg < 5) {
+        fprintf(dbgout, "  errdisp=unbound: arg_y(x14)=%016lx arg_z(x15)=%016lx arg1=%u arg2=0x%x nargs(x5)=%lu\n",
+                (unsigned long)arg_y_val, (unsigned long)arg_z_val,
+                arg1, arg2, (unsigned long)xpGPR(xp, 5));
+        ubound_dbg++;
+      }
+    }
     /* Dump XBADKEYS diagnostics */
     if (arg_y_val == 0x99) { /* $XBADKEYS = 153 */
       fprintf(dbgout, "  $XBADKEYS: arg_z (bad keyword list) = %016lx\n",
@@ -1723,10 +1732,162 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
         unsigned fmt = imm16 & 7;
         unsigned info = (imm16 >> 8) & 0xFF;
         if (fmt == hlt_code_unary_misc && info == uuo_misc_not_callable) {
-          /* UDF: return NIL to caller */
+          /* Check if this is %kernel-restart being called */
+          natural fname_raw = untag(xpGPR(xp, 9));
+          natural kr_addr = (natural)&nrs_KERNELRESTART.pname;
+          natural nargs_val = xpGPR(xp, 5);
+
+          if (fname_raw == kr_addr) {
+            /* %kernel-restart called but undefined.  Handle restart types. */
+            /* nargs convention: n * node_size (8).
+               2 args (16): arg_y=type, arg_z=data
+               3 args (24): arg_x=type, arg_y=data1, arg_z=data2 */
+            LispObj restart_type;
+            if (nargs_val == 3 * node_size)
+              restart_type = xpGPR(xp, 13); /* arg_x = x13 */
+            else
+              restart_type = xpGPR(xp, 14); /* arg_y = x14 */
+
+            if (early_err_count <= 5) {
+              fprintf(dbgout, "  %%kernel-restart workaround: type=%ld nargs=%lu\n",
+                      (long)restart_type, (unsigned long)nargs_val);
+            }
+
+            if (restart_type == 130) { /* $xnopkg */
+              /* Package not found — look it up from %all-packages% */
+              LispObj pkg_name = xpGPR(xp, 15); /* arg_z */
+              natural sraw = untag(pkg_name);
+              if (sraw > 0x100000000LL && sraw < 0x400000000000LL) {
+                LispObj shdr = *((LispObj *)sraw - 1);
+                natural slen = header_element_count(shdr);
+                int scs = ((header_subtag(shdr) & 0x7F) == 7) ? 4 : 1;
+                char *sdata = (char *)sraw;
+
+                LispObj pkglist = nrs_ALL_PACKAGES.vcell;
+                LispObj found_pkg = 0;
+                while (fulltag_of(pkglist) == fulltag_cons) {
+                  LispObj pkg = car(pkglist);
+                  LispObj names = deref(pkg, 5);
+                  LispObj nl = names;
+                  while (fulltag_of(nl) == fulltag_cons) {
+                    LispObj ns = car(nl);
+                    natural ns_raw = untag(ns);
+                    if (ns_raw > 0x100000000LL) {
+                      LispObj ns_hdr = *((LispObj *)ns_raw - 1);
+                      natural ns_len = header_element_count(ns_hdr);
+                      int ns_cs = ((header_subtag(ns_hdr) & 0x7F) == 7) ? 4 : 1;
+                      if (ns_len == slen) {
+                        int match = 1;
+                        for (natural ci = 0; ci < slen; ci++) {
+                          if (((unsigned char *)sraw)[ci * scs] !=
+                              ((unsigned char *)ns_raw)[ci * ns_cs]) {
+                            match = 0; break;
+                          }
+                        }
+                        if (match) { found_pkg = pkg; break; }
+                      }
+                    }
+                    nl = cdr(nl);
+                  }
+                  if (found_pkg) break;
+                  pkglist = cdr(pkglist);
+                }
+                if (found_pkg) {
+                  if (early_err_count <= 5)
+                    fprintf(dbgout, "  $xnopkg: found package %016lx\n",
+                            (unsigned long)found_pkg);
+                  xpPC(xp) = (pc)(natural)xpGPR(xp, 30);
+                  xpGPR(xp, 15) = found_pkg;
+                  xpGPR(xp, 5) = node_size;
+                  *bumpP = 0;
+                  early_err_count--;  /* don't count successful workarounds */
+                  return true;
+                }
+              }
+            }
+
+            if (restart_type == 157) { /* $xwrongtype */
+              /* Type mismatch — log details and return NIL.
+                 Note: returning the object as-is causes infinite loops
+                 because the caller retries the type check. */
+              static int xwt_count = 0;
+              xwt_count++;
+              LispObj obj = xpGPR(xp, 14); /* arg_y = the mistyped object */
+              LispObj expected = xpGPR(xp, 15); /* arg_z = expected type */
+              if (xwt_count <= 10) {
+                fprintf(dbgout, "  $xwrongtype #%d: obj=%016lx expected=%016lx LR=%016lx\n",
+                        xwt_count, (unsigned long)obj, (unsigned long)expected,
+                        (unsigned long)xpGPR(xp, 30));
+                /* Try to print expected type name if it's a symbol */
+                natural exp_raw = untag(expected);
+                if ((expected >> 56) == 0x63 && exp_raw > 0x100000000LL && exp_raw < 0x400000000000LL) {
+                  LispObj pn = ((LispObj *)exp_raw)[0]; /* pname */
+                  natural pn_raw = untag(pn);
+                  if (pn_raw > 0x100000000LL && pn_raw < 0x400000000000LL) {
+                    LispObj pn_hdr = ((LispObj *)pn_raw)[-1];
+                    natural pn_len = header_element_count(pn_hdr);
+                    int cs = ((header_subtag(pn_hdr) & 0x7F) == 7) ? 4 : 1;
+                    if (pn_len > 0 && pn_len < 256) {
+                      fprintf(dbgout, "    expected type: \"");
+                      for (natural i = 0; i < pn_len; i++)
+                        fprintf(dbgout, "%c", ((char *)pn_raw)[i * cs]);
+                      fprintf(dbgout, "\"\n");
+                    }
+                  }
+                }
+                fflush(dbgout);
+              }
+              if (xwt_count > 1000) {
+                fprintf(dbgout, "  $xwrongtype: too many (%d), aborting\n", xwt_count);
+                fflush(dbgout);
+                _exit(1);
+              }
+              /* Return a type-appropriate default value */
+              {
+                LispObj retval = lisp_nil;
+                /* Check expected type name to return something appropriate */
+                natural exp_raw2 = untag(expected);
+                if ((expected >> 56) == 0x63 && exp_raw2 > 0x100000000LL && exp_raw2 < 0x400000000000LL) {
+                  LispObj pn2 = ((LispObj *)exp_raw2)[0];
+                  natural pn2_raw = untag(pn2);
+                  if (pn2_raw > 0x100000000LL && pn2_raw < 0x400000000000LL) {
+                    LispObj pn2_hdr = ((LispObj *)pn2_raw)[-1];
+                    natural pn2_len = header_element_count(pn2_hdr);
+                    int cs2 = ((header_subtag(pn2_hdr) & 0x7F) == 7) ? 4 : 1;
+                    char *pd2 = (char *)pn2_raw;
+                    /* NUMBER/INTEGER/FIXNUM/REAL → return 0 */
+                    if ((pn2_len >= 6 && pd2[0*cs2]=='N' && pd2[1*cs2]=='U' && pd2[2*cs2]=='M') ||
+                        (pn2_len >= 4 && pd2[0*cs2]=='R' && pd2[1*cs2]=='E' && pd2[2*cs2]=='A' && pd2[3*cs2]=='L') ||
+                        (pn2_len >= 7 && pd2[0*cs2]=='I' && pd2[1*cs2]=='N' && pd2[2*cs2]=='T') ||
+                        (pn2_len >= 6 && pd2[0*cs2]=='F' && pd2[1*cs2]=='I' && pd2[2*cs2]=='X'))
+                      retval = 0;
+                  }
+                }
+                xpPC(xp) = (pc)(natural)xpGPR(xp, 30);
+                xpGPR(xp, 15) = retval;
+                xpGPR(xp, 5) = node_size;
+                *bumpP = 0;
+                return true;
+              }
+            }
+
+            if (restart_type == 96) { /* $xvunbnd */
+              /* Unbound variable — return NIL */
+              if (early_err_count <= 5)
+                fprintf(dbgout, "  $xvunbnd: returning NIL\n");
+              xpPC(xp) = (pc)(natural)xpGPR(xp, 30);
+              xpGPR(xp, 15) = lisp_nil;
+              xpGPR(xp, 5) = node_size;
+              *bumpP = 0;
+              early_err_count--;
+              return true;
+            }
+          }
+
+          /* Other not-callable: return NIL to caller */
           xpPC(xp) = (pc)(natural)xpGPR(xp, 30);
           xpGPR(xp, 15) = lisp_nil;
-          xpGPR(xp, 5) = 1;
+          xpGPR(xp, 5) = node_size;
           *bumpP = 0;
           return true;
         }
