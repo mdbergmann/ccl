@@ -2486,6 +2486,8 @@
 
 (defun arm64-encode-unscaled-offset (size-bits v-bit opc base offset dest)
   "LDUR/STUR encoding: size 11 V opc 0 imm9 00 Rn Rt"
+  (when (or (> offset 255) (< offset -256))
+    (error "LDUR/STUR offset ~d out of range (-256..255)" offset))
   (logior (ash size-bits 30)
           #x38000000
           (ash v-bit 26)

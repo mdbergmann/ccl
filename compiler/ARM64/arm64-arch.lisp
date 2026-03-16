@@ -1266,12 +1266,15 @@
 
 
 ;;; Nil-relative symbol offset.
-;;; Returns the byte offset from the NIL symbol's effective address
-;;; to the requested symbol's effective address.  T is at position 0
-;;; (one symbol.size before NIL's symbol), NIL at position 1 (offset 0).
+;;; Returns the byte offset from rnil's effective address (nil_base + node_size)
+;;; to the requested symbol's first data slot.
+;;; NRS array starts at nil_base + dnode_size.  Symbol at position POS has its
+;;; header at nil_base + dnode_size + POS * symbol.size, and its first data
+;;; slot at nil_base + dnode_size + POS * symbol.size + node_size.
+;;; Offset from rnil = dnode_size + POS * symbol.size.
 (defmacro nrs-offset (name)
   (let* ((pos (position name arm64::*arm64-nilreg-relative-symbols* :test #'eq)))
-    (if pos (* (1- pos) symbol.size))))
+    (if pos (+ dnode-size (* pos symbol.size)))))
 
 
 ;;; Target uvector subtags alist.

@@ -109,6 +109,21 @@ relocate_area_contents(area *a, LispObj bias)
         w1 = start[1];
         if ((w1 >= low) && (w1 < high)) {
           start[1]=(w1+bias);
+          static int ep_reloc_count = 0;
+          if (ep_reloc_count < 3) {
+            fprintf(dbgout, "  ep-reloc[%d]: fn=%p old=0x%lx new=0x%lx cv=0x%lx\n",
+                    ep_reloc_count, (void*)start, (unsigned long)w1,
+                    (unsigned long)start[1], (unsigned long)start[2]);
+          }
+          ep_reloc_count++;
+        } else {
+          static int ep_skip_count = 0;
+          if (ep_skip_count < 3) {
+            fprintf(dbgout, "  ep-SKIP[%d]: fn=%p ep=0x%lx low=0x%lx high=0x%lx cv=0x%lx\n",
+                    ep_skip_count, (void*)start, (unsigned long)w1,
+                    (unsigned long)low, (unsigned long)high, (unsigned long)start[2]);
+          }
+          ep_skip_count++;
         }
         start+=2;
         w0 = *start;

@@ -5507,7 +5507,17 @@
                            ((type= ctype (load-time-value (specifier-type '(signed-byte 64))))
                             (%nx1-operator require-s64))
                            ((type= ctype (load-time-value (specifier-type '(unsigned-byte 64))))
-                            (%nx1-operator require-u64))))))))
+                            (%nx1-operator require-u64))
+                           ;; Bug 136: ARM64 TBI fixnum = (signed-byte 56).
+                           ;; nx-target-type converts fixnum to (signed-byte 56)
+                           ;; during cross-compilation; map it to require-fixnum.
+                           ((and (consp typespec)
+                                 (eq (car typespec) 'signed-byte)
+                                 (eql (cadr typespec)
+                                      (1+ (integer-length
+                                           (arch::target-most-positive-fixnum
+                                            (backend-target-arch *target-backend*))))))
+                            (%nx1-operator require-fixnum))))))))
       (if op
         (arm642-use-operator op seg vreg xfer form)
         (if (or (eq typespec t)

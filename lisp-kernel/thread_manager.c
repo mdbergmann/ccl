@@ -1264,12 +1264,18 @@ init_arm64_tcr_sptab(TCR *tcr)
   extern LispObj *sptab;
   extern LispObj *sptab_end;
   LispObj *p, *q;
+  int count = 0;
 
   for (p=sptab,q = tcr->sptab;
        p<sptab_end;
        p++,q++) {
     *q = *p;
+    count++;
   }
+  fprintf(dbgout, "DBG sptab init: copied %d entries, sptab=%p sptab_end=%p\n",
+          count, (void*)sptab, (void*)sptab_end);
+  fprintf(dbgout, "  sptab[24]=0x%lx (SPfuncall)\n", (unsigned long)tcr->sptab[24]);
+  fflush(dbgout);
 }
 #endif
   

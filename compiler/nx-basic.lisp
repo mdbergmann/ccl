@@ -358,13 +358,16 @@
     (values vartype boundp decls)))
 
 (defun nx-target-type (typespec)
-  ;; Could do a lot more here
+  ;; Bug 136: When cross-compiling for a target with a different fixnum range,
+  ;; convert 'fixnum to the target's (signed-byte N) type.
+  ;; ARM64 TBI: fixnum is (signed-byte 56), not (signed-byte 61).
+  ;; Use target-most-positive-fixnum to compute the correct width.
   (if (or (eq *host-backend* *target-backend*)
           (not (eq typespec 'fixnum)))
     typespec
-    (target-word-size-case
-     (32 '(signed-byte 30))
-     (64 '(signed-byte 61)))))
+    (let* ((arch (backend-target-arch *target-backend*))
+           (nbits (1+ (integer-length (arch::target-most-positive-fixnum arch)))))
+      (list 'signed-byte nbits))))
 
 ; Type declarations affect all references.
 (defun nx-declared-type (sym &optional (env *nx-lexical-environment*))

@@ -252,10 +252,10 @@ define(`set_nargs',`
 define(`vref32',`
         __(ldr gpr32($1),[$2,#($3)<<2])
 	')
-        
-	
+
+
 define(`vrefr',`
-        __(vref32($1,$2,$3))
+        __(ldr $1,[$2,#($3)<<3])
 	')
 
 

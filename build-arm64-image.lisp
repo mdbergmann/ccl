@@ -35,11 +35,15 @@
   (cl "ccl:compiler;ARM64;arm64-lapmacros.lisp")
   (provide "ARM64-LAPMACROS"))
 
-;;; Step 2a: Recompile nx1.lisp to pick up arm64-lap-function handler
+;;; Step 2a: Recompile nx-basic.lisp (Bug 136: ARM64 fixnum type width fix)
+(let ((*warn-if-redefine-kernel* nil))
+  (compile-file "ccl:compiler;nx-basic.lisp" :output-file "ccl:compiler;nx-basic.dx64fsl" :verbose nil :load t))
+
+;;; Step 2c: Recompile nx1.lisp to pick up arm64-lap-function handler
 (let ((*warn-if-redefine-kernel* nil))
   (compile-file "ccl:compiler;nx1.lisp" :output-file "ccl:compiler;nx1.dx64fsl" :verbose nil :load t))
 
-;;; Step 2b: Patch host NX1-FF-CALL for ARM64
+;;; Step 2d: Patch host NX1-FF-CALL for ARM64
 (let ((orig-fn (gethash '%ff-call *nx1-alphatizers*)))
   (when orig-fn
     (setf (gethash '%ff-call *nx1-alphatizers*)
@@ -52,7 +56,7 @@
                                       (%nx1-operator eabi-ff-call)))
               (funcall orig-fn context whole env))))))
 
-;;; Step 2c: Pre-load modules required by level-0 files at compile time
+;;; Step 2e: Pre-load modules required by level-0 files at compile time
 (load "ccl:lib;number-macros.lisp" :verbose nil)
 (provide "NUMBER-MACROS")
 (load "ccl:lib;number-case-macro.lisp" :verbose nil)
@@ -76,5 +80,6 @@
 
 (format t "~%=== Building ARM64 boot image ===~%")
 (cross-xload-level-0 :darwinarm64)
+(format t "~%  ARM64 entrypoint fixes applied: ~d~%" ccl::*arm64-ep-fix-count*)
 (format t "~%=== Image build COMPLETE ===~%")
 (quit)

@@ -3151,16 +3151,20 @@
   (ldr dest (:@ vcell (:$ arm64::value-cell.value))))
 
 ;;; %closure-code%: load the %closure-code% symbol's vcell from nil-relative symbols.
+;;; %closure-code%: load the closure trampoline code-vector from NRS.
+;;; The NRS offset (1560) exceeds LDUR's 9-bit signed range (-256..255),
+;;; so we use ADD+LDR instead.
 (define-arm64-vinsn (%closure-code% :predicatable)
     (((dest :lisp))
      ())
-  (ldur dest (:@ rnil (:$ (:apply + arm64::symbol.vcell (arm64::nrs-offset %closure-code%))))))
+  (add dest rnil (:$ (:apply + arm64::symbol.vcell (arm64::nrs-offset %closure-code%))))
+  (ldr dest (:@ dest (:$ 0))))
 
 ;;; %codevector-entry: compute entry point from code vector.
-;;; On ARM64 the entrypoint is at misc-data-offset (=0) past the tagged pointer.
+;;; On ARM64, must strip the TBI tag byte — br/blr do NOT ignore top byte.
 (define-arm64-vinsn %codevector-entry (((dest t))
                                        ((cv :lisp)))
-  (add dest cv (:$ arm64::misc-data-offset)))
+  (and dest cv (:$ #x00FFFFFFFFFFFFFF)))
 
 ;;; single-float-bits: extract 32-bit float value from an immediate single-float.
 ;;; On ARM64, single-float is immediate with the float bits in the low 32 bits.

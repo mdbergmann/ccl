@@ -132,19 +132,32 @@ allocptr_displacement(ExceptionInformation *xp)
 
   if (IS_ALLOC_TRAP(instr)) {
     /* The alloc trap was preceded by cmp and b.hi.
-       The sub from allocptr is at [-3]. */
-    prev_instr = program_counter[-3];
+       The sub from allocptr is normally at [-3]:
+         sub allocptr, allocptr, #size  ; [-3]
+         cmp allocptr, allocbase        ; [-2]
+         b.hi around                    ; [-1]
+         hlt #0                         ; [0]
+       But some sequences load allocbase from TCR between sub and cmp:
+         sub allocptr, allocptr, #size  ; [-4]
+         ldr x1, [rcontext, #save_allocbase]  ; [-3]
+         cmp allocptr, x1              ; [-2]
+         b.hi around                   ; [-1]
+         hlt #0                        ; [0]
+       Check both positions. */
+    int offsets[] = {-3, -4};
+    int i;
+    for (i = 0; i < 2; i++) {
+      prev_instr = program_counter[offsets[i]];
 
-    if (IS_SUB_IMM_FROM_ALLOCPTR(prev_instr)) {
-      /* SUB Xd, Xn, #imm12 — extract imm12 from bits 21:10 */
-      natural imm12 = (prev_instr >> 10) & 0xFFF;
-      return -((signed_natural)imm12);
-    }
+      if (IS_SUB_IMM_FROM_ALLOCPTR(prev_instr)) {
+        natural imm12 = (prev_instr >> 10) & 0xFFF;
+        return -((signed_natural)imm12);
+      }
 
-    if (IS_SUB_REG_FROM_ALLOCPTR(prev_instr)) {
-      /* SUB Xd, Xn, Xm — read Xm register value */
-      unsigned rm = (prev_instr >> 16) & 0x1F;
-      return -((signed_natural)xpGPR(xp, rm));
+      if (IS_SUB_REG_FROM_ALLOCPTR(prev_instr)) {
+        unsigned rm = (prev_instr >> 16) & 0x1F;
+        return -((signed_natural)xpGPR(xp, rm));
+      }
     }
 
     Bug(xp, "Can't determine allocation displacement");
@@ -990,39 +1003,50 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
       }
     }
   }
-  /* For type errors (code 157), read arg_z symbol name (expected type) */
+  /* Bug 136: Print type specifier from arg_z (may be symbol or cons) */
   {
-    LispObj ax = xpGPR(xp, 13);
-    if (ax == 157) {  /* $xwrongtype */
-      LispObj az = xpGPR(xp, 15);
-      unsigned az_tag = (unsigned)(az >> 56);
-      natural az_raw = az & 0x00FFFFFFFFFFFFFF;
-      if (az_tag == 0x63 && az_raw > 0x100000000LL && az_raw < 0x400000000000LL) {
-        LispObj *sym = (LispObj *)az_raw;
-        LispObj pname = sym[0];  /* symbol.pname is first slot after header */
+    LispObj az = xpGPR(xp, 15);
+    unsigned az_tag = (unsigned)(az >> 56);
+    natural az_raw = az & 0x00FFFFFFFFFFFFFF;
+    /* Follow cons cells to find the symbol name */
+    LispObj type_sym = 0;
+    if (az_tag == 0x63) {
+      type_sym = az;  /* arg_z is directly a symbol */
+    } else if (az_tag == 0x03 && az_raw > 0x100000000LL && az_raw < 0x400000000000LL) {
+      /* arg_z is a cons — CAR might be the type symbol */
+      LispObj car = ((LispObj *)az_raw)[0];
+      unsigned car_tag = (unsigned)(car >> 56);
+      if (car_tag == 0x63) type_sym = car;
+      fprintf(dbgout, "  type-spec cons: car=0x%lx cdr=0x%lx\n",
+              (unsigned long)((LispObj *)az_raw)[0],
+              (unsigned long)((LispObj *)az_raw)[1]);
+    }
+    if (type_sym) {
+      natural sym_raw = type_sym & 0x00FFFFFFFFFFFFFF;
+      if (sym_raw > 0x100000000LL && sym_raw < 0x400000000000LL) {
+        LispObj pname = ((LispObj *)sym_raw)[0];
         natural pname_raw = pname & 0x00FFFFFFFFFFFFFF;
         if (pname_raw > 0x100000000LL && pname_raw < 0x400000000000LL) {
           LispObj pname_hdr = *((LispObj *)pname_raw - 1);
-          int pname_len = (int)(pname_hdr & 0xFFFFFFFF);
+          natural pname_len = pname_hdr & 0x00FFFFFFFFFFFFFF;
           unsigned char *pname_data = (unsigned char *)pname_raw;
           if (pname_len > 0 && pname_len < 256) {
             unsigned char pname_subtag = (pname_hdr >> 56) & 0xFF;
             int char_size = (pname_subtag & 0x7F) == 7 ? 4 : 1;
             int pi;
-            fprintf(dbgout, "  TYPE ERROR: expected type = \"");
-            for (pi = 0; pi < pname_len; pi++)
+            fprintf(dbgout, "  type-spec symbol name(%d): \"", char_size);
+            for (pi = 0; pi < (int)pname_len; pi++)
               fprintf(dbgout, "%c", pname_data[pi * char_size]);
             fprintf(dbgout, "\"\n");
           }
         }
       }
-      /* Also show arg_y (the value) */
-      LispObj ay = xpGPR(xp, 14);
-      fprintf(dbgout, "  TYPE ERROR: value = 0x%lx (tag=0x%02x)\n",
-              (unsigned long)ay, (unsigned)(ay >> 56));
     }
-    /* MV protocol diagnostic: dump ret1valaddr and frame chain savelr values */
-    {
+    fprintf(dbgout, "  arg_y(object) = 0x%lx (tag=0x%02x)\n",
+            (unsigned long)xpGPR(xp, 14), (unsigned)(xpGPR(xp, 14) >> 56));
+  }
+  /* MV protocol diagnostic: dump ret1valaddr and frame chain savelr values */
+  {
       extern void ret1valn(void);
       LispObj ret1val_global = lisp_global(RET1VALN);
       fprintf(dbgout, "  MV-DIAG: ret1valaddr global = %016lx, &ret1valn = %016lx %s\n",
@@ -1043,8 +1067,6 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
                 (unsigned long)savefn);
         fp = (LispObj *)(natural)savefp;
       }
-    }
-    fflush(dbgout);
   }
   /* Dump arg_z (x15) and arg_y (x11) if they look like heap pointers */
   {
@@ -3186,6 +3208,63 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
                 (unsigned long)ts->__x[0], (unsigned long)ts->__x[9],
                 (unsigned long)ts->__x[10], (unsigned long)ts->__x[15],
                 (unsigned long)ts->__sp);
+        /* Bug 143 debug: if PC is in static area (bad entrypoint), dump fn at x10 */
+        if ((natural)ts->__pc >= 0x200010000ULL && (natural)ts->__pc < 0x200012000ULL) {
+          natural nfn_tagged = ts->__x[10];
+          natural nfn_raw = nfn_tagged & 0x00FFFFFFFFFFFFFFULL;
+          fprintf(dbgout, "\n  BAD-EP: pc=0x%lx nfn=0x%lx lr=0x%lx",
+                  (unsigned long)ts->__pc, (unsigned long)nfn_tagged, (unsigned long)ts->__lr);
+          if (nfn_raw > 0x100000000ULL && nfn_raw < 0x400000000000ULL) {
+            LispObj *fn = (LispObj *)nfn_raw;
+            natural hdr = *(fn - 1);
+            int nslots = hdr & 0x00FFFFFFFFFFFFFFLL;
+            fprintf(dbgout, "\n  fn hdr=0x%lx nslots=%d", (unsigned long)hdr, nslots);
+            for (int si = 0; si < nslots && si < 8; si++) {
+              fprintf(dbgout, "\n  slot[%d]=0x%lx", si, (unsigned long)fn[si]);
+            }
+            /* If this looks like a closure (slot[2] is a function), dump inner fn */
+            if (nslots > 2 && (fn[2] >> 56) == 0x62) {
+              natural inner_raw = fn[2] & 0x00FFFFFFFFFFFFFFULL;
+              if (inner_raw > 0x100000000ULL && inner_raw < 0x400000000000ULL) {
+                LispObj *inner = (LispObj *)inner_raw;
+                natural ihdr = *(inner - 1);
+                int islots = ihdr & 0x00FFFFFFFFFFFFFFLL;
+                fprintf(dbgout, "\n  inner fn hdr=0x%lx islots=%d ep=0x%lx cv=0x%lx",
+                        (unsigned long)ihdr, islots, (unsigned long)inner[0], (unsigned long)inner[1]);
+                /* Try to find name: usually in last-2 slot of inner fn */
+                if (islots > 3) {
+                  LispObj name_slot = inner[islots - 2];
+                  natural name_raw = name_slot & 0x00FFFFFFFFFFFFFFULL;
+                  if ((name_slot >> 56) == 0x63 && name_raw > 0x100000000ULL) {
+                    LispObj *sym = (LispObj *)name_raw;
+                    natural pn_raw = sym[0] & 0x00FFFFFFFFFFFFFFULL;
+                    if (pn_raw > 0x100000000ULL && pn_raw < 0x400000000000ULL) {
+                      char *chars = (char *)pn_raw;
+                      natural pn_hdr = ((LispObj *)(pn_raw - 8))[0];
+                      int len = pn_hdr & 0x00FFFFFFFFFFFFFFLL;
+                      if (len > 60) len = 60;
+                      fprintf(dbgout, "\n  inner name='");
+                      for (int i = 0; i < len; i++) {
+                        char ch = chars[i * 4];
+                        if (ch >= 0x20 && ch < 0x7f) fputc(ch, dbgout);
+                      }
+                      fprintf(dbgout, "'");
+                    }
+                  }
+                }
+              }
+            }
+            /* Also dump %closure-code% NRS value for comparison */
+            {
+              natural rnil_raw = ts->__x[6] & 0x00FFFFFFFFFFFFFFULL;
+              /* %closure-code% vcell is at rnil + symbol.vcell(8) + nrs-offset(1552) = rnil + 1560 */
+              natural cc_vcell_addr = rnil_raw + 1560;
+              fprintf(dbgout, "\n  %%closure-code%% vcell addr=0x%lx val=0x%lx",
+                      (unsigned long)cc_vcell_addr, (unsigned long)*(LispObj*)cc_vcell_addr);
+            }
+          }
+          fprintf(dbgout, "\n");
+        }
         /* Dump function object slots when we crash with KERN_INVALID_ADDRESS */
         if (code0 == KERN_INVALID_ADDRESS) {
           natural nfn_tagged = ts->__x[10];
@@ -3699,6 +3778,82 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
        Skip the faulting LDR instruction and set dest register to 0. */
     if ((natural)code[1] < 4096 && tcr->valence == TCR_STATE_LISP) {
       natural fault_pc = (natural)ts->__pc;
+      /* Bug 140: If PC itself is 0 (branch-to-null via blr to 0), we can't
+         read the instruction.  Resume at lr instead. */
+      if (fault_pc < 4096) {
+        static int call_null_count = 0;
+        call_null_count++;
+        if (call_null_count <= 5 || (call_null_count % 100) == 0) {
+          natural lr_val = (natural)ts->__lr;
+          fprintf(dbgout, "call-to-null[%d]: pc=0x%lx lr=0x%lx x2=0x%lx x28=0x%lx\n",
+                  call_null_count,
+                  (unsigned long)fault_pc, (unsigned long)lr_val,
+                  (unsigned long)ts->__x[2], (unsigned long)ts->__x[28]);
+          /* Dump memory at x28+0x240 (sptab[24]) */
+          if (ts->__x[28] > 0x100000000ULL && ts->__x[28] < 0x200000000ULL) {
+            natural tcr_addr = ts->__x[28];
+            fprintf(dbgout, "  mem@x28+0x240=0x%lx mem@x28+0x238=0x%lx mem@x28+0x248=0x%lx\n",
+                    (unsigned long)((LispObj*)tcr_addr)[0x240/8],
+                    (unsigned long)((LispObj*)tcr_addr)[0x238/8],
+                    (unsigned long)((LispObj*)tcr_addr)[0x248/8]);
+          }
+          /* Dump instructions around lr */
+          if (lr_val > 0x200000000000ULL && lr_val < 0x400000000000ULL) {
+            opcode *lr_insns = (opcode *)lr_val;
+            fprintf(dbgout, "  insn@lr: [-4]=%08x [-3]=%08x [-2]=%08x [-1]=%08x [0]=%08x [1]=%08x [2]=%08x [3]=%08x\n",
+                    lr_insns[-4], lr_insns[-3], lr_insns[-2], lr_insns[-1],
+                    lr_insns[0], lr_insns[1], lr_insns[2], lr_insns[3]);
+          }
+          /* Dump nrs_CLOSURE_CODE from C and from rnil */
+          {
+            lispsymbol *cc_sym = &nrs_CLOSURE_CODE;
+            natural rnil_raw = ts->__x[6] & 0x00FFFFFFFFFFFFFFULL;
+            fprintf(dbgout, "  nrs_CLOSURE_CODE(C): hdr=0x%lx pname=0x%lx vcell=0x%lx (addr=%p)\n",
+                    (unsigned long)cc_sym->header, (unsigned long)cc_sym->pname,
+                    (unsigned long)cc_sym->vcell, (void*)cc_sym);
+            fprintf(dbgout, "  rnil=0x%lx (raw=0x%lx) nil_base=0x%lx sizeof(lispsymbol)=%lu\n",
+                    (unsigned long)ts->__x[6], (unsigned long)rnil_raw,
+                    (unsigned long)nil_base_address, (unsigned long)sizeof(lispsymbol));
+            /* What Lisp would load: rnil + nrs-offset + symbol.vcell
+               nrs-offset for pos=24 = (24-1)*symbol.size = 23*64 = 1472
+               symbol.vcell = 8
+               total = 1480 */
+            natural lisp_vcell_addr = rnil_raw + 1480;
+            fprintf(dbgout, "  Lisp vcell addr=0x%lx value=0x%lx\n",
+                    (unsigned long)lisp_vcell_addr,
+                    (unsigned long)*(LispObj*)lisp_vcell_addr);
+            /* Also dump NRS[0] (T) pname to verify alignment */
+            lispsymbol *t_sym = &nrs_T;
+            fprintf(dbgout, "  nrs_T(C): hdr=0x%lx pname=0x%lx (addr=%p)\n",
+                    (unsigned long)t_sym->header, (unsigned long)t_sym->pname, (void*)t_sym);
+            /* Dump function nfn's slot[0] and slot[1] headers */
+            natural nfn_raw = ts->__x[10] & 0x00FFFFFFFFFFFFFFULL;
+            if (nfn_raw > 0x100000000ULL) {
+              LispObj *fn = (LispObj *)nfn_raw;
+              fprintf(dbgout, "  nfn[0]=0x%lx nfn[1]=0x%lx\n",
+                      (unsigned long)fn[0], (unsigned long)fn[1]);
+              /* Check slot[1] - if it's a code-vector, dump its header */
+              natural s1_raw = fn[1] & 0x00FFFFFFFFFFFFFFULL;
+              if (s1_raw > 0x100000000ULL) {
+                LispObj s1_hdr = ((LispObj *)s1_raw)[-1];
+                fprintf(dbgout, "  nfn[1] hdr=0x%lx subtag=0x%02lx\n",
+                        (unsigned long)s1_hdr, (unsigned long)(s1_hdr >> 56));
+              }
+            }
+          }
+          fflush(dbgout);
+        }
+        if (call_null_count > 1000) {
+          fprintf(dbgout, "FATAL: %d call-to-null repeats, aborting\n", call_null_count);
+          fflush(dbgout);
+          _exit(1);
+        }
+        *out_ts = *ts;
+        out_ts->__x[0] = 0;
+        out_ts->__pc = ts->__lr;
+        kret = KERN_SUCCESS;
+        goto done;
+      }
       unsigned int insn = *(unsigned int *)fault_pc;
       int dest_reg = insn & 0x1f;  /* bits 4:0 = destination register */
       static int null_deref_count = 0;
@@ -3750,6 +3905,99 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
                               out_ts);
     goto done;
   } else {
+    /* Bug 140: Handle alloc traps directly in Mach handler to avoid
+       re-entrant exception issues.  The signal_handler path changes
+       tcr->valence to FOREIGN, so any nested fault (e.g. W^X page
+       toggle or heap extension) sees valence != LISP and aborts.
+       By handling the common case here, we avoid setup_signal_frame
+       entirely. */
+    if (exception == EXC_BAD_INSTRUCTION) {
+      opcode insn = *(opcode *)(natural)ts->__pc;
+      fprintf(dbgout, "DBG alloc-check: pc=0x%lx insn=0x%08x IS_ALLOC=%d IS_GC=%d IS_HLT=%d imm16=0x%x\n",
+              (unsigned long)ts->__pc, insn,
+              IS_ALLOC_TRAP(insn) ? 1 : 0,
+              IS_GC_TRAP(insn) ? 1 : 0,
+              IS_HLT(insn) ? 1 : 0,
+              IS_HLT(insn) ? HLT_IMM16(insn) : 0);
+      fflush(dbgout);
+      if (IS_ALLOC_TRAP(insn)) {
+        signed_natural disp = 0;
+        opcode *pc = (opcode *)(natural)ts->__pc;
+        /* Check pc[-3] and pc[-4] for the SUB instruction.
+           Standard: sub, cmp, b.hi, hlt → sub at [-3].
+           TCR-loaded allocbase: sub, ldr, cmp, b.hi, hlt → sub at [-4]. */
+        int offsets[] = {-3, -4};
+        int oi;
+        for (oi = 0; oi < 2 && disp == 0; oi++) {
+          opcode sub_insn = pc[offsets[oi]];
+          if (IS_SUB_IMM_FROM_ALLOCPTR(sub_insn)) {
+            natural imm12 = (sub_insn >> 10) & 0xFFF;
+            disp = -((signed_natural)imm12);
+          } else if (IS_SUB_REG_FROM_ALLOCPTR(sub_insn)) {
+            unsigned rm = (sub_insn >> 16) & 0x1F;
+            disp = -((signed_natural)ts->__x[rm]);
+          }
+        }
+
+        if (disp) {
+          natural cur_allocptr = ts->__x[allocptr];
+          natural bytes_needed = (-disp) + node_size;
+
+          /* update_bytes_allocated inline */
+          {
+            BytePtr last = (BytePtr)tcr->last_allocptr;
+            BytePtr current = (BytePtr)(cur_allocptr - disp);
+            if (last && cur_allocptr != (natural)VOID_ALLOCPTR) {
+              tcr->bytes_allocated += (last - current);
+            }
+            tcr->last_allocptr = 0;
+          }
+
+          /* Try to allocate from active dynamic area without extending */
+          {
+            area *a = active_dynamic_area;
+            natural log2_aq = tcr->log2_allocation_quantum;
+            natural oldlimit = (natural)a->active;
+            natural newlimit = (align_to_power_of_2(oldlimit, log2_aq) +
+                                align_to_power_of_2(bytes_needed, log2_aq));
+
+            if (newlimit <= (natural)a->high) {
+              static int alloc_count = 0;
+              alloc_count++;
+              fprintf(dbgout, "alloc-mach[%d]: disp=%ld bytes=%lu old=0x%lx new=0x%lx allocptr_out=0x%lx\n",
+                      alloc_count, (long)disp, (unsigned long)bytes_needed,
+                      (unsigned long)oldlimit, (unsigned long)newlimit,
+                      (unsigned long)((LispObj)newlimit + disp));
+              fflush(dbgout);
+              a->active = (BytePtr)newlimit;
+              /* Zero new memory */
+              if ((BytePtr)oldlimit < heap_dirty_limit) {
+                if ((BytePtr)newlimit < heap_dirty_limit) {
+                  memset((void *)oldlimit, 0, newlimit - oldlimit);
+                } else {
+                  memset((void *)oldlimit, 0, (size_t)heap_dirty_limit - oldlimit);
+                }
+              }
+              if ((BytePtr)newlimit > heap_dirty_limit) {
+                heap_dirty_limit = (BytePtr)newlimit;
+              }
+              /* Set output state: advance past HLT, update allocptr/allocbase */
+              *out_ts = *ts;
+              tcr->last_allocptr = (void *)newlimit;
+              out_ts->__x[allocptr] = (LispObj)newlimit + disp;
+              out_ts->__x[allocbase] = (LispObj)oldlimit;
+              tcr->save_allocbase = (void *)oldlimit;
+              out_ts->__pc = ts->__pc + 4;
+              kret = KERN_SUCCESS;
+              goto done;
+            }
+            /* Heap full: fall through to signal handler for GC/extend */
+          }
+        }
+        /* Could not handle directly */
+      }
+    }
+
     switch (exception) {
     case EXC_BAD_ACCESS:
       signum = SIGBUS;

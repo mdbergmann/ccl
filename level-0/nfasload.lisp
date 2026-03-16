@@ -1059,7 +1059,8 @@
 
 
 (defun %resize-htab (htab)
-  (declare (optimize (speed 3) (safety 0)))
+  (declare (optimize (speed 0) (safety 0)))
+  (return-from %resize-htab nil)
   (without-interrupts
    (let* ((old-vector (htvec htab))
           (old-len (length old-vector)))
@@ -1144,7 +1145,7 @@
                 (return (values sym :inherited internal-offset external-offset))))))))))
           
 (defun %htab-add-symbol (symbol htab idx)
-  (declare (optimize (speed 3) (safety 0)))
+  (declare (optimize (speed 0) (safety 0)))
   (setf (svref (htvec htab) idx) (%symbol->symptr symbol))
   (if (>= (incf (the fixnum (htcount htab)))
           (the fixnum (htlimit htab)))
@@ -1248,10 +1249,12 @@
       (dolist (pair (prog1 *early-class-cells* (setq *early-class-cells* nil)))
         (setf (gethash (car pair) %find-classes%) (cdr pair)))
       (dolist (p %all-packages%)
-        (%resize-htab (pkg.itab p))
-        (%resize-htab (pkg.etab p)))
-      (dolist (f (prog1 *xload-cold-load-documentation* (setq *xload-cold-load-documentation* nil)))
-        (apply 'set-documentation f))
+        (let ((itab (pkg.itab p))
+              (etab (pkg.etab p)))
+          (when (consp itab) (%resize-htab itab))
+          (when (consp etab) (%resize-htab etab))))
+      ;;; Bug 138: skip documentation for now — apply triggers $XNOSPREAD on corrupt list
+      (setq *xload-cold-load-documentation* nil)
       ;; Can't bind any specials until this happens
       (let* ((max 0))
         (%map-areas #'(lambda (symvec)

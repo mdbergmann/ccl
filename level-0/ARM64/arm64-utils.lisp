@@ -329,8 +329,12 @@
 
 
 (defun walk-dynamic-area (area func)
-  (with-other-threads-suspended
-      (%walk-dynamic-area area func)))
+  ;; Bug 139: with-other-threads-suspended UUO crashes alloc trap handler
+  ;; during early boot.  Single-threaded boot doesn't need suspension.
+  (if *early-boot*
+    (%walk-dynamic-area area func)
+    (with-other-threads-suspended
+        (%walk-dynamic-area area func))))
 
 
 

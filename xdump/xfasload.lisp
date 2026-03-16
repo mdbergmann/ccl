@@ -66,6 +66,7 @@
 (defparameter *xload-target-char-code-limit* nil)
 (defparameter *xload-target-tbi-p* nil
   "When true, target uses Top Byte Ignore tagging (tags in bits 56-63).")
+(defvar *arm64-ep-fix-count* 0)
 
 
 (defvar *xload-backends* nil)
@@ -1701,10 +1702,19 @@
       (when (= subtype (xload-target-subtype :function))
         (locally (declare (ftype (function (t) t) xload-arm-set-entrypoint))
           (xload-arm-set-entrypoint vector)))))
-    ;; On ARM64 TBI, function gvectors need the type-specific tag
-    ;; (tag_function) rather than the generic fulltag_misc.
+    ;; On ARM64 TBI, function gvectors need entrypoint fixup and type-specific tag.
+    ;; Slot[0] (entrypoint) = untagged code-vector address (slot[1] with TBI tag stripped).
+    ;; The fasl contains stale host-side values in slot[0]; fix from slot[1].
     (when (and *xload-target-tbi-p*
               (= subtype (xload-target-subtype :function)))
+      (let* ((code-vector (xload-%svref vector 1))
+             (old-ep (xload-%svref vector 0))
+             (new-ep (logand code-vector #x00FFFFFFFFFFFFFF)))
+        (incf *arm64-ep-fix-count*)
+        (when (not (eql old-ep 0))
+          (format t "~%  BUG143-FIX-NONZERO: fn=0x~x old-ep=0x~x cv=0x~x new-ep=0x~x"
+                  vector old-ep code-vector new-ep))
+        (setf (xload-%svref vector 0) new-ep))
       (let* ((tagged-fn (xload-apply-tag vector *xload-target-fulltag-for-functions*)))
         ;; Update both the fasl stack entry and the final value
         (when (faslstate.faslepush s)

@@ -1553,7 +1553,6 @@ before doing so.")
       (let* ((for-put-p (if (hash-lock-free-p hash) t :reuse))
              (index (vector-index->index vector-index))
              (secondary-hash (%svref secondary-keys (logand 7 hash-code))))
-        (declare (fixnum index secondary-hash))
         (%hash-probe-loop-eq vector key for-put-p index entries secondary-hash)))))
 
 ;;; Bug 133: eql-hash-find rewritten to delegate secondary loop.
