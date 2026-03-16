@@ -52,12 +52,14 @@ define(`jump_builtin',`
    This is called when a newly-created closure is invoked for the
    first time — its entrypoint initially points here.
    Must be the first entry in the subprims table.
-   Bug 128: Must strip TBI tag — br/blr do NOT honor TBI on macOS ARM64. */
+   Bug 128: Must strip TBI tag — br/blr do NOT honor TBI on macOS ARM64.
+   Bug 152: temp2=nfn=x10 on ARM64 — must use a different register (imm0)
+   to avoid clobbering nfn and corrupting the code vector. */
 _spentry(fix_nfn_entrypoint)
-        __(ldr temp2,[nfn,#node_size])             /* load slot 1 = code vector (tagged) */
-        __(and temp2,temp2,#0x00FFFFFFFFFFFFFF)    /* strip TBI tag for br/blr */
-        __(str temp2,[nfn,#_function.entrypoint])   /* store untagged into slot 0 */
-        __(br temp2)                                /* branch to code */
+        __(ldr imm0,[nfn,#node_size])              /* load slot 1 = code vector (tagged) */
+        __(and imm0,imm0,#0x00FFFFFFFFFFFFFF)      /* strip TBI tag for br/blr */
+        __(str imm0,[nfn,#_function.entrypoint])    /* store untagged into slot 0 */
+        __(br imm0)                                 /* branch to code, nfn preserved */
 _endsubp(fix_nfn_entrypoint)
 
 
@@ -422,6 +424,10 @@ _spentry(mkcatchmv)
 	__(ret)
 
 _spentry(mkunwind)
+        /* Bug 151 diag: check nfn at SPmkunwind entry */
+        __(cbnz nfn,0f)
+        __(hlt #0xFFF1)  /* nfn=0 at SPmkunwind entry */
+0:
         __(mov imm2,#-fixnumone)
         __(mov imm1,#INTERRUPT_LEVEL_BINDING_INDEX)
         __(ldr temp0,[rcontext,#tcr.tlb_pointer])
@@ -866,7 +872,7 @@ C(egc_rplacd_did_store):
 _spentry(gvset)
 C(egc_gvset):
         __(cmp arg_z,arg_x)
-	__(add imm0,arg_y,#misc_data_offset)
+	__(lsl imm0,arg_y,#word_shift)
 	__(str arg_z,[arg_x,imm0])
 C(egc_gvset_did_store):
         __(b.lo 9f)               
@@ -903,7 +909,7 @@ C(egc_gvset_did_store):
 _spentry(set_hash_key)
 C(egc_set_hash_key):
         __(cmp arg_z,arg_x)
-	__(add imm0,arg_y,#misc_data_offset)
+	__(lsl imm0,arg_y,#word_shift)
 	__(str arg_z,[arg_x,imm0])
 C(egc_set_hash_key_did_store):
         __(blo 9f)
@@ -1228,7 +1234,7 @@ _spentry(progvsave)
 /* Allocate a uvector on the  stack.  (Push a frame on the stack and  */
 /* heap-cons the object if there's no room on the stack.)  */
 _spentry(stack_misc_alloc)
-        __(test_fixnum(arg_y,imm0))
+        __(test_fixnum(imm0,arg_y))
         __(cbnz imm0,0f)
         __(branch_if_positive(arg_y,1f))
 0:
@@ -2516,7 +2522,7 @@ _spentry(specset)
         __(str arg_z,[imm2,imm1])
         __(b 9f)
 1:      __(mov arg_x,arg_y)
-        __(mov arg_y,#symbol.vcell-misc_data_offset)
+        __(mov arg_y,#1)
         __(b _SPgvset)
 9:      __(ret)
 
@@ -3694,12 +3700,15 @@ C(swap_lr_lisp_frame_temp0_end):
         __(mov imm1,#1)
         __(ldr arg_z,[sp,#2*node_size])
         __(str imm1,[rcontext,#tcr.unwinding])
-        /* Load saved temp2 into imm0 first, because restore_lisp_frame
-           will clobber temp2 (temp2=nfn=x10 on ARM64). */
-        __(ldr imm0,[sp,#3*node_size])
+        /* Bug 151: temp2=nfn=x10 on ARM64.  restore_lisp_frame() loads
+           nfn into x10, then mov temp2,imm0 would clobber it with the
+           throw count.  Since the throw loop only needs the count in
+           temp2 (and each unwind-protect loads its own nfn from its
+           frame), skip the nfn restore entirely. */
+        __(ldr temp2,[sp,#3*node_size])
         __(add sp,sp,#4*node_size)
-        __(restore_lisp_frame())
-        __(mov temp2,imm0)
+        __(ldr x29,[sp,#lisp_frame.savefp])
+        __(ldp vsp,lr,[sp],#lisp_frame.size)
         __(discard_lisp_fprs())
         __(b local_label(_nthrow1v_nextframe))
 local_label(_nthrow1v_no_catch):
@@ -3813,14 +3822,13 @@ local_label(nthrownv_tpoploop):
 local_label(nthrownv_tpoptest):  
         __(ldr temp2,[temp0,#-node_size]!)
         __(bne local_label(nthrownv_tpoploop))
-        /* Save frame count from temp2 before ldr fn clobbers it
-           (fn=nfn=temp2=x10 on ARM64). */
-        __(mov imm0,temp2)
+        /* Bug 151: fn=nfn=temp2=x10 on ARM64.  The old code saved temp2
+           to imm0, loaded fn (clobbering x10), then restored temp2 from
+           imm0 (clobbering fn).  Skip the pointless fn load; temp2
+           already holds the throw count we need. */
         __(mov sp,arg_z)
-        __(ldr fn,[sp,#lisp_frame.savefn])
         __(ldr lr,[sp,#lisp_frame.savelr])
         __(discard_lisp_frame())
-        __(mov temp2,imm0)
         __(discard_lisp_fprs())
         __(b local_label(nthrownv_nextframe))
 local_label(nthrownv_no_catch):

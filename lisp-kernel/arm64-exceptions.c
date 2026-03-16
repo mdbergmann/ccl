@@ -1957,6 +1957,111 @@ handle_uuo(ExceptionInformation *xp, siginfo_t *info, opcode the_uuo)
           (unsigned long)xpGPR(xp, 2), (unsigned long)xpSP(xp), (unsigned long)xpFP(xp));
   fflush(dbgout);
 
+  /* Bug 151 diag: mkcatch saved nfn=0 */
+  if (HLT_IMM16(the_uuo) == 0xFFF0) {
+    static int nfn0_count = 0;
+    nfn0_count++;
+    if (nfn0_count <= 5) {
+      fprintf(dbgout, "\n  *** BUG151 DIAG #%d: mkcatch saving nfn=0 ***\n", nfn0_count);
+      fprintf(dbgout, "  LR=%016lx (cleanup addr) x29=%016lx sp=%016lx\n",
+              (unsigned long)xpGPR(xp, 30), (unsigned long)xpFP(xp), (unsigned long)xpSP(xp));
+      /* Walk frame chain to show call stack */
+      LispObj *fp = (LispObj *)xpFP(xp);
+      for (int fi = 0; fi < 8 && (natural)fp > 0x100000000LL && (natural)fp < 0x800000000000LL; fi++) {
+        fprintf(dbgout, "  frame[%d] @%016lx: savevsp=%016lx savelr=%016lx savefn=%016lx next_fp=%016lx\n",
+                fi, (unsigned long)fp, (unsigned long)fp[0], (unsigned long)fp[1], (unsigned long)fp[2], (unsigned long)fp[3]);
+        fp = (LispObj *)(natural)fp[3];
+      }
+      fflush(dbgout);
+    }
+    /* Skip HLT and continue */
+    adjust_exception_pc(xp, 4);
+    return true;
+  }
+
+  /* Bug 151 diag: nfn=0 at SPmkunwind entry */
+  if (HLT_IMM16(the_uuo) == 0xFFF1) {
+    static int mkunwind_nfn0_count = 0;
+    mkunwind_nfn0_count++;
+    if (mkunwind_nfn0_count <= 3) {
+      fprintf(dbgout, "\n  *** BUG151 DIAG (mkunwind entry) #%d: nfn=0 ***\n", mkunwind_nfn0_count);
+      fprintf(dbgout, "  LR=%016lx x29=%016lx sp=%016lx nfn=%016lx\n",
+              (unsigned long)xpLR(xp), (unsigned long)xpFP(xp), (unsigned long)xpSP(xp),
+              (unsigned long)xpGPR(xp, 10));
+      /* Walk frame chain from x29 */
+      LispObj *fp = (LispObj *)xpFP(xp);
+      for (int fi = 0; fi < 8 && (natural)fp > 0x100000000LL && (natural)fp < 0x800000000000LL; fi++) {
+        fprintf(dbgout, "  frame[%d] @%016lx: savevsp=%016lx savelr=%016lx savefn=%016lx savefp=%016lx\n",
+                fi, (unsigned long)fp, (unsigned long)fp[0], (unsigned long)fp[1], (unsigned long)fp[2], (unsigned long)fp[3]);
+        /* Try to print function name from savefn */
+        LispObj savefn = fp[2];
+        if (savefn != 0 && (savefn & 0xFF00000000000000ULL) != 0) {
+          LispObj raw_fn = savefn & 0x00FFFFFFFFFFFFFFULL;
+          if (raw_fn > 0x100000000ULL && raw_fn < 0x800000000000ULL) {
+            LispObj *fnp = (LispObj *)raw_fn;
+            LispObj hdr = fnp[-1];
+            int nslots = (int)(hdr & 0xFFFF);
+            if (nslots > 1 && nslots < 200) {
+              LispObj name_slot = fnp[nslots - 1]; /* last slot = name */
+              LispObj raw_name = name_slot & 0x00FFFFFFFFFFFFFFULL;
+              if (raw_name > 0x100000000ULL && raw_name < 0x800000000000ULL) {
+                LispObj *sym = (LispObj *)raw_name;
+                LispObj pname = sym[0]; /* pname is first slot of symbol */
+                LispObj raw_pname = pname & 0x00FFFFFFFFFFFFFFULL;
+                if (raw_pname > 0x100000000ULL && raw_pname < 0x800000000000ULL) {
+                  unsigned int *chars = (unsigned int *)((char *)raw_pname + 8);
+                  LispObj phdr = *(LispObj *)(raw_pname - 8);
+                  int len = (int)(phdr & 0xFFFF);
+                  if (len > 0 && len < 80) {
+                    fprintf(dbgout, "    fn name(%d): \"", len);
+                    for (int ci = 0; ci < len && ci < 40; ci++)
+                      fprintf(dbgout, "%c", (char)(chars[ci] & 0x7F));
+                    fprintf(dbgout, "\"\n");
+                  }
+                }
+              }
+            }
+          }
+        }
+        fp = (LispObj *)(natural)fp[3];
+      }
+      /* Also print the caller's code around LR */
+      unsigned long lr = (unsigned long)xpLR(xp);
+      fprintf(dbgout, "  caller LR=%016lx\n", lr);
+      if (lr > 0x300000000000ULL && lr < 0x400000000000ULL) {
+        uint32_t *code = (uint32_t *)lr;
+        fprintf(dbgout, "  code@LR-16: %08x %08x %08x %08x\n", code[-4], code[-3], code[-2], code[-1]);
+        fprintf(dbgout, "  code@LR:    %08x %08x %08x %08x\n", code[0], code[1], code[2], code[3]);
+      }
+      /* Dump stack memory from sp to x29+64 to find where the real frame is */
+      {
+        unsigned long sp_val = (unsigned long)xpSP(xp);
+        unsigned long fp_val = (unsigned long)xpFP(xp);
+        unsigned long dump_start = sp_val;
+        unsigned long dump_end = fp_val + 64;
+        if (dump_end > dump_start && (dump_end - dump_start) < 4096) {
+          fprintf(dbgout, "  stack dump sp=%016lx to fp+64=%016lx (%lu bytes):\n", dump_start, dump_end, dump_end - dump_start);
+          LispObj *p = (LispObj *)dump_start;
+          LispObj *end = (LispObj *)dump_end;
+          for (int si = 0; p < end && si < 128; p++, si++) {
+            unsigned long addr = (unsigned long)p;
+            /* Mark special addresses */
+            const char *mark = "";
+            if (addr == fp_val) mark = " <-- x29";
+            else if (addr == fp_val + 8) mark = " <-- x29+8(savelr)";
+            else if (addr == fp_val + 16) mark = " <-- x29+16(savefn)";
+            else if (addr == fp_val + 24) mark = " <-- x29+24(savefp)";
+            fprintf(dbgout, "    [%016lx] %016lx%s\n", addr, (unsigned long)*p, mark);
+          }
+        }
+      }
+      fflush(dbgout);
+    }
+    /* Skip HLT and continue */
+    adjust_exception_pc(xp, 4);
+    return true;
+  }
+
   /* TEMP DIAGNOSTIC: called-for-mv-p mismatch trap */
   if (HLT_IMM16(the_uuo) == 0x4242) {
     static int mv_diag_count = 0;
@@ -3506,7 +3611,7 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
                 LispObj *nfn_obj = (LispObj *)nfn_raw;
                 ep_raw = nfn_obj[0] & 0x00FFFFFFFFFFFFFF;  /* slot[0] = entrypoint */
               }
-              if (ep_raw == 0 || ep_raw > pc_raw) ep_raw = pc_raw - 32;
+              if (ep_raw == 0 || ep_raw > pc_raw) ep_raw = pc_raw - 512;
               int total_instrs = ((pc_raw - ep_raw) / 4) + 80;
               if (total_instrs > 300) total_instrs = 300;
               opcode *ep_code = (opcode *)ep_raw;
@@ -3519,6 +3624,36 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
                 fprintf(dbgout, "   %c[%+4d] 0x%lx: %08x\n", marker, (ci - crash_idx)*4,
                         (unsigned long)(ep_raw + ci*4), ep_code[ci]);
               }
+            }
+            /* Dump csp frame chain when nfn=0 */
+            if (nfn_tagged == 0) {
+              natural fp = ts->__fp;
+              fprintf(dbgout, "\n  CSP frame chain (nfn=0 diag): fp=0x%lx sp=0x%lx\n",
+                      (unsigned long)fp, (unsigned long)ts->__sp);
+              int fi;
+              for (fi = 0; fi < 10 && fp > 0x100000000ULL && fp < 0x800000000000ULL; fi++) {
+                LispObj *frame = (LispObj *)fp;
+                /* lisp_frame: [+0]=savevsp [+8]=savelr [+16]=savefn [+24]=savefp(x29) */
+                fprintf(dbgout, "    frame[%d] @0x%lx: savevsp=0x%lx savelr=0x%lx savefn=0x%lx next_fp=0x%lx\n",
+                        fi, (unsigned long)fp,
+                        (unsigned long)frame[0], (unsigned long)frame[1],
+                        (unsigned long)frame[2], (unsigned long)frame[3]);
+                natural next_fp = frame[3]; /* savefp = next frame pointer */
+                if (next_fp == 0 || next_fp == fp) break;
+                fp = next_fp;
+              }
+              /* Also dump code around MACH lr */
+              natural lr_raw = ts->__lr & 0x00FFFFFFFFFFFFFF;
+              if (lr_raw > 0x200000000ULL && lr_raw < 0x400000000000ULL) {
+                opcode *lr_code = (opcode *)lr_raw;
+                fprintf(dbgout, "  code around MACH LR=0x%lx:\n", (unsigned long)ts->__lr);
+                for (int ci = -16; ci <= 16; ci++) {
+                  fprintf(dbgout, "   %c[%+4d] 0x%lx: %08x\n",
+                          ci == 0 ? '>' : ' ', ci*4,
+                          (unsigned long)(lr_raw + ci*4), lr_code[ci]);
+                }
+              }
+              fflush(dbgout);
             }
             /* Dump macptr contents if x9 looks like a macptr */
             {
