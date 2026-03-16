@@ -407,6 +407,13 @@ _spentry(builtin_aset1)
 
 	/*  Call nfn if it's either a symbol or function */
 _spentry(funcall)
+        /* Bug 151 diag */
+        __(ldr imm0,[x29,#lisp_frame.savefn])
+        __(cbnz imm0,0f)
+        __(ldr imm0,[x29,#lisp_frame.savelr])
+        __(cbnz imm0,0f)
+        __(hlt #0xFFF3)
+0:
 	__(funcall_nfn())
 
 /* Subprims for catch, throw, unwind_protect.  */
@@ -448,6 +455,13 @@ _spentry(mkunwind)
 /* This never affects the symbol's vcell  */
 /* Non-null symbol in arg_y, new value in arg_z          */
 _spentry(bind)
+        /* Bug 151 diag */
+        __(ldr imm0,[x29,#lisp_frame.savefn])
+        __(cbnz imm0,0f)
+        __(ldr imm0,[x29,#lisp_frame.savelr])
+        __(cbnz imm0,0f)
+        __(hlt #0xFFF3)
+0:
 	__(ldr imm1,[arg_y,#symbol.binding_index])
 	/* Bug 124: binding-index is already a byte offset (fixnumshift=0, increment=8) */
 	__(ldr imm0,[rcontext,#tcr.tlb_limit])
@@ -870,6 +884,13 @@ C(egc_rplacd_did_store):
 	.globl C(egc_gvset)
         .globl C(egc_gvset_did_store)
 _spentry(gvset)
+        /* Bug 151 diag: verify caller's frame */
+        __(ldr imm0,[x29,#lisp_frame.savefn])
+        __(cbnz imm0,0f)
+        __(ldr imm0,[x29,#lisp_frame.savelr])
+        __(cbnz imm0,0f)
+        __(hlt #0xFFF3)
+0:
 C(egc_gvset):
         __(cmp arg_z,arg_x)
 	__(lsl imm0,arg_y,#word_shift)
@@ -1298,6 +1319,13 @@ stack_misc_alloc_no_room:
 /* objects.  */
 
 _spentry(gvector)
+        /* Bug 151 diag: verify caller's frame */
+        __(ldr imm0,[x29,#lisp_frame.savefn])
+        __(cbnz imm0,0f)
+        __(ldr imm0,[x29,#lisp_frame.savelr])
+        __(cbnz imm0,0f)
+        __(hlt #0xFFF3)
+0:
         __(sub nargs,nargs,#node_size)
         __(ldr arg_z,[vsp,nargs])
         __(unbox_fixnum(imm0,arg_z))
@@ -1309,6 +1337,13 @@ _spentry(gvector)
            before Misc_Alloc overwrites arg_z with the result pointer. */
         __(eor temp0,arg_z,#0xC0)
         __(Misc_Alloc(arg_z,imm0,imm1,temp0))
+        /* Bug 151 diag: check frame after allocation (alloc trap may have fired) */
+        __(ldr temp0,[x29,#lisp_frame.savefn])
+        __(cbnz temp0,8f)
+        __(ldr temp0,[x29,#lisp_frame.savelr])
+        __(cbnz temp0,8f)
+        __(hlt #0xFFF4)  /* frame zeroed AFTER Misc_Alloc in gvector */
+8:
         __(mov imm1,nargs)
         __(add imm2,imm1,#misc_data_offset)
         __(b 2f)
@@ -1321,6 +1356,13 @@ _spentry(gvector)
         __(vpop1(temp0))        /* Note the intentional fencepost: */
                                 /* discard the subtype as well.  */
         __(bge 1b)
+        /* Bug 151 diag: check frame before gvector returns */
+        __(ldr imm0,[x29,#lisp_frame.savefn])
+        __(cbnz imm0,9f)
+        __(ldr imm0,[x29,#lisp_frame.savelr])
+        __(cbnz imm0,9f)
+        __(hlt #0xFFF5)  /* frame zeroed at end of gvector data copy */
+9:
         __(ret)
 
 _spentry(fitvals)
@@ -1355,6 +1397,14 @@ _spentry(nthvalue)
 /* arguments.  nargs is preserved, all arguments wind up on the  */
 /* vstack.  */
 _spentry(default_optional_args)
+        /* Bug 151 diag: verify caller's frame at x29 is intact */
+        __(ldr imm2,[x29,#lisp_frame.savefn])
+        __(cbnz imm2,0f)
+        __(ldr imm2,[x29,#lisp_frame.savelr])
+        __(cbnz imm2,0f)
+        /* Both savefn and savelr are 0 — frame is zeroed! */
+        __(hlt #0xFFF3)
+0:
         __(vpush_argregs())
         __(cmp nargs,imm0)
         __(mov arg_z,rnil)
@@ -1389,6 +1439,13 @@ _spentry(opt_supplied_p)
 /* Cons a list of length nargs  and vpush it.  */
 /* Use this entry point to heap-cons a simple &rest arg.  */
 _spentry(heap_rest_arg)
+        /* Bug 151 diag: verify caller's frame at x29 is intact */
+        __(ldr imm2,[x29,#lisp_frame.savefn])
+        __(cbnz imm2,0f)
+        __(ldr imm2,[x29,#lisp_frame.savelr])
+        __(cbnz imm2,0f)
+        __(hlt #0xFFF3)  /* frame zeroed at heap_rest_arg entry */
+0:
         __(vpush_argregs())
         __(mov imm1,nargs)
         __(mov arg_z,rnil)

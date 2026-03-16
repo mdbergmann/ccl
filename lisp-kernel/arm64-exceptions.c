@@ -1988,6 +1988,31 @@ handle_uuo(ExceptionInformation *xp, siginfo_t *info, opcode the_uuo)
       fprintf(dbgout, "  LR=%016lx x29=%016lx sp=%016lx nfn=%016lx\n",
               (unsigned long)xpLR(xp), (unsigned long)xpFP(xp), (unsigned long)xpSP(xp),
               (unsigned long)xpGPR(xp, 10));
+      /* Check TCR state */
+      {
+        TCR *tcr = (TCR *)(natural)xpGPR(xp, 28);  /* x28 = rcontext */
+        if (tcr && (natural)tcr > 0x100000000ULL) {
+          fprintf(dbgout, "  TCR: last_lisp_frame=%016lx cs_area=[%016lx..%016lx] valence=%d\n",
+                  (unsigned long)(natural)tcr->last_lisp_frame,
+                  (unsigned long)(natural)(tcr->cs_area ? tcr->cs_area->low : 0),
+                  (unsigned long)(natural)(tcr->cs_area ? tcr->cs_area->high : 0),
+                  tcr->valence);
+        }
+      }
+      /* Dump raw memory at x29 and 256 bytes above it */
+      {
+        unsigned long fp_val = (unsigned long)xpFP(xp);
+        fprintf(dbgout, "  raw memory at x29=%016lx (256 bytes above):\n", fp_val);
+        LispObj *p = (LispObj *)fp_val;
+        for (int i = 0; i < 32; i++) {
+          fprintf(dbgout, "    [x29+%3d] %016lx", i*8, (unsigned long)p[i]);
+          if (i < 4) {
+            const char *names[] = {"savevsp", "savelr", "savefn", "savefp"};
+            fprintf(dbgout, " (%s)", names[i]);
+          }
+          fprintf(dbgout, "\n");
+        }
+      }
       /* Walk frame chain from x29 */
       LispObj *fp = (LispObj *)xpFP(xp);
       for (int fi = 0; fi < 8 && (natural)fp > 0x100000000LL && (natural)fp < 0x800000000000LL; fi++) {
@@ -2025,39 +2050,152 @@ handle_uuo(ExceptionInformation *xp, siginfo_t *info, opcode the_uuo)
         }
         fp = (LispObj *)(natural)fp[3];
       }
-      /* Also print the caller's code around LR */
+      /* Scan code backwards from LR to find save-lisp-context-vsp prologue.
+         Pattern: stp x25,x30,[sp,#-32]! = a9be7bf9
+                  stp x10,x29,[sp,#16]   = a90177ea
+                  add x29,sp,#0          = 910003fd */
       unsigned long lr = (unsigned long)xpLR(xp);
       fprintf(dbgout, "  caller LR=%016lx\n", lr);
       if (lr > 0x300000000000ULL && lr < 0x400000000000ULL) {
         uint32_t *code = (uint32_t *)lr;
-        fprintf(dbgout, "  code@LR-16: %08x %08x %08x %08x\n", code[-4], code[-3], code[-2], code[-1]);
-        fprintf(dbgout, "  code@LR:    %08x %08x %08x %08x\n", code[0], code[1], code[2], code[3]);
-      }
-      /* Dump stack memory from sp to x29+64 to find where the real frame is */
-      {
-        unsigned long sp_val = (unsigned long)xpSP(xp);
-        unsigned long fp_val = (unsigned long)xpFP(xp);
-        unsigned long dump_start = sp_val;
-        unsigned long dump_end = fp_val + 64;
-        if (dump_end > dump_start && (dump_end - dump_start) < 4096) {
-          fprintf(dbgout, "  stack dump sp=%016lx to fp+64=%016lx (%lu bytes):\n", dump_start, dump_end, dump_end - dump_start);
-          LispObj *p = (LispObj *)dump_start;
-          LispObj *end = (LispObj *)dump_end;
-          for (int si = 0; p < end && si < 128; p++, si++) {
-            unsigned long addr = (unsigned long)p;
-            /* Mark special addresses */
-            const char *mark = "";
-            if (addr == fp_val) mark = " <-- x29";
-            else if (addr == fp_val + 8) mark = " <-- x29+8(savelr)";
-            else if (addr == fp_val + 16) mark = " <-- x29+16(savefn)";
-            else if (addr == fp_val + 24) mark = " <-- x29+24(savefp)";
-            fprintf(dbgout, "    [%016lx] %016lx%s\n", addr, (unsigned long)*p, mark);
+        /* Search backward up to 4KB for save-lisp-context-vsp */
+        int found_slcv = 0;
+        for (int si = -1; si > -1024; si--) {
+          if (code[si] == 0xa9be7bf9 &&  /* stp x25,x30,[sp,#-32]! */
+              code[si+1] == 0xa90177ea && /* stp x10,x29,[sp,#16] */
+              code[si+2] == 0x910003fd) { /* add x29,sp,#0 */
+            fprintf(dbgout, "  FOUND save-lisp-context-vsp at LR%+d = 0x%lx\n",
+                    si*4, (unsigned long)(lr + si*4));
+            /* Dump from slcv to 80 instructions forward (covering code to first reload-self) */
+            for (int di = si-4; di <= si+80 && di < 0; di++) {
+              const char *mark = "";
+              if (di == si) mark = " <-- save-lisp-context-vsp";
+              if (code[di] == 0xf9400baa) mark = " <-- reload-self";
+              if ((code[di] & 0xFFE0001F) == 0xF9400000 && ((code[di] >> 5) & 0x1F) == 10)
+                mark = " <-- load from nfn";
+              fprintf(dbgout, "    [%+5d] 0x%lx: %08x%s\n",
+                      di*4, (unsigned long)(lr + di*4), code[di], mark);
+            }
+            found_slcv = 1;
+            break;
           }
+        }
+        if (!found_slcv) {
+          fprintf(dbgout, "  NO save-lisp-context-vsp found in 4KB before LR!\n");
+          /* Also search for the variant with imm0 (stp x0,x30,...) */
+          for (int si = -1; si > -1024; si--) {
+            if (code[si] == 0xa9be7be0 &&  /* stp x0,x30,[sp,#-32]! */
+                code[si+1] == 0xa90177ea && /* stp x10,x29,[sp,#16] */
+                code[si+2] == 0x910003fd) { /* add x29,sp,#0 */
+              fprintf(dbgout, "  FOUND save-lisp-context-offset(x0) at LR%+d = 0x%lx\n",
+                      si*4, (unsigned long)(lr + si*4));
+              for (int di = si-8; di <= si+4; di++) {
+                fprintf(dbgout, "    [%+5d] 0x%lx: %08x\n",
+                        di*4, (unsigned long)(lr + di*4), code[di]);
+              }
+              break;
+            }
+          }
+        }
+        /* Also dump 16 instructions before and 8 after LR for context */
+        fprintf(dbgout, "  code around LR (32 instrs before, 8 after):\n");
+        for (int ci = -32; ci <= 8; ci++) {
+          fprintf(dbgout, "    [%+4d] 0x%lx: %08x%s\n",
+                  ci*4, (unsigned long)(lr + ci*4), code[ci],
+                  ci == 0 ? " <-- LR" : "");
+        }
+      }
+      /* Scan stack ABOVE x29 for valid frames (non-zero savelr in readonly range) */
+      {
+        unsigned long fp_val = (unsigned long)xpFP(xp);
+        fprintf(dbgout, "  scanning stack above x29=0x%lx for valid frames:\n", fp_val);
+        LispObj *p = (LispObj *)(fp_val + 32);  /* start above zeroed frame */
+        LispObj *limit = (LispObj *)(fp_val + 4096);  /* scan 4KB up */
+        int found_frames = 0;
+        for (; p < limit && found_frames < 5; p++) {
+          /* Look for valid savelr (in readonly code area 0x300000xxxxxx) */
+          unsigned long val = (unsigned long)*p;
+          if ((val >> 40) == 0x3000 && (val & 3) == 0) {
+            /* Possible savelr — check surrounding slots for frame-like pattern */
+            LispObj *candidate = p - 1;  /* savevsp would be before savelr */
+            unsigned long savevsp = (unsigned long)candidate[0];
+            unsigned long savelr = (unsigned long)candidate[1];
+            unsigned long savefn = (unsigned long)candidate[2];
+            unsigned long savefp = (unsigned long)candidate[3];
+            /* Valid frame: savevsp looks like a vsp, savefp looks like cstack addr */
+            if (savelr == val && savefp > 0x100000000ULL && savefp < 0x800000000000ULL) {
+              fprintf(dbgout, "    possible frame at 0x%lx: savevsp=%016lx savelr=%016lx savefn=%016lx savefp=%016lx\n",
+                      (unsigned long)candidate, savevsp, savelr, savefn, savefp);
+              found_frames++;
+            }
+          }
+        }
+        if (!found_frames) {
+          fprintf(dbgout, "    no valid frames found in 4KB above x29\n");
         }
       }
       fflush(dbgout);
     }
     /* Skip HLT and continue */
+    adjust_exception_pc(xp, 4);
+    return true;
+  }
+
+  /* Bug 151 diag: frame zeroed at end of gvector */
+  if (HLT_IMM16(the_uuo) == 0xFFF5) {
+    fprintf(dbgout, "\n  *** BUG151: FRAME ZEROED AT END OF SPgvector (data copy) ***\n");
+    fprintf(dbgout, "  LR=%016lx x29=%016lx sp=%016lx arg_z=%016lx nargs=%016lx\n",
+            (unsigned long)xpLR(xp), (unsigned long)xpFP(xp), (unsigned long)xpSP(xp),
+            (unsigned long)xpGPR(xp, 15), (unsigned long)xpGPR(xp, 5));
+    LispObj *fp = (LispObj *)xpFP(xp);
+    for (int i = -4; i < 8; i++) {
+      fprintf(dbgout, "  [x29%+3d] %016lx\n", i*8, (unsigned long)fp[i]);
+    }
+    fflush(dbgout);
+    adjust_exception_pc(xp, 4);
+    return true;
+  }
+
+  /* Bug 151 diag: frame zeroed after Misc_Alloc in gvector */
+  if (HLT_IMM16(the_uuo) == 0xFFF4) {
+    fprintf(dbgout, "\n  *** BUG151: FRAME ZEROED AFTER Misc_Alloc IN SPgvector ***\n");
+    fprintf(dbgout, "  PC=%016lx LR=%016lx x29=%016lx sp=%016lx nfn=%016lx allocptr=%016lx\n",
+            (unsigned long)(natural)xpPC(xp), (unsigned long)xpLR(xp),
+            (unsigned long)xpFP(xp), (unsigned long)xpSP(xp),
+            (unsigned long)xpGPR(xp, 10), (unsigned long)xpGPR(xp, 26));
+    LispObj *fp = (LispObj *)xpFP(xp);
+    for (int i = -4; i < 8; i++) {
+      fprintf(dbgout, "  [x29%+3d] %016lx\n", i*8, (unsigned long)fp[i]);
+    }
+    fflush(dbgout);
+    adjust_exception_pc(xp, 4);
+    return true;
+  }
+
+  /* Bug 151 diag: frame zeroed at subprim entry */
+  if (HLT_IMM16(the_uuo) == 0xFFF3) {
+    static int fps_count = 0;
+    fps_count++;
+    if (fps_count <= 3) {
+      fprintf(dbgout, "\n  *** BUG151: FRAME ZEROED AT SUBPRIM ENTRY #%d ***\n", fps_count);
+      fprintf(dbgout, "  PC=%016lx LR=%016lx x29=%016lx sp=%016lx nfn=%016lx\n",
+              (unsigned long)(natural)xpPC(xp), (unsigned long)xpLR(xp),
+              (unsigned long)xpFP(xp), (unsigned long)xpSP(xp),
+              (unsigned long)xpGPR(xp, 10));
+      LispObj *fp = (LispObj *)xpFP(xp);
+      fprintf(dbgout, "  frame: [%016lx %016lx %016lx %016lx]\n",
+              (unsigned long)fp[0], (unsigned long)fp[1],
+              (unsigned long)fp[2], (unsigned long)fp[3]);
+      /* Dump 8 words below and above x29 */
+      for (int i = -8; i < 8; i++) {
+        fprintf(dbgout, "  [x29%+3d] %016lx%s\n", i*8, (unsigned long)fp[i],
+                i == 0 ? " <-- x29+0(savevsp)" :
+                i == 1 ? " (savelr)" :
+                i == 2 ? " (savefn)" :
+                i == 3 ? " (savefp)" : "");
+      }
+      fflush(dbgout);
+    }
     adjust_exception_pc(xp, 4);
     return true;
   }
@@ -3299,6 +3437,33 @@ create_thread_context_frame(mach_port_t thread,
                    (thread_state_t)&(mc->__es),
                    &thread_state_count);
 
+  /* Bug 151 diag: check if context frame overlaps with x29's frame */
+  {
+    static int ctx_dbg = 0;
+    natural frame_low = stackp;
+    natural frame_high = (natural)find_foreign_rsp(ts->__sp, tcr->cs_area, tcr);
+    natural fp_val = ts->__fp;
+    if (ctx_dbg < 5 || (fp_val >= frame_low && fp_val < frame_high + 256)) {
+      ctx_dbg++;
+      fprintf(dbgout, "CTX[%d]: sp=0x%lx fp=0x%lx ctx=[0x%lx..0x%lx] (%lu bytes)",
+              ctx_dbg, (unsigned long)ts->__sp, (unsigned long)fp_val,
+              (unsigned long)frame_low, (unsigned long)frame_high,
+              (unsigned long)(frame_high - frame_low));
+      if (fp_val >= frame_low && fp_val < frame_high + 256) {
+        fprintf(dbgout, " *** OVERLAP/NEAR fp! ***");
+      }
+      fprintf(dbgout, "\n");
+      /* Verify lisp frame at fp is intact */
+      if (fp_val > 0x100000000ULL && fp_val < 0x800000000000ULL) {
+        LispObj *fr = (LispObj *)fp_val;
+        fprintf(dbgout, "  fp frame: savevsp=%016lx savelr=%016lx savefn=%016lx savefp=%016lx\n",
+                (unsigned long)fr[0], (unsigned long)fr[1],
+                (unsigned long)fr[2], (unsigned long)fr[3]);
+      }
+      fflush(dbgout);
+    }
+  }
+
   UC_MCONTEXT(pseudosigcontext) = mc;
   if (new_stack_top) {
     *new_stack_top = stackp;
@@ -3397,6 +3562,67 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
 
   if (tcr->flags & (1<<TCR_FLAG_BIT_PENDING_EXCEPTION)) {
     CLR_TCR_FLAG(tcr, TCR_FLAG_BIT_PENDING_EXCEPTION);
+  }
+
+  /* Bug 151 frame integrity monitor: track when the frame at fp gets corrupted.
+     Watch fp values and check if frame content changes between exceptions. */
+  {
+    static natural watched_fp = 0;
+    static int watch_phase = 0;  /* 0=looking for fp, 1=monitoring */
+    static int monitor_count = 0;
+    natural fp = ts->__fp;
+
+    if (watch_phase == 0 && fp > 0x100000000ULL && fp < 0x800000000000ULL) {
+      /* First valid fp seen — start watching it */
+      watched_fp = fp;
+      watch_phase = 1;
+      LispObj *fr = (LispObj *)fp;
+      fprintf(dbgout, "FMON: start watching fp=0x%lx: [%016lx %016lx %016lx %016lx]\n",
+              (unsigned long)fp, (unsigned long)fr[0], (unsigned long)fr[1],
+              (unsigned long)fr[2], (unsigned long)fr[3]);
+      fflush(dbgout);
+    }
+    if (watch_phase == 1 && monitor_count < 100) {
+      monitor_count++;
+      LispObj *fr = (LispObj *)watched_fp;
+      /* Check if the watched frame still has valid data */
+      if (fr[0] == 0 && fr[1] == 0 && fr[2] == 0 && fr[3] == 0) {
+        fprintf(dbgout, "FMON[%d]: *** FRAME ZEROED! *** watched_fp=0x%lx curr_fp=0x%lx pc=0x%lx exc=%d\n",
+                monitor_count, (unsigned long)watched_fp, (unsigned long)fp,
+                (unsigned long)ts->__pc, exception);
+        fprintf(dbgout, "  sp=0x%lx lr=0x%lx x10=0x%lx\n",
+                (unsigned long)ts->__sp, (unsigned long)ts->__lr,
+                (unsigned long)ts->__x[10]);
+        /* Dump 16 words at and above watched_fp */
+        for (int i = -4; i < 12; i++) {
+          fprintf(dbgout, "  [fp%+3d] %016lx\n", i*8, (unsigned long)fr[i]);
+        }
+        fflush(dbgout);
+        watch_phase = 2;  /* stop monitoring */
+      } else {
+        /* Frame still valid — print current state */
+        if (monitor_count <= 20 || fp != watched_fp) {
+          fprintf(dbgout, "FMON[%d]: fp=0x%lx watched=0x%lx savefn=%016lx OK (exc=%d pc=0x%lx)\n",
+                  monitor_count, (unsigned long)fp, (unsigned long)watched_fp,
+                  (unsigned long)fr[2], exception, (unsigned long)ts->__pc);
+          fflush(dbgout);
+        }
+        /* If fp changed (deeper call), update watch to new fp if it chains back */
+        if (fp != watched_fp && fp > 0x100000000ULL && fp < 0x800000000000ULL) {
+          LispObj *new_fr = (LispObj *)fp;
+          natural savefp = (natural)new_fr[3];
+          if (savefp == watched_fp) {
+            /* New frame chains to our watched frame — keep watching original */
+          } else {
+            /* Different chain — update watch */
+            watched_fp = fp;
+            fprintf(dbgout, "FMON[%d]: updated watch to fp=0x%lx savefn=%016lx\n",
+                    monitor_count, (unsigned long)fp, (unsigned long)new_fr[2]);
+            fflush(dbgout);
+          }
+        }
+      }
+    }
   }
 
   /* Check for pseudo-sigreturn: HLT generates EXC_BAD_INSTRUCTION on ARM64.
