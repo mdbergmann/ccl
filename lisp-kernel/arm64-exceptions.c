@@ -46,6 +46,11 @@ extern void pseudo_sigreturn(ExceptionInformation *);
 
 #include "threads.h"
 
+/* Bug 156: global scratch for SPgvector exit → SPgvset entry cross-check.
+   These must be global (not TCR) because exception handling clobbers TCR fields. */
+volatile natural bug156_saved_savefn = 0xBAD156;
+volatile natural bug156_saved_x29 = 0xBAD156;
+
 /* Debug: called from assembly when catch_top is about to change */
 void
 debug_catch_top_change(natural old_val, natural new_val, natural lr)
@@ -3463,14 +3468,15 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
     static int initfn_dumped = 0;
     if (dbg_exc_count < 50) {
       dbg_exc_count++;
-      fprintf(dbgout, "MACH[%d]: exc=%d code0=%lld pc=0x%lx lr=0x%lx vsp=0x%lx rnil=0x%lx rt=0x%lx fp=0x%lx catch_top=0x%lx allocptr=0x%lx",
+      fprintf(dbgout, "MACH[%d]: exc=%d code0=%lld pc=0x%lx lr=0x%lx vsp=0x%lx rnil=0x%lx rt=0x%lx fp=0x%lx catch_top=0x%lx allocptr=0x%lx x10=0x%lx",
               dbg_exc_count, exception, (long long)code0,
               (unsigned long)ts->__pc, (unsigned long)ts->__lr,
               (unsigned long)ts->__x[25],
               (unsigned long)ts->__x[6], (unsigned long)ts->__x[7],
               (unsigned long)ts->__fp,
               (unsigned long)(natural)tcr->catch_top,
-              (unsigned long)ts->__x[26]);
+              (unsigned long)ts->__x[26],
+              (unsigned long)ts->__x[10]);
       /* Check for allocptr contamination */
       if ((ts->__x[26] >> 56) != 0 && ts->__x[26] != (natural)VOID_ALLOCPTR) {
         fprintf(dbgout, "\n  *** ALLOCPTR CONTAMINATED: tag=0x%02lx ***",
@@ -3809,6 +3815,34 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
       fflush(dbgout);
     }
   }
+  /* Bug 157: check frame savefn after EVERY exception to detect corruption.
+     If [fp+16] (savefn) doesn't have function tag 0x62, the frame is corrupted. */
+  {
+    natural fp_val = ts->__fp;
+    if (fp_val > 0x100000000ULL && fp_val < 0x800000000000ULL) {
+      natural savefn = *(natural *)(fp_val + 16);
+      natural savefn_tag = savefn >> 56;
+      if (savefn_tag != 0x62 && savefn_tag != 0x00 && savefn != 0) {
+        static int framechk_count = 0;
+        if (framechk_count < 5) {
+          framechk_count++;
+          fprintf(dbgout, "\n  *** BUG157: FRAME SAVEFN CORRUPT! fp=0x%lx savefn=0x%lx tag=0x%02lx nfn=0x%lx pc=0x%lx lr=0x%lx ***\n",
+                  (unsigned long)fp_val, (unsigned long)savefn,
+                  (unsigned long)savefn_tag,
+                  (unsigned long)ts->__x[10],
+                  (unsigned long)ts->__pc, (unsigned long)ts->__lr);
+          /* Also dump what x10 (nfn register) currently holds */
+          fprintf(dbgout, "  x10_tag=0x%02lx frame[0-3]: 0x%lx 0x%lx 0x%lx 0x%lx\n",
+                  (unsigned long)(ts->__x[10] >> 56),
+                  (unsigned long)*(natural *)(fp_val),
+                  (unsigned long)*(natural *)(fp_val + 8),
+                  (unsigned long)*(natural *)(fp_val + 16),
+                  (unsigned long)*(natural *)(fp_val + 24));
+          fflush(dbgout);
+        }
+      }
+    }
+  }
   /* Debug: fatal trap for nthrow with NULL catch_top (HLT #0xFFFC) */
   if (exception == EXC_BAD_INSTRUCTION) {
     natural pc = ts->__pc;
@@ -3818,6 +3852,383 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
       fprintf(dbgout, "FATAL: nthrow with NULL catch_top pc=0x%lx lr=0x%lx temp2(x10)=0x%lx sp=0x%lx\n",
               (unsigned long)pc, (unsigned long)ts->__lr,
               (unsigned long)ts->__x[10], (unsigned long)ts->__sp);
+      fflush(dbgout);
+      _exit(1);
+    }
+    if (imm16 == 0xFFE9) {
+      /* Bug 156: SP is above x29 at SPstack_misc_alloc entry!
+         The zeroing loop will overwrite the lisp frame. */
+      fprintf(dbgout, "BUG156-ROOT: SP > x29 at stack_misc_alloc entry!\n");
+      fprintf(dbgout, "  sp=0x%lx x29=0x%lx delta=%ld lr=0x%lx pc=0x%lx\n",
+              (unsigned long)ts->__sp, (unsigned long)ts->__fp,
+              (long)((natural)ts->__sp - (natural)ts->__fp),
+              (unsigned long)ts->__lr, (unsigned long)ts->__pc);
+      fprintf(dbgout, "  arg_y(count)=0x%lx arg_z(subtag)=0x%lx nfn=0x%lx\n",
+              (unsigned long)ts->__x[14], (unsigned long)ts->__x[15],
+              (unsigned long)ts->__x[10]);
+      /* Dump frame to verify it's still intact */
+      {
+        natural fp_val = (natural)ts->__fp;
+        if (fp_val > 0x100000000ULL && fp_val < 0x200000000ULL) {
+          LispObj *f = (LispObj *)fp_val;
+          fprintf(dbgout, "  frame (still intact!): savevsp=0x%lx savelr=0x%lx savefn=0x%lx savefp=0x%lx\n",
+                  (unsigned long)f[0], (unsigned long)f[1],
+                  (unsigned long)f[2], (unsigned long)f[3]);
+        }
+      }
+      /* Dump a few words at SP to see what's there */
+      {
+        natural sp_val = (natural)ts->__sp;
+        if (sp_val > 0x100000000ULL && sp_val < 0x200000000ULL) {
+          LispObj *s = (LispObj *)sp_val;
+          fprintf(dbgout, "  at SP: [0]=0x%lx [1]=0x%lx [2]=0x%lx [3]=0x%lx\n",
+                  (unsigned long)s[0], (unsigned long)s[1],
+                  (unsigned long)s[2], (unsigned long)s[3]);
+        }
+      }
+      /* Identify the callee that corrupted SP.
+         At call time: x9 = [nfn+0x48], x10 = [x9+0x10], x30 = [x10+0], blr x30.
+         Follow the chain from nfn. Strip TBI (upper byte) only; keep low tag bits
+         since ldr offsets are relative to the tagged pointer. */
+      {
+        natural nfn_raw = (natural)ts->__x[10] & 0x00FFFFFFFFFFFFFFULL;
+        fprintf(dbgout, "  nfn_raw=0x%lx\n", (unsigned long)nfn_raw);
+        if (nfn_raw > 0x100000000ULL) {
+          LispObj const_slot = *(LispObj *)(nfn_raw + 0x48);
+          natural x9_val = const_slot & 0x00FFFFFFFFFFFFFFULL;
+          fprintf(dbgout, "  const@nfn+0x48=0x%lx (x9 raw=0x%lx)\n",
+                  (unsigned long)const_slot, (unsigned long)x9_val);
+          if (x9_val > 0x100000000ULL) {
+            LispObj callee_nfn_tagged = *(LispObj *)(x9_val + 0x10);
+            natural callee_nfn_raw = callee_nfn_tagged & 0x00FFFFFFFFFFFFFFULL;
+            fprintf(dbgout, "  [x9+0x10]=0x%lx (callee_nfn raw=0x%lx)\n",
+                    (unsigned long)callee_nfn_tagged, (unsigned long)callee_nfn_raw);
+            if (callee_nfn_raw > 0x100000000ULL) {
+              LispObj entrypoint = *(LispObj *)(callee_nfn_raw);
+              natural ep_raw = entrypoint & 0x00FFFFFFFFFFFFFFULL;
+              fprintf(dbgout, "  [callee_nfn]=0x%lx (entrypoint raw=0x%lx)\n",
+                      (unsigned long)entrypoint, (unsigned long)ep_raw);
+              /* Dump callee's code */
+              if (ep_raw > 0x100000000ULL) {
+                unsigned int *callee_code = (unsigned int *)ep_raw;
+                fprintf(dbgout, "  Callee code at 0x%lx:\n", (unsigned long)ep_raw);
+                int ci;
+                for (ci = 0; ci < 32; ci++) {
+                  fprintf(dbgout, "    [0x%lx]: 0x%08x\n",
+                          (unsigned long)(ep_raw + ci * 4), callee_code[ci]);
+                }
+              }
+            }
+          }
+          /* Also dump a few words of nfn to see constant layout */
+          fprintf(dbgout, "  nfn slots (raw hex):\n");
+          int si;
+          for (si = 0; si < 12; si++) {
+            LispObj slot = *(LispObj *)(nfn_raw + si * 8);
+            fprintf(dbgout, "    [nfn+0x%02x]=0x%lx\n", si * 8, (unsigned long)slot);
+          }
+        }
+      }
+      fflush(dbgout);
+      _exit(1);
+    }
+    if (imm16 == 0xFFEB) {
+      /* Bug 156 cross-check: savefn=0 at SPgvset entry.
+         Global variables have the savefn + x29 saved at SPgvector exit. */
+      natural fp_eb = (natural)ts->__fp;
+      natural saved_savefn = bug156_saved_savefn;
+      natural saved_x29 = bug156_saved_x29;
+      fprintf(dbgout, "BUG156-GVSET-XCHK: savefn=0 at gvset entry!\n");
+      fprintf(dbgout, "  current: x29=0x%lx lr=0x%lx sp=0x%lx pc=0x%lx\n",
+              (unsigned long)fp_eb, (unsigned long)ts->__lr,
+              (unsigned long)ts->__sp, (unsigned long)ts->__pc);
+      fprintf(dbgout, "  saved@gvector_exit: savefn=0x%lx x29=0x%lx same_frame=%d\n",
+              (unsigned long)saved_savefn, (unsigned long)saved_x29,
+              (int)(saved_x29 == fp_eb));
+      /* Also check TCR.nfp marker from SPgvector entry */
+      fprintf(dbgout, "  tcr.nfp(gvector_entry_marker)=0x%lx\n",
+              (unsigned long)tcr->nfp);
+      if (fp_eb > 0x100000000ULL && fp_eb < 0x200000000ULL) {
+        LispObj *f = (LispObj *)fp_eb;
+        fprintf(dbgout, "  frame NOW: savevsp=0x%lx savelr=0x%lx savefn=0x%lx savefp=0x%lx\n",
+                (unsigned long)f[0], (unsigned long)f[1],
+                (unsigned long)f[2], (unsigned long)f[3]);
+        /* Check wider memory around frame */
+        fprintf(dbgout, "  Memory dump x29-0x80 to x29+0x40:\n");
+        LispObj *base = (LispObj *)(fp_eb - 0x80);
+        int mi;
+        for (mi = 0; mi < 24; mi++) {
+          natural addr = fp_eb - 0x80 + mi * 8;
+          fprintf(dbgout, "    [0x%lx] = 0x%016lx%s\n",
+                  (unsigned long)addr, (unsigned long)base[mi],
+                  (addr == fp_eb) ? " <- x29 (savevsp)" :
+                  (addr == fp_eb + 8) ? " <- savelr" :
+                  (addr == fp_eb + 16) ? " <- savefn" :
+                  (addr == fp_eb + 24) ? " <- savefp" : "");
+        }
+      }
+      /* Also show page info */
+      natural page_of_frame = fp_eb & ~(natural)0x3FFF;
+      fprintf(dbgout, "  page: 0x%lx offset_in_page=0x%lx\n",
+              (unsigned long)page_of_frame, (unsigned long)(fp_eb & 0x3FFF));
+      /* Dump instructions at caller — wide range to see branches */
+      {
+        natural lr_val = (natural)ts->__lr;
+        natural lr_raw = lr_val & 0x00FFFFFFFFFFFFFFULL;
+        /* Dump from lr-0x200 to lr+0x200 to see full function including cleanup */
+        fprintf(dbgout, "  Instructions lr-0x200 to lr+0x200 (lr=0x%lx):\n",
+                (unsigned long)lr_raw);
+        if (lr_raw > 0x200 && lr_raw < 0x400000000000ULL) {
+          unsigned int *code = (unsigned int *)(lr_raw - 0x200);
+          int ci;
+          for (ci = 0; ci < 256; ci++) {
+            natural code_addr = lr_raw - 0x200 + ci * 4;
+            unsigned int insn = code[ci];
+            /* Decode branch targets for B/BL/B.cond instructions */
+            char branch_info[64] = "";
+            if ((insn & 0xFC000000) == 0x14000000) {
+              /* B: bits[25:0] is signed offset in instructions */
+              int offset = (insn & 0x03FFFFFF);
+              if (offset & 0x02000000) offset |= 0xFC000000; /* sign extend */
+              natural target = code_addr + (long)offset * 4;
+              snprintf(branch_info, sizeof(branch_info), " -> 0x%lx", (unsigned long)target);
+            } else if ((insn & 0xFF000010) == 0x54000000) {
+              /* B.cond: bits[23:5] is signed offset in instructions */
+              int offset = (insn >> 5) & 0x7FFFF;
+              if (offset & 0x40000) offset |= 0xFFF80000; /* sign extend */
+              natural target = code_addr + (long)offset * 4;
+              snprintf(branch_info, sizeof(branch_info), " -> 0x%lx", (unsigned long)target);
+            } else if ((insn & 0x7F000000) == 0x35000000 || (insn & 0x7F000000) == 0x34000000) {
+              /* CBZ/CBNZ: bits[23:5] is signed offset */
+              int offset = (insn >> 5) & 0x7FFFF;
+              if (offset & 0x40000) offset |= 0xFFF80000;
+              natural target = code_addr + (long)offset * 4;
+              snprintf(branch_info, sizeof(branch_info), " -> 0x%lx", (unsigned long)target);
+            } else if ((insn & 0x7F000000) == 0x37000000 || (insn & 0x7F000000) == 0x36000000) {
+              /* TBZ/TBNZ: bits[18:5] is signed offset */
+              int offset = (insn >> 5) & 0x3FFF;
+              if (offset & 0x2000) offset |= 0xFFFFC000;
+              natural target = code_addr + (long)offset * 4;
+              snprintf(branch_info, sizeof(branch_info), " -> 0x%lx", (unsigned long)target);
+            }
+            fprintf(dbgout, "    [0x%lx]: 0x%08x%s%s\n",
+                    (unsigned long)code_addr, insn,
+                    (code_addr == lr_raw) ? " <- lr" :
+                    (code_addr == lr_raw - 4) ? " <- blr to SPgvset" : "",
+                    branch_info);
+          }
+        }
+      }
+      /* Dump wider stack: from sp to x29+0x40 */
+      if (fp_eb > 0x100000000ULL && fp_eb < 0x200000000ULL) {
+        natural sp_val = (natural)ts->__sp;
+        fprintf(dbgout, "  Full stack sp(0x%lx) to x29+0x40:\n", (unsigned long)sp_val);
+        /* Start from sp, dump every 32 bytes until x29+0x40 */
+        natural start = sp_val;
+        natural end = fp_eb + 0x40;
+        int count = 0;
+        natural addr;
+        for (addr = start; addr < end && count < 128; addr += 8, count++) {
+          LispObj val = *(LispObj *)addr;
+          int is_zero = (val == 0);
+          /* Only print non-zero entries and boundary markers to keep output manageable */
+          if (!is_zero || addr == sp_val || addr == fp_eb ||
+              addr == fp_eb + 8 || addr == fp_eb + 16 || addr == fp_eb + 24) {
+            fprintf(dbgout, "    [0x%lx] = 0x%016lx%s\n",
+                    (unsigned long)addr, (unsigned long)val,
+                    (addr == sp_val) ? " <- sp" :
+                    (addr == fp_eb) ? " <- x29 (savevsp)" :
+                    (addr == fp_eb + 8) ? " <- savelr" :
+                    (addr == fp_eb + 16) ? " <- savefn" :
+                    (addr == fp_eb + 24) ? " <- savefp" : "");
+          }
+        }
+        /* Count total zero bytes between sp and x29 */
+        int zero_count = 0;
+        for (addr = sp_val; addr < fp_eb + 32; addr += 8) {
+          if (*(LispObj *)addr == 0) zero_count++;
+        }
+        fprintf(dbgout, "  Zero 8-byte words from sp to x29+32: %d out of %d\n",
+                zero_count, (int)((fp_eb + 32 - sp_val) / 8));
+      }
+      fflush(dbgout);
+      _exit(1);
+    }
+    if (imm16 == 0xFFED) {
+      natural fp_ed = (natural)ts->__fp;
+      fprintf(dbgout, "BUG156-GVEXIT: savefn zeroed DURING SPgvector! pc=0x%lx lr=0x%lx x29=0x%lx sp=0x%lx arg_z=0x%lx\n",
+              (unsigned long)ts->__pc, (unsigned long)ts->__lr,
+              (unsigned long)fp_ed, (unsigned long)ts->__sp,
+              (unsigned long)ts->__x[15]);
+      if (fp_ed > 0x100000000ULL && fp_ed < 0x200000000ULL) {
+        LispObj *f = (LispObj *)fp_ed;
+        fprintf(dbgout, "  frame: savevsp=0x%lx savelr=0x%lx savefn=0x%lx savefp=0x%lx\n",
+                (unsigned long)f[0], (unsigned long)f[1],
+                (unsigned long)f[2], (unsigned long)f[3]);
+        fprintf(dbgout, "  Memory dump from x29-0x40:\n");
+        LispObj *base = (LispObj *)(fp_ed - 0x40);
+        int mi;
+        for (mi = 0; mi < 16; mi++) {
+          fprintf(dbgout, "    [x29%+5d]=0x%016lx%s\n",
+                  (mi - 8) * 8, (unsigned long)base[mi],
+                  (mi == 8) ? " <- savevsp" :
+                  (mi == 9) ? " <- savelr" :
+                  (mi == 10) ? " <- savefn" :
+                  (mi == 11) ? " <- savefp" : "");
+        }
+      }
+      fflush(dbgout);
+      _exit(1);
+    }
+    if (imm16 == 0xFFEC) {
+      natural fp_ec = (natural)ts->__fp;
+      fprintf(dbgout, "BUG156-GVEXIT2: savelr zeroed (but savefn OK) DURING SPgvector! pc=0x%lx lr=0x%lx x29=0x%lx sp=0x%lx\n",
+              (unsigned long)ts->__pc, (unsigned long)ts->__lr,
+              (unsigned long)fp_ec, (unsigned long)ts->__sp);
+      if (fp_ec > 0x100000000ULL && fp_ec < 0x200000000ULL) {
+        LispObj *f = (LispObj *)fp_ec;
+        fprintf(dbgout, "  frame: savevsp=0x%lx savelr=0x%lx savefn=0x%lx savefp=0x%lx\n",
+                (unsigned long)f[0], (unsigned long)f[1],
+                (unsigned long)f[2], (unsigned long)f[3]);
+      }
+      fflush(dbgout);
+      _exit(1);
+    }
+    if (imm16 == 0xFFEE) {
+      fprintf(dbgout, "BUG156-FRAME: build_lisp_frame verify FAILED! pc=0x%lx lr=0x%lx x29=0x%lx sp=0x%lx nfn=0x%lx\n",
+              (unsigned long)ts->__pc, (unsigned long)ts->__lr,
+              (unsigned long)ts->__fp, (unsigned long)ts->__sp,
+              (unsigned long)ts->__x[10]);
+      {
+        natural fpe = (natural)ts->__fp;
+        if (fpe > 0x100000000ULL && fpe < 0x200000000ULL) {
+          LispObj *f = (LispObj *)fpe;
+          fprintf(dbgout, "  frame: [0]=0x%lx [1]=0x%lx [2]=0x%lx [3]=0x%lx\n",
+                  (unsigned long)f[0], (unsigned long)f[1],
+                  (unsigned long)f[2], (unsigned long)f[3]);
+        }
+      }
+      fflush(dbgout);
+      _exit(1);
+    }
+    if (imm16 == 0xFFEF) {
+      fprintf(dbgout, "BUG156-GVENTRY: frame zeros at gvset ENTRY! pc=0x%lx lr=0x%lx x29=0x%lx sp=0x%lx x13=0x%lx x14=%lu x15=0x%lx\n",
+              (unsigned long)ts->__pc, (unsigned long)ts->__lr,
+              (unsigned long)ts->__fp, (unsigned long)ts->__sp,
+              (unsigned long)ts->__x[13], (unsigned long)ts->__x[14],
+              (unsigned long)ts->__x[15]);
+      fflush(dbgout);
+      _exit(1);
+    }
+    if (imm16 == 0xFFF0) {
+      natural gv_dest = ((natural)ts->__x[13] & 0x00FFFFFFFFFFFFFFULL) + (ts->__x[14] << 3);
+      fprintf(dbgout, "BUG156-GVSET: gvset writing to frame! dest=0x%lx x29=0x%lx arg_x=0x%lx arg_y=%lu arg_z=0x%lx lr=0x%lx\n",
+              (unsigned long)gv_dest,
+              (unsigned long)ts->__fp,
+              (unsigned long)ts->__x[13], (unsigned long)ts->__x[14],
+              (unsigned long)ts->__x[15], (unsigned long)ts->__lr);
+      fflush(dbgout);
+      _exit(1);
+    }
+    if (imm16 == 0xFFF1) {
+      fprintf(dbgout, "BUG156-GV: frame zeros at SPgvector entry! pc=0x%lx lr=0x%lx x29=0x%lx sp=0x%lx\n",
+              (unsigned long)ts->__pc, (unsigned long)ts->__lr,
+              (unsigned long)ts->__fp, (unsigned long)ts->__sp);
+      fflush(dbgout);
+      _exit(1);
+    }
+    if (imm16 == 0xFFF2) {
+      fprintf(dbgout, "BUG156-MKBLK: frame zeros at SPmakestackblock entry! pc=0x%lx lr=0x%lx x29=0x%lx sp=0x%lx\n",
+              (unsigned long)ts->__pc, (unsigned long)ts->__lr,
+              (unsigned long)ts->__fp, (unsigned long)ts->__sp);
+      fflush(dbgout);
+      _exit(1);
+    }
+    if (imm16 == 0xFFF3) {
+      fprintf(dbgout, "BUG156-STKGV: frame zeros at SPstkgvector entry! pc=0x%lx lr=0x%lx x29=0x%lx sp=0x%lx nargs=0x%lx\n",
+              (unsigned long)ts->__pc, (unsigned long)ts->__lr,
+              (unsigned long)ts->__fp, (unsigned long)ts->__sp,
+              (unsigned long)ts->__x[5]);
+      fflush(dbgout);
+      _exit(1);
+    }
+    if (imm16 == 0xFFF4) {
+      fprintf(dbgout, "BUG156-EARLY: frame zeros at SPopt_supplied_p entry! pc=0x%lx lr=0x%lx x29=0x%lx sp=0x%lx\n",
+              (unsigned long)ts->__pc, (unsigned long)ts->__lr,
+              (unsigned long)ts->__fp, (unsigned long)ts->__sp);
+      {
+        natural fp4 = (natural)ts->__fp;
+        if (fp4 > 0x100000000ULL && fp4 < 0x200000000ULL) {
+          LispObj *f = (LispObj *)fp4;
+          fprintf(dbgout, "  frame: [0]=0x%lx [1]=0x%lx [2]=0x%lx [3]=0x%lx\n",
+                  (unsigned long)f[0], (unsigned long)f[1],
+                  (unsigned long)f[2], (unsigned long)f[3]);
+        }
+      }
+      fflush(dbgout);
+      _exit(1);
+    }
+    if (imm16 == 0xFFF5) {
+      fprintf(dbgout, "BUG156-SP: sp > x29 in stkgvector! sp=0x%lx x29=0x%lx x10=0x%lx lr=0x%lx pc=0x%lx\n",
+              (unsigned long)ts->__sp, (unsigned long)ts->__fp,
+              (unsigned long)ts->__x[10], (unsigned long)ts->__lr,
+              (unsigned long)ts->__pc);
+      fflush(dbgout);
+      _exit(1);
+    }
+    if (imm16 == 0xFFF7) {
+      natural fp7 = (natural)ts->__fp;
+      fprintf(dbgout, "BUG156-NFN0: nfn=0 but [x29+0x10] was nonzero! pc=0x%lx lr=0x%lx x29=0x%lx sp=0x%lx nfn=0x%lx frame_fn=0x%lx\n",
+              (unsigned long)ts->__pc, (unsigned long)ts->__lr,
+              (unsigned long)fp7, (unsigned long)ts->__sp,
+              (unsigned long)ts->__x[10],
+              fp7 > 0x100000000ULL ? (unsigned long)((LispObj *)(fp7))[2] : 0);
+      fflush(dbgout);
+      _exit(1);
+    }
+    if (imm16 == 0xFFF6) {
+      fprintf(dbgout, "BUG156-TRAP: frame[savefn]=0 at pc=0x%lx lr=0x%lx x29=0x%lx sp=0x%lx\n",
+              (unsigned long)pc, (unsigned long)ts->__lr,
+              (unsigned long)ts->__fp, (unsigned long)ts->__sp);
+      /* Dump frame at x29 */
+      natural fp_val = (natural)ts->__fp;
+      if (fp_val > 0x100000000ULL && fp_val < 0x200000000ULL) {
+        LispObj *fp_slots = (LispObj *)fp_val;
+        fprintf(dbgout, "  [x29+0x00]=0x%lx [x29+0x08]=0x%lx [x29+0x10]=0x%lx [x29+0x18]=0x%lx\n",
+                (unsigned long)fp_slots[0], (unsigned long)fp_slots[1],
+                (unsigned long)fp_slots[2], (unsigned long)fp_slots[3]);
+        /* Walk 3 frames back */
+        int fi;
+        natural cfp = fp_val;
+        for (fi = 0; fi < 5 && cfp > 0x100000000ULL && cfp < 0x200000000ULL; fi++) {
+          LispObj *f = (LispObj *)cfp;
+          fprintf(dbgout, "  frame[%d] @0x%lx: savevsp=0x%lx savelr=0x%lx savefn=0x%lx savefp=0x%lx\n",
+                  fi, (unsigned long)cfp,
+                  (unsigned long)f[0], (unsigned long)f[1],
+                  (unsigned long)f[2], (unsigned long)f[3]);
+          cfp = (natural)f[3]; /* next fp */
+        }
+      }
+      /* Dump memory around x29 - wider range */
+      if (fp_val > 0x100000000ULL && fp_val < 0x200000000ULL) {
+        fprintf(dbgout, "  Memory dump from x29-0x100:\n");
+        LispObj *base = (LispObj *)(fp_val - 0x100);
+        int mi;
+        for (mi = 0; mi < 48; mi++) {
+          fprintf(dbgout, "    [x29%+5d]=0x%016lx%s\n",
+                  (mi - 32) * 8, (unsigned long)base[mi],
+                  (mi == 32) ? " ← x29 (savevsp)" :
+                  (mi == 33) ? " ← x29+8 (savelr)" :
+                  (mi == 34) ? " ← x29+0x10 (savefn)" :
+                  (mi == 35) ? " ← x29+0x18 (savefp)" : "");
+        }
+      }
+      /* Dump registers */
+      fprintf(dbgout, "  x0=0x%lx x1=0x%lx x2=0x%lx x5=0x%lx x9=0x%lx x11=0x%lx x12=0x%lx x25=0x%lx\n",
+              (unsigned long)ts->__x[0], (unsigned long)ts->__x[1],
+              (unsigned long)ts->__x[2], (unsigned long)ts->__x[5],
+              (unsigned long)ts->__x[9], (unsigned long)ts->__x[11],
+              (unsigned long)ts->__x[12], (unsigned long)ts->__x[25]);
       fflush(dbgout);
       _exit(1);
     }
@@ -3892,6 +4303,25 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
       }
       /* Copy input state to output state to resume the thread */
       *out_ts = *ts;
+      /* Bug 156: check if W^X toggle corrupted the lisp frame */
+      {
+        natural fp156 = (natural)ts->__fp;
+        if (fp156 > 0x100000000ULL && fp156 < 0x200000000ULL) {
+          LispObj savelr = ((LispObj *)fp156)[1];
+          LispObj savefn = ((LispObj *)fp156)[2];
+          if (savelr == 0 && savefn == 0) {
+            static int frame_zero_wxcount = 0;
+            if (frame_zero_wxcount == 0) {
+              frame_zero_wxcount++;
+              fprintf(dbgout, "BUG156-WX: frame zeroed after W^X! fp=0x%lx pc=0x%lx fault=0x%lx page=0x%lx %s\n",
+                      (unsigned long)fp156, (unsigned long)ts->__pc,
+                      (unsigned long)fault_addr, (unsigned long)page_start,
+                      (pc_untagged >= page_start && pc_untagged < page_start + page_size) ? "EXEC" : "DATA");
+              fflush(dbgout);
+            }
+          }
+        }
+      }
       kret = KERN_SUCCESS;
     } else {
       /* Protection fault outside heap (e.g. vstack guard) — dispatch as SIGBUS */
@@ -4082,6 +4512,67 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
        Skip the faulting LDR instruction and set dest register to 0. */
     if ((natural)code[1] < 4096 && tcr->valence == TCR_STATE_LISP) {
       natural fault_pc = (natural)ts->__pc;
+      /* Bug 156: dump stack context when x10 first becomes 0 */
+      {
+        static int first_x10_zero = 1;
+        if (first_x10_zero && ts->__x[10] == 0 && fault_pc > 4096) {
+          first_x10_zero = 0;
+          natural fp_val = (natural)ts->__fp;
+          natural lr_val = (natural)ts->__lr;
+          natural sp_val = (natural)ts->__sp;
+          fprintf(dbgout, "BUG156: x10=0 at pc=0x%lx lr=0x%lx fp=0x%lx sp=0x%lx\n",
+                  (unsigned long)fault_pc, (unsigned long)lr_val,
+                  (unsigned long)fp_val, (unsigned long)sp_val);
+          /* Dump stack frame: [fp] and surrounding */
+          if (fp_val > 0x100000000ULL && fp_val < 0x200000000ULL) {
+            LispObj *fp_slots = (LispObj *)fp_val;
+            fprintf(dbgout, "  [fp-0x10]=0x%lx [fp-0x08]=0x%lx [fp+0x00]=0x%lx [fp+0x08]=0x%lx [fp+0x10]=0x%lx [fp+0x18]=0x%lx\n",
+                    (unsigned long)fp_slots[-2], (unsigned long)fp_slots[-1],
+                    (unsigned long)fp_slots[0], (unsigned long)fp_slots[1],
+                    (unsigned long)fp_slots[2], (unsigned long)fp_slots[3]);
+          }
+          /* Dump catch frame from tcr->catch_top */
+          {
+            natural ct = (natural)tcr->catch_top & 0x00FFFFFFFFFFFFFFULL;
+            if (ct > 0x100000000ULL) {
+              LispObj *cf = (LispObj *)ct;
+              fprintf(dbgout, "  catch_frame: hdr=0x%lx link=0x%lx mvflag=0x%lx tag=0x%lx\n",
+                      (unsigned long)cf[-1], (unsigned long)cf[0],
+                      (unsigned long)cf[1], (unsigned long)cf[2]);
+            }
+          }
+          /* Walk back one frame: check previous fp and its saved nfn */
+          if (fp_val > 0x100000000ULL && fp_val < 0x200000000ULL) {
+            LispObj *fp_slots = (LispObj *)fp_val;
+            /* In lisp frame: [sp+0]=savevsp [sp+8]=savelr [sp+16]=savefn [sp+24]=savefp */
+            /* But fp (x29) points to sp, so fp[0]=savevsp, fp[1]=savelr, fp[2]=savefn, fp[3]=savefp */
+            natural prev_fp = (natural)fp_slots[3]; /* x29 saved at fp+0x18 */
+            natural saved_fn = (natural)fp_slots[2]; /* nfn saved at fp+0x10 */
+            natural saved_lr = (natural)fp_slots[1]; /* lr saved at fp+0x08 */
+            natural saved_vsp = (natural)fp_slots[0]; /* vsp saved at fp+0x00 */
+            fprintf(dbgout, "  frame: savevsp=0x%lx savelr=0x%lx savefn=0x%lx savefp=0x%lx\n",
+                    (unsigned long)saved_vsp, (unsigned long)saved_lr,
+                    (unsigned long)saved_fn, (unsigned long)prev_fp);
+            /* Walk one more frame back */
+            if (prev_fp > 0x100000000ULL && prev_fp < 0x200000000ULL) {
+              LispObj *pfp = (LispObj *)prev_fp;
+              fprintf(dbgout, "  prev_frame: savevsp=0x%lx savelr=0x%lx savefn=0x%lx savefp=0x%lx\n",
+                      (unsigned long)pfp[0], (unsigned long)pfp[1],
+                      (unsigned long)pfp[2], (unsigned long)pfp[3]);
+            }
+          }
+          /* Dump 16 words of stack from sp */
+          if (sp_val > 0x100000000ULL && sp_val < 0x200000000ULL) {
+            LispObj *sp_words = (LispObj *)sp_val;
+            fprintf(dbgout, "  stack from sp:\n");
+            int si;
+            for (si = 0; si < 16; si++) {
+              fprintf(dbgout, "    [sp+0x%02x]=0x%lx\n", si*8, (unsigned long)sp_words[si]);
+            }
+          }
+          fflush(dbgout);
+        }
+      }
       /* Bug 140: If PC itself is 0 (branch-to-null via blr to 0), we can't
          read the instruction.  Resume at lr instead. */
       if (fault_pc < 4096) {
@@ -4268,10 +4759,11 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
             if (newlimit <= (natural)a->high) {
               static int alloc_count = 0;
               alloc_count++;
-              fprintf(dbgout, "alloc-mach[%d]: disp=%ld bytes=%lu old=0x%lx new=0x%lx allocptr_out=0x%lx\n",
+              fprintf(dbgout, "alloc-mach[%d]: disp=%ld bytes=%lu old=0x%lx new=0x%lx allocptr_out=0x%lx x10=0x%lx x29=0x%lx\n",
                       alloc_count, (long)disp, (unsigned long)bytes_needed,
                       (unsigned long)oldlimit, (unsigned long)newlimit,
-                      (unsigned long)((LispObj)newlimit + disp));
+                      (unsigned long)((LispObj)newlimit + disp),
+                      (unsigned long)ts->__x[10], (unsigned long)ts->__fp);
               fflush(dbgout);
               a->active = (BytePtr)newlimit;
               /* Zero new memory */
@@ -4292,6 +4784,19 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
               out_ts->__x[allocbase] = (LispObj)oldlimit;
               tcr->save_allocbase = (void *)oldlimit;
               out_ts->__pc = ts->__pc + 4;
+              /* Bug 156: check frame after alloc */
+              {
+                natural fp156a = (natural)ts->__fp;
+                if (fp156a > 0x100000000ULL && fp156a < 0x200000000ULL) {
+                  LispObj sl = ((LispObj *)fp156a)[1];
+                  LispObj sf = ((LispObj *)fp156a)[2];
+                  if (sl == 0 && sf == 0) {
+                    fprintf(dbgout, "BUG156-ALLOC: frame zeroed during alloc! fp=0x%lx pc=0x%lx disp=%ld\n",
+                            (unsigned long)fp156a, (unsigned long)ts->__pc, (long)disp);
+                    fflush(dbgout);
+                  }
+                }
+              }
               kret = KERN_SUCCESS;
               goto done;
             }

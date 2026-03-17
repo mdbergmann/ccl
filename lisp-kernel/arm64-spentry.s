@@ -424,6 +424,19 @@ _spentry(mkcatchmv)
 	__(ret)
 
 _spentry(mkunwind)
+        /* Bug 157: verify nfn has function tag (0x62) at mkunwind entry.
+           If the top byte is not 0x62, nfn was corrupted before the call. */
+        __(lsr imm0,nfn,#56)
+        __(cmp imm0,#0x62)
+        __(beq 3f)
+        __(hlt #0xFFE0)       /* nfn tag mismatch — nfn already corrupted */
+3:
+        /* Check that frame savefn matches nfn */
+        __(ldr imm0,[x29,#0x10])
+        __(cmp imm0,nfn)
+        __(beq 4f)
+        __(hlt #0xFFE1)       /* frame savefn != nfn — frame was corrupted */
+4:
         __(mov imm2,#-fixnumone)
         __(mov imm1,#INTERRUPT_LEVEL_BINDING_INDEX)
         __(ldr temp0,[rcontext,#tcr.tlb_pointer])
@@ -869,6 +882,18 @@ _spentry(gvset)
 C(egc_gvset):
         __(cmp arg_z,arg_x)
 	__(lsl imm0,arg_y,#word_shift)
+        /* Bug 156: check if gvset write hits frame + check frame integrity */
+        __(add imm2,arg_x,imm0)
+        __(and imm2,imm2,#0x00FFFFFFFFFFFFFF)
+        __(sub imm2,imm2,x29)
+        __(cmp imm2,#32)
+        __(bhs 7f)
+        __(hlt #0xFFF0)
+7:      /* Also check frame integrity at gvset entry — check savefn directly */
+        __(ldr imm2,[x29,#0x10])
+        __(cbnz imm2,8f)
+        __(hlt #0xFFEB)  /* savefn zeroed at gvset entry — new trap code with TCR info */
+8:
 	__(str arg_z,[arg_x,imm0])
 C(egc_gvset_did_store):
         __(b.lo 9f)               
@@ -1230,6 +1255,19 @@ _spentry(progvsave)
 /* Allocate a uvector on the  stack.  (Push a frame on the stack and  */
 /* heap-cons the object if there's no room on the stack.)  */
 _spentry(stack_misc_alloc)
+        /* Bug 156/157: if SP is above x29, stack allocation would overwrite the lisp frame.
+           This can happen when NLX unwind restores SP to catch frame level.
+           Fall through to heap allocation (SPmisc_alloc) which is safe.
+           Bug 157: must move sp to x29 BEFORE pushing marker, otherwise the marker
+           (tag_stack_alloc = 0x16) overwrites frame.savefn when sp = x29 + 32. */
+        __(cmp sp,x29)
+        __(bls 99f)
+        __(mov imm1,sp)
+        __(mov sp,x29)
+        __(load_marker(imm0,tag_stack_alloc))
+        __(stp imm0,imm1,[sp,#-dnode_size]!)
+        __(b _SPmisc_alloc)
+99:
         __(test_fixnum(imm0,arg_y))
         __(cbnz imm0,0f)
         __(branch_if_positive(arg_y,1f))
@@ -1296,6 +1334,17 @@ stack_misc_alloc_no_room:
 /* objects.  */
 
 _spentry(gvector)
+        /* Bug 156: write entry marker to TCR.nfp to verify SPgvector is called */
+        __(movz imm0,#0xCAFE)
+        __(movk imm0,#0xBEEF,lsl #16)
+        __(str imm0,[rcontext,#tcr.nfp])
+        /* Bug 156: check frame integrity */
+        __(ldr imm0,[x29,#0x08])
+        __(cbnz imm0,0f)
+        __(ldr imm0,[x29,#0x10])
+        __(cbnz imm0,0f)
+        __(hlt #0xFFF1)  /* frame zeroed by SPgvector time */
+0:
         __(sub nargs,nargs,#node_size)
         __(ldr arg_z,[vsp,nargs])
         __(unbox_fixnum(imm0,arg_z))
@@ -1319,6 +1368,22 @@ _spentry(gvector)
         __(vpop1(temp0))        /* Note the intentional fencepost: */
                                 /* discard the subtype as well.  */
         __(bge 1b)
+        /* Bug 156: check frame integrity at SPgvector EXIT
+           Check savefn DIRECTLY.
+           Save savefn + x29 to GLOBAL variables for cross-check at SPgvset.
+           (TCR fields get clobbered by exception handling.) */
+        __(ldr imm0,[x29,#0x10])
+        __(adrp imm1,_bug156_saved_savefn@PAGE)
+        __(str imm0,[imm1,_bug156_saved_savefn@PAGEOFF])
+        __(adrp imm1,_bug156_saved_x29@PAGE)
+        __(str x29,[imm1,_bug156_saved_x29@PAGEOFF])
+        __(cbnz imm0,3f)
+        __(hlt #0xFFED)  /* savefn zeroed during SPgvector! */
+3:
+        __(ldr imm0,[x29,#0x08])
+        __(cbnz imm0,4f)
+        __(hlt #0xFFEC)  /* savelr zeroed during SPgvector! */
+4:
         __(ret)
 
 _spentry(fitvals)
@@ -1370,6 +1435,13 @@ _spentry(default_optional_args)
 /* imm0 contains the number of &optional args in the lambda list.  */
 /* Note that nargs may be > imm0 if &rest/&key is involved.  */
 _spentry(opt_supplied_p)
+        /* Bug 156: check caller's frame integrity on entry */
+        __(ldr imm1,[x29,#0x10])
+        __(cbnz imm1,0f)
+        __(ldr imm1,[x29,#0x08])  /* also check savelr */
+        __(cbnz imm1,0f)
+        __(hlt #0xFFF4)  /* frame[savefn] AND frame[savelr] both 0 — frame never written */
+0:
         __(mov imm1,#0)
         __(mov arg_x,rnil)
         __(add arg_x,arg_x,#t_offset)        
@@ -1893,6 +1965,20 @@ _spentry(subtag_misc_ref)
 /* and return the macptr.  Size (in bytes, boxed) is in arg_z on entry; macptr */
 /* in arg_z on exit.  */
 _spentry(makestackblock)
+        /* Bug 156/157: if SP > x29, stack alloc would corrupt the frame.
+           Redirect to heap allocation path (same as "too big" case).
+           Bug 157: move sp to x29 before pushing marker to avoid
+           overwriting frame.savefn with tag_stack_alloc. */
+        __(cmp sp,x29)
+        __(bls 0f)
+        __(mov temp0,sp)
+        __(mov sp,x29)
+        __(load_marker(imm1,tag_stack_alloc))
+        __(stp imm1,temp0,[sp,#-dnode_size]!)
+        __(set_nargs(1))
+        __(ref_nrs_symbol(fname,new_gcable_ptr))
+        __(jump_fname())
+0:
         __(unbox_fixnum(imm1,arg_z))
         __(dnode_align(imm1,imm1,0))
         __(add imm1,imm1,#node_size)
@@ -2009,6 +2095,13 @@ _spentry(makestacklist)
 /* node header subtag.) Nargs set to count of things vpushed.  */
 
 _spentry(stkgvector)
+        /* Bug 156: check frame integrity */
+        __(ldr imm0,[x29,#0x08])
+        __(cbnz imm0,0f)
+        __(ldr imm0,[x29,#0x10])
+        __(cbnz imm0,0f)
+        __(hlt #0xFFF3)  /* frame zeroed by SPstkgvector time */
+0:
         __(sub imm0,nargs,#node_size)
         __(ldr temp0,[vsp,imm0])
         __(dnode_align(temp1,imm0,node_size))
@@ -2020,6 +2113,11 @@ _spentry(stkgvector)
         __(mov temp2,sp)
         __(load_marker(arg_x,tag_stack_alloc))
         __(bls 3f)
+        /* Bug 156: check sp <= x29 before zeroing */
+        __(cmp sp,x29)
+        __(bls 4f)
+        __(hlt #0xFFF5)
+4:
         __(stack_allocate_zeroed_ivector(imm1,temp1))
         __(unbox_fixnum(imm1,temp0))
         __(strb gpr32(imm1),[sp,#7])

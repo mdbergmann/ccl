@@ -379,6 +379,13 @@ define(`build_lisp_frame',`
         __(stp ifelse($1,`',vsp,$1),lr,[sp,#-lisp_frame.size]!)
         __(stp nfn,x29,[sp,#lisp_frame.savefn])
         __(mov x29,sp)
+        /* Bug 156: verify frame write succeeded */
+        __(ldr imm0,[x29,#lisp_frame.savelr])
+        __(cbnz imm0,88f)
+        __(ldr imm0,[x29,#lisp_frame.savefn])
+        __(cbnz imm0,88f)
+        __(hlt #0xFFEE)  /* frame write failed! */
+88:
 ')
 
 define(`restore_lisp_frame',`
@@ -521,12 +528,14 @@ define(`pop_lisp_fprs',`
 ')
 
 /* Reload the non-volatile lisp FPRs (d8-d15) from the stack-consed vector
-   on top of the stack, leaving the vector in place.   */
+   whose first data word is at $1, leaving the vector in place.
+   Bug 157: ARM32 version uses $1 as base address; ARM64 version was
+   incorrectly hardcoded to sp.  Now uses $1 like ARM32. */
 define(`restore_lisp_fprs',`
-        __(ldp d8,d9,[sp,#16])
-        __(ldp d10,d11,[sp,#32])
-        __(ldp d12,d13,[sp,#48])
-        __(ldp d14,d15,[sp,#64])
+        __(ldp d8,d9,[$1,#16])
+        __(ldp d10,d11,[$1,#32])
+        __(ldp d12,d13,[$1,#48])
+        __(ldp d14,d15,[$1,#64])
 ')                
 
 /* discard the stack-consed vector which contains a set of 8 non-volatile
@@ -537,6 +546,18 @@ define(`discard_lisp_fprs',`
         
 define(`mkcatch',`
         new_macro_labels()
+        /* Bug 156: trap if nfn=0 when entering mkcatch */
+        __(cbnz nfn,macro_label(nfn_ok))
+        __(hlt #0xFFF6)
+macro_label(nfn_ok):
+        /* Bug 157: if sp > x29, push_lisp_fprs would write 80 bytes below sp
+           and overwrite the callers frame at x29.  This happens when NLX
+           restores sp to a catch frame level above x29.  Reset sp to x29
+           so the FPR push starts from the frame, not above it. */
+        __(cmp sp,x29)
+        __(b.ls macro_label(sp_ok))
+        __(mov sp,x29)
+macro_label(sp_ok):
         __(push_lisp_fprs(imm0))
 	__(build_lisp_frame())
         __(make_header(imm1,catch_frame.element_count,catch_frame_header))
