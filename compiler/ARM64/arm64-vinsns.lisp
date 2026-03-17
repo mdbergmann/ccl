@@ -3259,7 +3259,11 @@
 
 ;;; --- tail-funcall-vsp ---
 ;;; Restore lisp context and jump to funcall subprim.
+;;; Bug 158 fix: must restore x29 from the frame before discarding it.
+;;; On ARM64 fn=nfn=x10, so we cannot use ldp to restore both nfn and x29
+;;; (that would clobber the callee in nfn). Restore x29 only via ldr.
 (define-arm64-vinsn (tail-funcall-vsp :jumplr :predicatable) (() ())
+  (ldr x29 (:@ sp (:$ arm64::lisp-frame.savefp)))
   (ldp vsp lr (:@+ sp (:$ arm64::lisp-frame.size)))
   (ldr imm2 (:@ rcontext (:$ (:apply arm64::arm64-subprimitive-offset '.SPfuncall))))
   (br imm2))

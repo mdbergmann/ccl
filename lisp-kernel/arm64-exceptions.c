@@ -2123,6 +2123,116 @@ handle_uuo(ExceptionInformation *xp, siginfo_t *info, opcode the_uuo)
           (unsigned long)xpGPR(xp, 2), (unsigned long)xpSP(xp), (unsigned long)xpFP(xp));
   fflush(dbgout);
 
+  /* Bug 158: lr NOT in nfn's cv — nfn is the wrong function */
+  if (HLT_IMM16(the_uuo) == 0xFFE2) {
+    fprintf(dbgout, "  *** BUG158: lr NOT in nfn's cv! nfn is WRONG at mkunwind entry ***\n");
+    natural nfn_val = xpGPR(xp, 10);
+    natural lr_val = xpGPR(xp, 30);
+    natural fp_val = xpFP(xp);
+    fprintf(dbgout, "  nfn=0x%lx lr=0x%lx fp=0x%lx\n",
+            (unsigned long)nfn_val, (unsigned long)lr_val, (unsigned long)fp_val);
+    /* Walk frame chain from x29 */
+    LispObj *fp = (LispObj *)fp_val;
+    for (int fi = 0; fi < 8 && (natural)fp > 0x100000000LL && (natural)fp < 0x800000000000LL; fi++) {
+      natural savevsp = fp[0], savelr = fp[1], savefn = fp[2], savefp = fp[3];
+      fprintf(dbgout, "  frame[%d] @0x%lx: savelr=0x%lx savefn=0x%lx savefp=0x%lx\n",
+              fi, (unsigned long)fp, (unsigned long)savelr, (unsigned long)savefn, (unsigned long)savefp);
+      /* Try to identify savefn's name */
+      natural sfn_tag = savefn >> 56;
+      natural sfn_raw = savefn & 0x00FFFFFFFFFFFFFFULL;
+      if (sfn_tag == 0x62 && sfn_raw > 0x100000000ULL && sfn_raw < 0x400000000000ULL) {
+        LispObj *sfn_obj = (LispObj *)sfn_raw;
+        natural sfn_hdr = *(sfn_obj - 1);
+        natural sfn_ep = sfn_obj[0] & 0x00FFFFFFFFFFFFFFULL;
+        int sfn_nslots = sfn_hdr & 0x00FFFFFFFFFFFFFFLL;
+        fprintf(dbgout, "    fn hdr=0x%lx nslots=%d ep=0x%lx",
+                (unsigned long)sfn_hdr, sfn_nslots, (unsigned long)sfn_ep);
+        /* Check if savelr is within this fn's cv range */
+        natural sfn_cv_raw = sfn_obj[1] & 0x00FFFFFFFFFFFFFFULL;
+        if (sfn_cv_raw > 0x100000000ULL && sfn_cv_raw < 0x400000000000ULL) {
+          natural sfn_cv_hdr = *((LispObj *)sfn_cv_raw - 1);
+          natural sfn_cv_count = sfn_cv_hdr & 0x00FFFFFFFFFFFFFFULL;
+          natural sfn_cv_bytes = sfn_cv_count * 4;
+          int lr_in_cv = (savelr >= sfn_cv_raw && savelr < sfn_cv_raw + sfn_cv_bytes);
+          fprintf(dbgout, " cv=[0x%lx..0x%lx) savelr %s",
+                  (unsigned long)sfn_cv_raw, (unsigned long)(sfn_cv_raw + sfn_cv_bytes),
+                  lr_in_cv ? "IN CV" : "NOT IN CV");
+        }
+        fprintf(dbgout, "\n");
+        /* Print symbol constants */
+        for (int si = 2; si < sfn_nslots && si < 8; si++) {
+          natural sym = sfn_obj[si];
+          if ((sym >> 56) == 0x63) {
+            natural sym_raw = sym & 0x00FFFFFFFFFFFFFFULL;
+            if (sym_raw > 0x100000000ULL && sym_raw < 0x400000000000ULL) {
+              LispObj *sp2 = (LispObj *)sym_raw;
+              natural pn = sp2[0] & 0x00FFFFFFFFFFFFFFULL;
+              char nbuf[64] = {0};
+              if (pn > 0x100000000ULL && pn < 0x400000000000ULL) {
+                natural pnh = *((LispObj *)pn - 1);
+                int pnl = pnh & 0x00FFFFFFFFFFFFFFLL;
+                if (pnl > 0 && pnl < 60) {
+                  unsigned int *c = (unsigned int *)pn;
+                  for (int i = 0; i < pnl && i < 60; i++) {
+                    char ch = c[i] & 0x7f;
+                    nbuf[i] = (ch >= 0x20 && ch < 0x7f) ? ch : '?';
+                  }
+                }
+              }
+              fprintf(dbgout, "      slot[%d]=sym '%s'\n", si, nbuf);
+            }
+          }
+        }
+      }
+      if ((natural)fp == savefp) break; /* self-loop = bottom */
+      fp = (LispObj *)savefp;
+    }
+    /* Also try to find the REAL function by scanning for functions whose cv contains lr */
+    {
+      natural lr_raw = lr_val & 0x00FFFFFFFFFFFFFFULL;
+      /* Scan backward from lr to find cv header */
+      natural scan = lr_raw & ~7ULL;
+      while (scan > 0x300000000000ULL && (lr_raw - scan) < 0x40000) {
+        scan -= 8;
+        natural val = *(natural *)scan;
+        if ((val >> 56) == 0x88) { /* xcode_vector header */
+          natural cv_count = val & 0x00FFFFFFFFFFFFFFULL;
+          natural cv_data = scan + 8;
+          natural cv_bytes = cv_count * 4;
+          if (lr_raw >= cv_data && lr_raw < cv_data + cv_bytes) {
+            fprintf(dbgout, "  REAL cv: header@0x%lx count=%lu data=[0x%lx..0x%lx)\n",
+                    (unsigned long)scan, (unsigned long)cv_count,
+                    (unsigned long)cv_data, (unsigned long)(cv_data + cv_bytes));
+            /* Find owner function in dynamic area */
+            area *da = active_dynamic_area;
+            if (da) {
+              LispObj *q = (LispObj *)0x302000000000ULL;
+              LispObj *qend = (LispObj *)da->active;
+              for (; q < qend; q++) {
+                natural qraw = *q & 0x00FFFFFFFFFFFFFFULL;
+                if ((qraw == cv_data || qraw == scan) && q >= (LispObj *)0x302000000000ULL + 2) {
+                  natural prev_hdr = *(q - 2);
+                  if ((prev_hdr >> 56) == 0xa2) {
+                    LispObj *fo = q - 1;
+                    natural fo_ep = fo[0] & 0x00FFFFFFFFFFFFFFULL;
+                    natural fo_nslots = prev_hdr & 0x00FFFFFFFFFFFFFFULL;
+                    fprintf(dbgout, "  REAL fn at 0x%lx nslots=%lu ep=0x%lx\n",
+                            (unsigned long)(natural)fo, (unsigned long)fo_nslots,
+                            (unsigned long)fo_ep);
+                    break;
+                  }
+                }
+              }
+            }
+            break;
+          }
+        }
+      }
+    }
+    fflush(dbgout);
+    /* Don't skip — let this be fatal */
+  }
+
   /* TEMP DIAGNOSTIC: called-for-mv-p mismatch trap */
   if (HLT_IMM16(the_uuo) == 0x4242) {
     static int mv_diag_count = 0;
@@ -3544,6 +3654,364 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
             }
           }
           fprintf(dbgout, "\n");
+        }
+        /* Bug 158: when PC is invalid (< 0x100000 or has TBI tag), the code
+           jumped to a non-function's slot[0].  Trace back via frame savefn to
+           find which symbol has the bad fcell. */
+        {
+          natural pc_raw = ts->__pc & 0x00FFFFFFFFFFFFFFULL;
+          natural pc_tag = ts->__pc >> 56;
+          if (pc_raw < 0x100000ULL || pc_tag != 0) {
+            natural fp_val = ts->__fp;
+            natural savefn = 0;
+            if (fp_val > 0x100000000ULL && fp_val < 0x800000000000ULL) {
+              savefn = *(natural *)(fp_val + 16);
+            }
+            natural savefn_tag = savefn >> 56;
+            natural savefn_raw = savefn & 0x00FFFFFFFFFFFFFFULL;
+            fprintf(dbgout, "\n  BUG158: invalid PC! pc=0x%lx (raw=0x%lx tag=0x%lx) lr=0x%lx\n",
+                    (unsigned long)ts->__pc, (unsigned long)pc_raw, (unsigned long)pc_tag,
+                    (unsigned long)ts->__lr);
+            fprintf(dbgout, "  BUG158: frame savefn=0x%lx (tag=0x%lx) x10=0x%lx (tag=0x%lx)\n",
+                    (unsigned long)savefn, (unsigned long)savefn_tag,
+                    (unsigned long)ts->__x[10], (unsigned long)(ts->__x[10] >> 56));
+            /* If savefn is a valid function, dump EP, code vector, and symbol constants */
+            if (savefn_tag == 0x62 && savefn_raw > 0x100000000ULL && savefn_raw < 0x400000000000ULL) {
+              LispObj *fn = (LispObj *)savefn_raw;
+              natural hdr = *(fn - 1);
+              int nslots = hdr & 0x00FFFFFFFFFFFFFFLL;
+              natural ep = fn[0] & 0x00FFFFFFFFFFFFFFULL;
+              natural cv_tagged = fn[1];
+              natural cv_raw = cv_tagged & 0x00FFFFFFFFFFFFFFULL;
+              natural cv_hdr = 0;
+              int cv_len = 0;
+              if (cv_raw > 0x100000000ULL && cv_raw < 0x400000000000ULL) {
+                cv_hdr = *((LispObj *)cv_raw - 1);
+                cv_len = cv_hdr & 0x00FFFFFFFFFFFFFFLL;
+              }
+              fprintf(dbgout, "  BUG158: fn ep=0x%lx cv=0x%lx cv_hdr=0x%lx cv_len=%d\n",
+                      (unsigned long)ep, (unsigned long)cv_tagged,
+                      (unsigned long)cv_hdr, cv_len);
+              /* Check if crash LR is within this function's code vector */
+              natural lr_raw = ts->__lr & 0x00FFFFFFFFFFFFFFULL;
+              if (cv_raw > 0 && cv_len > 0) {
+                /* xcode_vector (subtag 0x88) has 32-bit elements */
+                natural cv_byte_len = cv_len * 4;
+                natural cv_end = cv_raw + cv_byte_len;
+                fprintf(dbgout, "  BUG158: cv range [0x%lx..0x%lx), lr_raw=0x%lx, %s\n",
+                        (unsigned long)cv_raw, (unsigned long)cv_end, (unsigned long)lr_raw,
+                        (lr_raw >= cv_raw && lr_raw < cv_end) ? "LR IN CV" : "LR NOT IN CV");
+              }
+              /* Scan backwards from LR in readonly area to find xcode_vector header */
+              {
+                natural scan = lr_raw & ~7ULL; /* 8-byte align */
+                int found_cv = 0;
+                while (scan > 0x300000000000ULL && (lr_raw - scan) < 0x40000) {
+                  scan -= 8;
+                  natural val = *(natural *)scan;
+                  natural val_tag = val >> 56;
+                  if (val_tag == 0x88) { /* xcode_vector header */
+                    natural cv_count = val & 0x00FFFFFFFFFFFFFFULL;
+                    natural cv_data = scan + 8;
+                    natural cv_bytes = cv_count * 4;
+                    if (lr_raw >= cv_data && lr_raw < cv_data + cv_bytes) {
+                      fprintf(dbgout, "  BUG158: found cv header at 0x%lx count=%lu bytes=%lu range=[0x%lx..0x%lx)\n",
+                              (unsigned long)scan, (unsigned long)cv_count,
+                              (unsigned long)cv_bytes, (unsigned long)cv_data,
+                              (unsigned long)(cv_data + cv_bytes));
+                      /* Now find which function references this cv (scan dynamic area) */
+                      natural cv_tagged_target = cv_data; /* we'll look for cv pointers matching this */
+                      area *da2 = active_dynamic_area;
+                      /* Dump first 8 instructions of the code vector */
+                      {
+                        opcode *cvcode = (opcode *)cv_data;
+                        fprintf(dbgout, "  BUG158: cv first instrs:");
+                        for (int ci = 0; ci < 8 && ci < (int)cv_count; ci++)
+                          fprintf(dbgout, " %08x", cvcode[ci]);
+                        fprintf(dbgout, "\n");
+                      }
+                      if (da2) {
+                        /* Brute-force: scan for ANY word whose low 56 bits match cv_data */
+                        natural alloc_raw = ts->__x[26] & 0x00FFFFFFFFFFFFFFULL;
+                        /* Scan the ENTIRE dynamic range: from mapped start to allocptr.
+                           da->low may not include boot image data. Use 0x302000000000 directly. */
+                        LispObj *q = (LispObj *)0x302000000000ULL;
+                        LispObj *qend = (alloc_raw > 0x302000000000ULL && alloc_raw < (natural)da2->high)
+                          ? (LispObj *)alloc_raw : (LispObj *)da2->active;
+                        int found_owner = 0;
+                        natural cv_hdr_addr = cv_data - 8; /* also try header address */
+                        fprintf(dbgout, "  BUG158: scanning [0x%lx..0x%lx) for cv_data=0x%lx or hdr=0x%lx\n",
+                                (unsigned long)(natural)q, (unsigned long)(natural)qend,
+                                (unsigned long)cv_data, (unsigned long)cv_hdr_addr);
+                        for (; q < qend; q++) {
+                          natural qraw = *q & 0x00FFFFFFFFFFFFFFULL;
+                          if ((qraw == cv_data || qraw == cv_hdr_addr) && q >= (LispObj *)0x302000000000ULL + 2) {
+                            natural match_tag = *q >> 56;
+                            natural prev_hdr = *(q - 2);
+                            if ((prev_hdr >> 56) == 0xa2) {
+                              natural qcount = prev_hdr & 0x00FFFFFFFFFFFFFFULL;
+                              LispObj *fobj2 = q - 1;
+                              natural f2_ep = fobj2[0] & 0x00FFFFFFFFFFFFFFULL;
+                              fprintf(dbgout, "  BUG158: OWNER at 0x%lx nslots=%lu ep=0x%lx cv_tag=0x%02lx\n",
+                                      (unsigned long)(natural)fobj2, (unsigned long)qcount,
+                                      (unsigned long)f2_ep, (unsigned long)match_tag);
+                              /* Dump first 40 instructions from OWNER's ep */
+                              if (f2_ep > 0x200000000ULL && f2_ep < 0x400000000000ULL) {
+                                opcode *ep_code = (opcode *)f2_ep;
+                                fprintf(dbgout, "  BUG158: OWNER ep instrs (40):\n");
+                                for (int ei = 0; ei < 40 && ei < (int)cv_count; ei++) {
+                                  fprintf(dbgout, "    [%3d] 0x%lx: %08x", ei,
+                                          (unsigned long)(f2_ep + ei*4), ep_code[ei]);
+                                  /* Annotate save-lisp-context pattern */
+                                  if (ep_code[ei] == 0xa9be7bf9)
+                                    fprintf(dbgout, "  ← STP vsp,lr,[sp,#-32]! (save-lisp-context)");
+                                  else if (ep_code[ei] == 0xa90177ea)
+                                    fprintf(dbgout, "  ← STP nfn,x29,[sp,#16] (save fn/fp)");
+                                  else if (ep_code[ei] == 0x910003fd)
+                                    fprintf(dbgout, "  ← ADD x29,sp,#0 (set frame ptr)");
+                                  else if (ep_code[ei] == 0xf9400baa)
+                                    fprintf(dbgout, "  ← LDR x10,[x29,#16] (reload-self)");
+                                  else if (ep_code[ei] == 0xd63f03c0)
+                                    fprintf(dbgout, "  ← BLR x30 (call)");
+                                  else if (ep_code[ei] == 0xd65f03c0)
+                                    fprintf(dbgout, "  ← RET");
+                                  fprintf(dbgout, "\n");
+                                }
+                              }
+                              /* Dump OWNER's symbol constants */
+                              fprintf(dbgout, "  BUG158: OWNER constants (%lu slots):\n", (unsigned long)qcount);
+                              for (int oi = 2; oi < (int)qcount && oi < 30; oi++) {
+                                natural os = fobj2[oi];
+                                natural os_tag = os >> 56;
+                                natural os_raw = os & 0x00FFFFFFFFFFFFFFULL;
+                                if (os_tag == 0x63 && os_raw > 0x100000000ULL && os_raw < 0x400000000000ULL) {
+                                  LispObj *osym = (LispObj *)os_raw;
+                                  natural opn = osym[0] & 0x00FFFFFFFFFFFFFFULL;
+                                  char oname[64] = {0};
+                                  if (opn > 0x100000000ULL && opn < 0x400000000000ULL) {
+                                    LispObj *opnobj = (LispObj *)opn;
+                                    natural opn_hdr = *(opnobj - 1);
+                                    int opn_len = opn_hdr & 0x00FFFFFFFFFFFFFFLL;
+                                    if (opn_len > 0 && opn_len < 60) {
+                                      unsigned int *ochars = (unsigned int *)opnobj;
+                                      for (int i = 0; i < opn_len && i < 60; i++) {
+                                        char ch = ochars[i] & 0x7F;
+                                        oname[i] = (ch >= 0x20 && ch < 0x7f) ? ch : '?';
+                                      }
+                                    }
+                                  }
+                                  /* Also dump fcell */
+                                  natural ofcell = osym[2];
+                                  natural ofcell_tag = ofcell >> 56;
+                                  natural ofcell_raw = ofcell & 0x00FFFFFFFFFFFFFFULL;
+                                  fprintf(dbgout, "    slot[%d]=sym '%s' fcell=0x%lx (tag=0x%02lx)",
+                                          oi, oname, (unsigned long)ofcell, (unsigned long)ofcell_tag);
+                                  if (ofcell_raw == (natural)fobj2)
+                                    fprintf(dbgout, " *** SELF ***");
+                                  fprintf(dbgout, "\n");
+                                }
+                              }
+                              /* Also dump the savefn's code (the 5-slot %SIMPLE-FASL-INIT-BUFFER) */
+                              {
+                                fprintf(dbgout, "  BUG158: savefn ep=0x%lx cv_len=%d instrs:\n",
+                                        (unsigned long)ep, cv_len);
+                                if (ep > 0x200000000ULL && ep < 0x400000000000ULL) {
+                                  opcode *savefn_code = (opcode *)ep;
+                                  for (int si3 = 0; si3 < cv_len && si3 < 20; si3++) {
+                                    fprintf(dbgout, "    [%3d] 0x%lx: %08x",
+                                            si3, (unsigned long)(ep + si3*4), savefn_code[si3]);
+                                    if (savefn_code[si3] == 0xa9be7bf9)
+                                      fprintf(dbgout, "  ← STP vsp,lr,[sp,#-32]!");
+                                    else if (savefn_code[si3] == 0xa90177ea)
+                                      fprintf(dbgout, "  ← STP nfn,x29,[sp,#16]");
+                                    else if (savefn_code[si3] == 0x910003fd)
+                                      fprintf(dbgout, "  ← ADD x29,sp,#0");
+                                    else if (savefn_code[si3] == 0xf9400baa)
+                                      fprintf(dbgout, "  ← LDR x10,[x29,#16]");
+                                    else if (savefn_code[si3] == 0xd63f03c0)
+                                      fprintf(dbgout, "  ← BLR x30");
+                                    else if (savefn_code[si3] == 0xd65f03c0)
+                                      fprintf(dbgout, "  ← RET");
+                                    fprintf(dbgout, "\n");
+                                  }
+                                }
+                              }
+                              /* Dump catch chain */
+                              {
+                                natural catch_top = ts->__x[28] ? ((natural *)((ts->__x[28] & 0x00FFFFFFFFFFFFFFULL)))[offsetof(TCR, catch_top)/sizeof(natural)] : 0;
+                                /* Actually use rcontext to get catch_top */
+                                natural rctx = ts->__x[28] & 0x00FFFFFFFFFFFFFFULL;
+                                if (rctx > 0x100000000ULL && rctx < 0x800000000000ULL) {
+                                  natural ct = *(natural *)(rctx + offsetof(TCR, catch_top));
+                                  natural ct_raw = ct & 0x00FFFFFFFFFFFFFFULL;
+                                  fprintf(dbgout, "  BUG158: catch_top=0x%lx (raw=0x%lx)\n",
+                                          (unsigned long)ct, (unsigned long)ct_raw);
+                                }
+                              }
+                              /* Dump cstack between sp and frame[0].fp */
+                              {
+                                natural sp_val = ts->__sp;
+                                natural fp_val2 = ts->__fp;
+                                if (fp_val2 > sp_val && (fp_val2 - sp_val) <= 0x200) {
+                                  fprintf(dbgout, "  BUG158: cstack [sp=0x%lx..fp=0x%lx) (%lu bytes):\n",
+                                          (unsigned long)sp_val, (unsigned long)fp_val2,
+                                          (unsigned long)(fp_val2 - sp_val));
+                                  natural *stp = (natural *)sp_val;
+                                  natural *ste = (natural *)fp_val2;
+                                  for (int si2 = 0; stp + si2 < ste + 4; si2++) {
+                                    fprintf(dbgout, "    [sp+%3d] 0x%lx: 0x%lx\n",
+                                            si2 * 8, (unsigned long)(sp_val + si2*8),
+                                            (unsigned long)stp[si2]);
+                                  }
+                                }
+                              }
+                              found_owner = 1;
+                            }
+                          }
+                        }
+                        if (!found_owner)
+                          fprintf(dbgout, "  BUG158: no owner for cv_data=0x%lx in [0x%lx..0x%lx)\n",
+                                  (unsigned long)cv_data, (unsigned long)(natural)da2->low,
+                                  (unsigned long)(natural)qend);
+                      }
+                      found_cv = 1;
+                      break;
+                    }
+                  }
+                }
+                if (!found_cv) {
+                  fprintf(dbgout, "  BUG158: no cv header found near lr=0x%lx\n", (unsigned long)lr_raw);
+                }
+              }
+              /* Also scan dynamic area for ALL functions with ep near the crash LR */
+              if (lr_raw > 0x300000000000ULL && lr_raw < 0x3000010000000ULL) {
+                area *da = active_dynamic_area;
+                if (da) {
+                  LispObj *p = (LispObj *)da->low;
+                  LispObj *end = (LispObj *)da->active;
+                  while (p < end) {
+                    natural h = *p;
+                    natural htag = h >> 56;
+                    natural hcount = h & 0x00FFFFFFFFFFFFFFULL;
+                    if (htag == 0xa2 && hcount > 2) { /* function header */
+                      LispObj *fobj = p + 1;
+                      natural f_ep = fobj[0] & 0x00FFFFFFFFFFFFFFULL;
+                      natural f_cv = fobj[1] & 0x00FFFFFFFFFFFFFFULL;
+                      /* Check if ep is within 4KB of the crash LR (same code vector) */
+                      int ep_near = (f_ep > 0x200000000ULL && f_ep < 0x400000000000ULL &&
+                                     lr_raw >= f_ep && (lr_raw - f_ep) < 0x2000);
+                      int cv_match = 0;
+                      natural f_cv_bytes = 0;
+                      if (f_cv > 0x100000000ULL && f_cv < 0x400000000000ULL) {
+                        natural f_cv_hdr = *((LispObj *)f_cv - 1);
+                        natural f_cv_count = f_cv_hdr & 0x00FFFFFFFFFFFFFFULL;
+                        f_cv_bytes = f_cv_count * 4; /* xcode_vector has 32-bit elements */
+                        cv_match = (lr_raw >= f_cv && lr_raw < f_cv + f_cv_bytes);
+                      }
+                      if (ep_near || cv_match) {
+                          fprintf(dbgout, "  BUG158: REAL fn at 0x%lx nslots=%lu ep=0x%lx cv=[0x%lx..0x%lx) %s%s\n",
+                                  (unsigned long)(natural)(p+1), (unsigned long)hcount,
+                                  (unsigned long)f_ep, (unsigned long)f_cv,
+                                  (unsigned long)(f_cv + f_cv_bytes),
+                                  ep_near ? "EP-NEAR" : "", cv_match ? "CV-MATCH" : "");
+                          /* Dump its name if possible */
+                          for (int ri = 2; ri < (int)hcount && ri < 30; ri++) {
+                            natural rs = fobj[ri];
+                            if ((rs >> 56) == 0x63) { /* symbol */
+                              natural rs_raw = rs & 0x00FFFFFFFFFFFFFFULL;
+                              if (rs_raw > 0x100000000ULL && rs_raw < 0x400000000000ULL) {
+                                LispObj *rsym = (LispObj *)rs_raw;
+                                natural rpn = rsym[0] & 0x00FFFFFFFFFFFFFFULL;
+                                if (rpn > 0x100000000ULL && rpn < 0x400000000000ULL) {
+                                  LispObj *rpnobj = (LispObj *)rpn;
+                                  natural rpn_hdr = *(rpnobj - 1);
+                                  int rpn_len = rpn_hdr & 0x00FFFFFFFFFFFFFFLL;
+                                  if (rpn_len > 0 && rpn_len < 60) {
+                                    unsigned int *rchars = (unsigned int *)rpnobj;
+                                    char rname[64] = {0};
+                                    for (int i = 0; i < rpn_len && i < 60; i++) {
+                                      char ch = rchars[i] & 0x7F;
+                                      rname[i] = (ch >= 0x20 && ch < 0x7f) ? ch : '?';
+                                    }
+                                    fprintf(dbgout, "    slot[%d]=sym '%s'\n", ri, rname);
+                                  }
+                                }
+                              }
+                            }
+                          }
+                          break; /* found the real function */
+                        }
+                      }
+                    /* Advance past the object: handle gvectors and ivectors differently */
+                    if (htag >= 0x80) {
+                      natural obj_words;
+                      if (htag & 0x20) {
+                        /* gvector: word-sized elements */
+                        obj_words = hcount + 1;
+                      } else {
+                        /* ivector: compute byte size from subtag group */
+                        natural data_bytes;
+                        if (htag <= 0x88) data_bytes = hcount * 4;       /* 32-bit */
+                        else if (htag <= 0x91) data_bytes = hcount * 8;  /* 64-bit */
+                        else if (htag <= 0x97) data_bytes = hcount;      /* 8-bit */
+                        else if (htag <= 0x9B) data_bytes = hcount * 2;  /* 16-bit */
+                        else data_bytes = (hcount + 7) / 8;             /* bit vector */
+                        obj_words = (8 + data_bytes + 7) / 8;  /* header + data, 8-byte aligned */
+                      }
+                      if (obj_words & 1) obj_words++; /* dnode align */
+                      p += obj_words;
+                    } else {
+                      p += 2; /* skip dnode (cons cell or other non-header) */
+                    }
+                  }
+                }
+              }
+              fprintf(dbgout, "  BUG158: fn hdr=0x%lx nslots=%d\n", (unsigned long)hdr, nslots);
+              /* Dump all slots that look like symbols (tag 0x63) with their fcells */
+              for (int si = 2; si < nslots && si < 30; si++) {
+                natural slot = fn[si];
+                natural slot_tag = slot >> 56;
+                if (slot_tag == 0x63) {  /* symbol */
+                  natural sym_raw = slot & 0x00FFFFFFFFFFFFFFULL;
+                  if (sym_raw > 0x100000000ULL && sym_raw < 0x400000000000ULL) {
+                    LispObj *sym = (LispObj *)sym_raw;
+                    natural pname = sym[0];
+                    natural fcell = sym[2];
+                    natural fcell_tag = fcell >> 56;
+                    natural fcell_raw = fcell & 0x00FFFFFFFFFFFFFFULL;
+                    /* Try to read pname string */
+                    natural pname_raw = pname & 0x00FFFFFFFFFFFFFFULL;
+                    char name_buf[64] = {0};
+                    if (pname_raw > 0x100000000ULL && pname_raw < 0x400000000000ULL) {
+                      LispObj *pn = (LispObj *)pname_raw;
+                      natural pn_hdr = *(pn - 1);
+                      int pn_len = pn_hdr & 0x00FFFFFFFFFFFFFFLL;
+                      if (pn_len > 0 && pn_len < 60) {
+                        /* 32-bit chars in simple-base-string */
+                        unsigned int *chars = (unsigned int *)pn;
+                        for (int i = 0; i < pn_len && i < 60; i++) {
+                          char ch = chars[i] & 0x7F;
+                          name_buf[i] = (ch >= 0x20 && ch < 0x7f) ? ch : '?';
+                        }
+                      }
+                    }
+                    fprintf(dbgout, "  BUG158: slot[%d]=sym '%s' fcell=0x%lx (tag=0x%02lx)",
+                            si, name_buf, (unsigned long)fcell, (unsigned long)fcell_tag);
+                    if (fcell_tag != 0x62) {
+                      fprintf(dbgout, " *** NOT A FUNCTION ***");
+                      if (fcell_raw > 0x100000000ULL && fcell_raw < 0x400000000000ULL) {
+                        natural fcell_hdr = *((LispObj *)fcell_raw - 1);
+                        fprintf(dbgout, " hdr=0x%lx", (unsigned long)fcell_hdr);
+                        fprintf(dbgout, " slot[0]=0x%lx", (unsigned long)*(LispObj *)fcell_raw);
+                      }
+                    }
+                    fprintf(dbgout, "\n");
+                  }
+                }
+              }
+            }
+            fflush(dbgout);
+          }
         }
         /* Dump function object slots when we crash with KERN_INVALID_ADDRESS */
         if (code0 == KERN_INVALID_ADDRESS) {

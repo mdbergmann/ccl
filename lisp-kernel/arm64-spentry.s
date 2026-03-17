@@ -406,7 +406,17 @@ _spentry(builtin_aset1)
                 	
 
 	/*  Call nfn if it's either a symbol or function */
+	/* Bug 158 workaround: tail-funcall-vsp (inline) in existing images
+	   doesn't restore x29 from the frame before popping.  After the
+	   pop, x29 < sp (stale, pointing at the discarded frame).
+	   Detect this and restore x29 from [sp-8] (the discarded frame's
+	   savefp slot).  In non-tail cases x29 >= sp, so this is a no-op. */
 _spentry(funcall)
+	__(mov imm0,sp)
+	__(cmp x29,imm0)
+	__(bhs 0f)
+	__(ldr x29,[sp,#-node_size])
+0:
 	__(funcall_nfn())
 
 /* Subprims for catch, throw, unwind_protect.  */
@@ -437,6 +447,22 @@ _spentry(mkunwind)
         __(beq 4f)
         __(hlt #0xFFE1)       /* frame savefn != nfn — frame was corrupted */
 4:
+        /* Bug 158: verify lr is within nfn's code vector.
+           If nfn is the wrong function, lr (return address) won't be
+           in nfn's code vector range. */
+        __(ldr imm0,[nfn,#node_size])   /* slot[1] = code vector (tagged) */
+        __(ubfx imm0,imm0,#0,#56)      /* strip TBI tag */
+        __(ldr imm1,[imm0,#-node_size]) /* cv header (before data) */
+        __(ubfx imm1,imm1,#0,#56)      /* extract element count */
+        __(lsl imm1,imm1,#2)            /* byte_len = count * 4 (32-bit elements) */
+        __(cmp lr,imm0)                 /* lr >= cv_data? */
+        __(blo 5f)                      /* lr below cv_data → mismatch */
+        __(add imm0,imm0,imm1)          /* cv_end = cv_data + byte_len */
+        __(cmp lr,imm0)                 /* lr < cv_end? */
+        __(blo 6f)                      /* lr within range → OK */
+5:
+        __(hlt #0xFFE2)                 /* Bug 158: lr NOT in nfn's cv! */
+6:
         __(mov imm2,#-fixnumone)
         __(mov imm1,#INTERRUPT_LEVEL_BINDING_INDEX)
         __(ldr temp0,[rcontext,#tcr.tlb_pointer])
@@ -1811,11 +1837,13 @@ _spentry(spreadargz)
 
 /* Tail-recursively funcall temp0.  */
 /* Pretty much the same as the tcallsym* cases above.  */
+/* Bug 158 fix: restore x29 from frame before discarding it.  */
 _spentry(tfuncallgen)
         __(cmp nargs,#nargregs*node_size)
         __(ldr lr,[sp,#lisp_frame.savelr])
         __(ble 2f)
         __(ldr imm0,[sp,#lisp_frame.savevsp])
+        __(ldr x29,[sp,#lisp_frame.savefp])
         __(discard_lisp_frame())
         /* can use temp0 as a temporary  */
         __(sub imm1,nargs,#nargregs*node_size)
@@ -1829,6 +1857,7 @@ _spentry(tfuncallgen)
         __(funcall_nfn())
 2:
         __(ldr vsp,[sp,#lisp_frame.savevsp])
+        __(ldr x29,[sp,#lisp_frame.savefp])
         __(discard_lisp_frame())
         __(funcall_nfn())
 
@@ -1838,6 +1867,7 @@ _spentry(tfuncallgen)
 _spentry(tfuncallslide)
         __(ldr imm0,[sp,#lisp_frame.savevsp])
         __(ldr lr,[sp,#lisp_frame.savelr])
+        __(ldr x29,[sp,#lisp_frame.savefp])
         __(discard_lisp_frame())
         /* can use temp0 as a temporary  */
         __(sub imm1,nargs,#nargregs*node_size)
@@ -1859,12 +1889,14 @@ _spentry(jmpsym)
 /* vpushed or not.  If so, we have to "slide" them down  */
 /* to the base of the frame.  If not, we can just restore  */
 /* vsp, lr, fn from the saved lisp frame on the control stack.  */
+/* Bug 158 fix: restore x29 from frame before discarding in all tail-call subprims. */
 _spentry(tcallsymgen)
         __(cmp nargs,#nargregs*node_size)
         __(ldr lr,[sp,#lisp_frame.savelr])
         __(ble 2f)
 
         __(ldr imm0,[sp,#lisp_frame.savevsp])
+        __(ldr x29,[sp,#lisp_frame.savefp])
         __(discard_lisp_frame())
         /* can use nfn (= temp2) as a temporary  */
         __(sub imm1,nargs,#nargregs*node_size)
@@ -1876,9 +1908,10 @@ _spentry(tcallsymgen)
         __(bne 1b)
         __(mov vsp,imm0)
         __(jump_fname)
-  
-2:  
+
+2:
         __(ldr vsp,[sp,#lisp_frame.savevsp])
+        __(ldr x29,[sp,#lisp_frame.savefp])
         __(discard_lisp_frame())
         __(jump_fname)
 
@@ -1888,6 +1921,7 @@ _spentry(tcallsymgen)
 _spentry(tcallsymslide)
         __(ldr lr,[sp,#lisp_frame.savelr])
         __(ldr imm0,[sp,#lisp_frame.savevsp])
+        __(ldr x29,[sp,#lisp_frame.savefp])
         __(discard_lisp_frame())
         /* can use nfn (= temp2) as a temporary  */
         __(sub imm1,nargs,#nargregs*node_size)
@@ -1902,18 +1936,21 @@ _spentry(tcallsymslide)
 
 
 /* Tail-recursively call the function in nfn.  */
-/* Pretty much the same as the tcallsym* cases above.  */
+/* Bug 158 fix: on ARM64 fn=nfn=x10, so restore_lisp_frame() clobbers the
+   callee in nfn.  Instead, restore only x29/vsp/lr and leave nfn alone. */
 _spentry(tcallnfngen)
         __(cmp nargs,#nargregs*node_size)
         __(bgt _SPtcallnfnslide)
-        __(restore_lisp_frame())
+        __(ldr x29,[sp,#lisp_frame.savefp])
+        __(ldp vsp,lr,[sp],#lisp_frame.size)
         __(jump_nfn())
-         
+
 /* Some args were vpushed.  Slide them down to the base of  */
 /* the current frame, then do funcall.  */
 _spentry(tcallnfnslide)
         __(ldr lr,[sp,#lisp_frame.savelr])
         __(ldr imm0,[sp,#lisp_frame.savevsp])
+        __(ldr x29,[sp,#lisp_frame.savefp])
         __(discard_lisp_frame())
         /* Since we have a known function, can use fname as a temporary.  */
         __(sub imm1,nargs,#nargregs*node_size)
