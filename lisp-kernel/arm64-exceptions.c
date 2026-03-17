@@ -1889,12 +1889,95 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
             }
           }
 
-          /* Other not-callable: return NIL to caller */
-          xpPC(xp) = (pc)(natural)xpGPR(xp, 30);
-          xpGPR(xp, 15) = lisp_nil;
-          xpGPR(xp, 5) = node_size;
-          *bumpP = 0;
-          return true;
+          /* Check if this is %err-disp being called (level-1, undefined in early boot) */
+          {
+            natural ed_addr = (natural)&nrs_ERRDISP.pname;
+            if (fname_raw == ed_addr) {
+              /* %err-disp called but undefined.  The first arg is the error number.
+                 For FASL errors, print info and abort.
+                 For type/simple errors, return NIL and continue. */
+              LispObj err_num = xpGPR(xp, 15); /* arg_z = last arg = error number (1-arg case) */
+              if (nargs_val > node_size)
+                err_num = xpGPR(xp, 14); /* arg_y for 2-arg case */
+              if (nargs_val > 2 * node_size)
+                err_num = xpGPR(xp, 13); /* arg_x for 3+ arg case */
+
+              fprintf(dbgout, "early-boot %%err-disp: err_num=%ld nargs=%lu arg_z=%016lx\n",
+                      (long)err_num, (unsigned long)nargs_val,
+                      (unsigned long)xpGPR(xp, 15));
+              fflush(dbgout);
+
+              /* Return NIL to caller — many callers check for error return.
+                 This is imperfect but allows boot to continue past non-fatal errors. */
+              xpPC(xp) = (pc)(natural)xpGPR(xp, 30);
+              xpGPR(xp, 15) = lisp_nil;
+              xpGPR(xp, 5) = node_size;
+              *bumpP = 0;
+              return true;
+            }
+          }
+
+          /* Other not-callable during early boot (Bug 161).
+             Don't just return NIL — the caller likely can't handle it
+             (e.g., ERROR is not supposed to return).  Print diagnostic
+             info and abort cleanly. */
+          {
+            natural fn_raw = untag(xpGPR(xp, 9));
+            char fn_name[64] = {0};
+            /* Try to extract the function name from the symbol's pname */
+            if (fn_raw > 0x100000000LL && fn_raw < 0x400000000000LL) {
+              LispObj pn = ((LispObj *)fn_raw)[0]; /* pname */
+              natural pn_raw = untag(pn);
+              if (pn_raw > 0x100000000LL && pn_raw < 0x400000000000LL) {
+                LispObj pn_hdr = ((LispObj *)pn_raw)[-1];
+                natural pn_len = header_element_count(pn_hdr);
+                int cs = ((header_subtag(pn_hdr) & 0x7F) == 7) ? 4 : 1;
+                if (pn_len > 0 && pn_len < 60) {
+                  for (natural i = 0; i < pn_len; i++)
+                    fn_name[i] = ((char *)pn_raw)[i * cs];
+                  fn_name[pn_len] = 0;
+                }
+              }
+            }
+            fprintf(dbgout, "early-boot-err: undefined function '%s' called during boot\n",
+                    fn_name[0] ? fn_name : "???");
+            fprintf(dbgout, "  PC=%016lx LR=%016lx SP=%016lx\n",
+                    (unsigned long)(natural)xpPC(xp),
+                    (unsigned long)xpGPR(xp, 30),
+                    (unsigned long)xpGPR(xp, 31));
+            /* Print arg_z which often has an error message string */
+            {
+              LispObj errarg = xpGPR(xp, 15);
+              natural az_raw = untag(errarg);
+              if (az_raw > 0x100000000LL && az_raw < 0x400000000000LL) {
+                LispObj az_hdr = ((LispObj *)az_raw)[-1];
+                natural az_tag = header_subtag(az_hdr);
+                /* Check if it's a simple-base-string (subtag 0x87) */
+                if (az_tag == 0x87) {
+                  natural slen = header_element_count(az_hdr);
+                  if (slen > 0 && slen < 256) {
+                    fprintf(dbgout, "  arg_z (string): \"");
+                    for (natural i = 0; i < slen; i++)
+                      fprintf(dbgout, "%c", ((char *)az_raw)[i * 4]);
+                    fprintf(dbgout, "\"\n");
+                  }
+                }
+              }
+            }
+            /* Print catch_top for debugging */
+            {
+              TCR *tcr = get_tcr(false);
+              if (tcr) {
+                fprintf(dbgout, "  catch_top=%016lx vsp=%016lx\n",
+                        (unsigned long)(natural)tcr->catch_top,
+                        (unsigned long)xpGPR(xp, 25));
+              }
+            }
+            fflush(dbgout);
+            fprintf(dbgout, "early-boot-err: aborting (undefined function cannot safely return)\n");
+            fflush(dbgout);
+            _exit(1);
+          }
         }
         /* Other UUO errors: skip HLT and continue */
         *bumpP = 4;

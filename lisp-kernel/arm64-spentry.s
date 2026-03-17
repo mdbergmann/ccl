@@ -1616,17 +1616,23 @@ _spentry(discard_stack_object)
         __(add sp,sp,#lisp_frame.size)
         __(b 9f)
 2:      /* Must be a header.  Check if ivector (immheader) */
-        /* Bug 160: imm1 already has the top byte (subtag) from the
+        /* Bug 160/161: imm1 already has the top byte (subtag) from the
            tag_shift extraction above.  Check uvector_header bit in the
            subtag byte, NOT in the raw 64-bit value (which has the count
-           in the low bits, not the subtag). */
+           in the low bits, not the subtag).
+           Bug 161: Classification must match SPstack_misc_alloc.
+           Subtag order on ARM64: 32-bit(<=0x88) 64-bit(<=0x93) 8-bit(<=0x97)
+           16-bit(<=0x9B) 128-bit(0x9D) bit(0x9F) gvec(>=0xA0).
+           Previous code missed the 64-bit case, so macptr/s64/u64 etc.
+           were misclassified as 8-bit, computing wrong skip size. */
         __(tst imm1,#uvector_header)
         __(beq 9f)
         /* imm1 still has the subtag from the earlier lsr */
         __(ubfx imm0,imm0,#0,#subtag_shift)
         __(tst imm1,#gvector_tag_mask)
         __(beq local_label(ivector))
-local_label(word):
+local_label(gvec):
+        /* gvector: count * node_size (8 bytes per element) */
         __(lsl imm0,imm0,#word_shift)
 local_label(out):
         __(dnode_align(imm0,imm0,node_size))
@@ -1634,21 +1640,27 @@ local_label(out):
 9:      __(ret)
 local_label(ivector):
         __(cmp imm1,#max_32_bit_ivector_subtag)
-        __(bls local_label(word))
+        __(bls local_label(word32))
+        __(cmp imm1,#max_64_bit_ivector_subtag)
+        __(bls local_label(gvec))       /* 64-bit: count*8, same as gvector */
         __(cmp imm1,#max_8_bit_ivector_subtag)
         __(bhi 3f)
-        __(b local_label(out))
+        __(b local_label(out))          /* 8-bit: count*1 */
 3:      __(cmp imm1,#max_16_bit_ivector_subtag)
         __(bhi 4f)
-        __(lsl imm0,imm0,#1)
+        __(lsl imm0,imm0,#1)           /* 16-bit: count*2 */
         __(b local_label(out))
 4:      __(cmp imm1,#subtag_bit_vector)
         __(bne 5f)
-        __(add imm0,imm0,#7)
+        __(add imm0,imm0,#7)           /* bit: (count+7)/8 */
         __(lsr imm0,imm0,#3)
         __(b local_label(out))
-5:      /* The infamous 'stack-consed double-float vector' case */
+5:      /* 128-bit: complex-double-float-vector, count*16 */
         __(lsl imm0,imm0,#dnode_shift)
+        __(b local_label(out))
+local_label(word32):
+        /* 32-bit ivectors: count*4 */
+        __(lsl imm0,imm0,#2)
         __(b local_label(out))
 
 	
@@ -2301,10 +2313,13 @@ _spentry(recover_values)
 
 /* If arg_z is an integer, return in imm0 something whose sign  */
 /* is the same as arg_z's.  If not an integer, error.  */
+/* Bug 161: Same clobbering issue as SPgets64. branch_if_fixnum uses imm0
+   as scratch, clobbering the value. Fix: test first, then mov. */
 _spentry(integer_sign)
+        __(branch_if_not_fixnum(arg_z,1f,imm0))
         __(mov imm0,arg_z)
-        __(branch_if_fixnum(arg_z,9f,imm0))
-        __(extract_typecode(imm0,arg_z))
+        __(b 9f)
+1:      __(extract_typecode(imm0,arg_z))
         __(cmp imm0,#subtag_bignum)
         __(beq 1f)
         __(uuo_error_reg_not_xtype(arg_z,xtype_integer))
@@ -2560,9 +2575,14 @@ _spentry(getu64)
 /* arg_z should be of type (SIGNED-BYTE 64);  */
 /*    return unboxed value in imm0  */
 
+/* Bug 161: On ARM64 with fixnumshift=0, unbox_fixnum is identity (mov imm0,arg_z).
+   branch_if_fixnum uses its scratch register (imm0) for the fixnum test,
+   clobbering the unboxed value to 0.  Fix: test first, then unbox (like getu64). */
 _spentry(gets64)
+        __(branch_if_not_fixnum(arg_z,1f,imm0))
         __(unbox_fixnum(imm0,arg_z))
-        __(branch_if_fixnum(arg_z,1f,imm0))
+        __(ret)
+1:
         __(extract_lisptag(imm0,arg_z))
         __(cmp imm0,#tag_misc)
         __(bne 2f)
@@ -2571,7 +2591,7 @@ _spentry(gets64)
         __(cmp imm0,imm1)
         __(bne 2f)
         __(ldr imm0,[arg_z,#misc_data_offset])
-1:      __(ret)
+        __(ret)
 2:      __(uuo_error_reg_not_xtype(arg_z,xtype_s64))
 
 
