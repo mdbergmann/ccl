@@ -79,7 +79,7 @@
     (cl "ccl:xdump;heap-image.lisp")))
 
 (format t "~%=== Building ARM64 boot image ===~%")
-(cross-xload-level-0 :darwinarm64)
+(cross-xload-level-0 :darwinarm64 :force)
 (format t "~%  ARM64 entrypoint fixes applied: ~d~%" ccl::*arm64-ep-fix-count*)
 (format t "~%=== Image build COMPLETE ===~%")
 (quit)

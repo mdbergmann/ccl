@@ -1616,9 +1616,13 @@ _spentry(discard_stack_object)
         __(add sp,sp,#lisp_frame.size)
         __(b 9f)
 2:      /* Must be a header.  Check if ivector (immheader) */
-        __(tst imm0,#uvector_header)
+        /* Bug 160: imm1 already has the top byte (subtag) from the
+           tag_shift extraction above.  Check uvector_header bit in the
+           subtag byte, NOT in the raw 64-bit value (which has the count
+           in the low bits, not the subtag). */
+        __(tst imm1,#uvector_header)
         __(beq 9f)
-        __(lsr imm1,imm0,#subtag_shift)
+        /* imm1 still has the subtag from the earlier lsr */
         __(ubfx imm0,imm0,#0,#subtag_shift)
         __(tst imm1,#gvector_tag_mask)
         __(beq local_label(ivector))

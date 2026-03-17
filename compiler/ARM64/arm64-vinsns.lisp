@@ -4375,10 +4375,9 @@
   (ldr val (:@ sp (:$ (:apply + 8 offset)))))
 
 (define-arm64-vinsn (nfp-load-double-float-nested :nfp :ref) (((val :double-float))
-                                                                ((offset :u16const))
-                                                                ((nfp-reg :imm)))
-  (ldr nfp-reg (:@ rcontext (:$ arm64::tcr.nfp)))
-  (ldr val (:@ nfp-reg (:$ (:apply + 8 offset)))))
+                                                                ((offset :u16const)))
+  (ldr lr (:@ rcontext (:$ arm64::tcr.nfp)))
+  (ldr val (:@ lr (:$ (:apply + 8 offset)))))
 
 (define-arm64-vinsn (nfp-store-double-float :nfp :set) (()
                                                          ((val :double-float)
@@ -4387,20 +4386,18 @@
 
 (define-arm64-vinsn (nfp-store-double-float-nested :nfp :set) (()
                                                                  ((val :double-float)
-                                                                  (offset :u16const))
-                                                                 ((nfp-reg :imm)))
-  (ldr nfp-reg (:@ rcontext (:$ arm64::tcr.nfp)))
-  (str val (:@ nfp-reg (:$ (:apply + 8 offset)))))
+                                                                  (offset :u16const)))
+  (ldr lr (:@ rcontext (:$ arm64::tcr.nfp)))
+  (str val (:@ lr (:$ (:apply + 8 offset)))))
 
 (define-arm64-vinsn (nfp-load-single-float :nfp :ref) (((val :single-float))
                                                         ((offset :u16const)))
   (ldr val (:@ sp (:$ (:apply + 8 offset)))))
 
 (define-arm64-vinsn (nfp-load-single-float-nested :nfp :ref) (((val :single-float))
-                                                                ((offset :u16const))
-                                                                ((nfp-reg :imm)))
-  (ldr nfp-reg (:@ rcontext (:$ arm64::tcr.nfp)))
-  (ldr val (:@ nfp-reg (:$ (:apply + 8 offset)))))
+                                                                ((offset :u16const)))
+  (ldr lr (:@ rcontext (:$ arm64::tcr.nfp)))
+  (ldr val (:@ lr (:$ (:apply + 8 offset)))))
 
 (define-arm64-vinsn (nfp-store-single-float :nfp :set) (()
                                                          ((val :single-float)
@@ -4409,20 +4406,18 @@
 
 (define-arm64-vinsn (nfp-store-single-float-nested :nfp :set) (()
                                                                  ((val :single-float)
-                                                                  (offset :u16const))
-                                                                 ((nfp-reg :imm)))
-  (ldr nfp-reg (:@ rcontext (:$ arm64::tcr.nfp)))
-  (str val (:@ nfp-reg (:$ (:apply + 8 offset)))))
+                                                                  (offset :u16const)))
+  (ldr lr (:@ rcontext (:$ arm64::tcr.nfp)))
+  (str val (:@ lr (:$ (:apply + 8 offset)))))
 
 (define-arm64-vinsn (nfp-load-unboxed-word :nfp :ref) (((val :u64))
                                                         ((offset :u16const)))
   (ldr val (:@ sp (:$ (:apply + 8 offset)))))
 
 (define-arm64-vinsn (nfp-load-unboxed-word-nested :nfp :ref) (((val :u64))
-                                                                ((offset :u16const))
-                                                                ((nfp-reg :imm)))
-  (ldr nfp-reg (:@ rcontext (:$ arm64::tcr.nfp)))
-  (ldr val (:@ nfp-reg (:$ (:apply + 8 offset)))))
+                                                                ((offset :u16const)))
+  (ldr lr (:@ rcontext (:$ arm64::tcr.nfp)))
+  (ldr val (:@ lr (:$ (:apply + 8 offset)))))
 
 (define-arm64-vinsn (nfp-store-unboxed-word :nfp :set) (()
                                                          ((val :u64)
@@ -4431,20 +4426,18 @@
 
 (define-arm64-vinsn (nfp-store-unboxed-word-nested :nfp :set) (()
                                                                  ((val :u64)
-                                                                  (offset :u16const))
-                                                                 ((nfp-reg :imm)))
-  (ldr nfp-reg (:@ rcontext (:$ arm64::tcr.nfp)))
-  (str val (:@ nfp-reg (:$ (:apply + 8 offset)))))
+                                                                  (offset :u16const)))
+  (ldr lr (:@ rcontext (:$ arm64::tcr.nfp)))
+  (str val (:@ lr (:$ (:apply + 8 offset)))))
 
 (define-arm64-vinsn (nfp-load-complex-double-float :nfp :ref) (((val :complex-double-float))
                                                                  ((offset :u16const)))
   (ldr val (:@ sp (:$ (:apply + 8 offset)))))
 
 (define-arm64-vinsn (nfp-load-complex-double-float-nested :nfp :ref) (((val :complex-double-float))
-                                                                       ((offset :u16const))
-                                                                       ((nfp-reg :imm)))
-  (ldr nfp-reg (:@ rcontext (:$ arm64::tcr.nfp)))
-  (ldr val (:@ nfp-reg (:$ (:apply + 8 offset)))))
+                                                                       ((offset :u16const)))
+  (ldr lr (:@ rcontext (:$ arm64::tcr.nfp)))
+  (ldr val (:@ lr (:$ (:apply + 8 offset)))))
 
 (define-arm64-vinsn (nfp-store-complex-double-float :nfp :set) (()
                                                                   ((val :complex-double-float)
@@ -4453,20 +4446,18 @@
 
 (define-arm64-vinsn (nfp-store-complex-double-float-nested :nfp :set) (()
                                                                         ((val :complex-double-float)
-                                                                         (offset :u16const))
-                                                                        ((nfp-reg :imm)))
-  (ldr nfp-reg (:@ rcontext (:$ arm64::tcr.nfp)))
-  (str val (:@ nfp-reg (:$ (:apply + 8 offset)))))
+                                                                         (offset :u16const)))
+  (ldr lr (:@ rcontext (:$ arm64::tcr.nfp)))
+  (str val (:@ lr (:$ (:apply + 8 offset)))))
 
 (define-arm64-vinsn (nfp-load-complex-single-float :nfp :ref) (((val :complex-single-float))
                                                                  ((offset :u16const)))
   (ldr val (:@ sp (:$ (:apply + 8 offset)))))
 
 (define-arm64-vinsn (nfp-load-complex-single-float-nested :nfp :ref) (((val :complex-single-float))
-                                                                       ((offset :u16const))
-                                                                       ((nfp-reg :imm)))
-  (ldr nfp-reg (:@ rcontext (:$ arm64::tcr.nfp)))
-  (ldr val (:@ nfp-reg (:$ (:apply + 8 offset)))))
+                                                                       ((offset :u16const)))
+  (ldr lr (:@ rcontext (:$ arm64::tcr.nfp)))
+  (ldr val (:@ lr (:$ (:apply + 8 offset)))))
 
 (define-arm64-vinsn (nfp-store-complex-single-float :nfp :set) (()
                                                                   ((val :complex-single-float)
@@ -4475,10 +4466,9 @@
 
 (define-arm64-vinsn (nfp-store-complex-single-float-nested :nfp :set) (()
                                                                         ((val :complex-single-float)
-                                                                         (offset :u16const))
-                                                                        ((nfp-reg :imm)))
-  (ldr nfp-reg (:@ rcontext (:$ arm64::tcr.nfp)))
-  (str val (:@ nfp-reg (:$ (:apply + 8 offset)))))
+                                                                         (offset :u16const)))
+  (ldr lr (:@ rcontext (:$ arm64::tcr.nfp)))
+  (str val (:@ lr (:$ (:apply + 8 offset)))))
 
 ;;; --- NVR save/restore ---
 ;;; Push/pop non-volatile registers to/from vstack.
