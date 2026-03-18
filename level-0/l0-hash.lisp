@@ -416,8 +416,6 @@
     ;; causes nhash.vector to read garbage from static area), bail out safely
     ;; so boot can continue past the bad hash table.
     (unless (eql (typecode vector) target::subtag-hash-vector)
-      (when (fboundp 'pdbg)
-        (pdbg "*** BAD HASH VECTOR ***"))
       (return-from compute-hash-code (values 0 0 0)))
     (let* ((entries (nhash.vector-size vector)))
       (declare (fixnum entries))
