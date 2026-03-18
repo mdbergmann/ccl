@@ -5394,27 +5394,62 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
       {
         extern volatile void *dbg_fasl_cursor_addr;
         if (dbg_fasl_cursor_addr) {
-          unsigned long long cv = *(unsigned long long *)dbg_fasl_cursor_addr;
-          if (cv != 0 && cv < 0x10000) {
+          /* ARM64 watchpoints fire BEFORE the store commits.
+             Decode the STR instruction to find the value being written.
+             The cursor writes are: str x0, [x1] (opcode 0xf9000020)
+             For any STR Rt, [Xn, ...], Rt is in bits[4:0] of the instruction. */
+          unsigned int insn = *(unsigned int *)(uintptr_t)ts->__pc;
+          int src_reg = insn & 0x1F;  /* source register (Rt field) */
+          unsigned long long write_val = ts->__x[src_reg];
+
+          if (write_val != 0 && write_val < 0x10000) {
             /* Bug 162: Watchpoint caught the corrupting write! */
             fprintf(dbgout, "\n\n=== Bug 162: WATCHPOINT CAUGHT CORRUPTION ===\n");
-            fprintf(dbgout, "  PC  = 0x%lx\n", (unsigned long)ts->__pc);
+            fprintf(dbgout, "  PC  = 0x%lx  (insn=0x%08x, Rt=x%d, val=0x%llx)\n",
+                    (unsigned long)ts->__pc, insn, src_reg, write_val);
             fprintf(dbgout, "  LR  = 0x%lx\n", (unsigned long)ts->__lr);
             fprintf(dbgout, "  SP  = 0x%lx  FP = 0x%lx\n",
                     (unsigned long)ts->__sp, (unsigned long)ts->__fp);
-            fprintf(dbgout, "  cursor_addr=%p val=0x%llx\n", dbg_fasl_cursor_addr, cv);
-            fprintf(dbgout, "  x0=%lx x1=%lx x11=%lx x12=%lx x13=%lx x14=%lx x15=%lx\n",
-                    (unsigned long)ts->__x[0], (unsigned long)ts->__x[1],
-                    (unsigned long)ts->__x[11], (unsigned long)ts->__x[12],
-                    (unsigned long)ts->__x[13], (unsigned long)ts->__x[14],
-                    (unsigned long)ts->__x[15]);
+            fprintf(dbgout, "  cursor_addr=%p current_mem=0x%llx\n",
+                    dbg_fasl_cursor_addr,
+                    *(unsigned long long *)dbg_fasl_cursor_addr);
+            for (int ri = 0; ri < 16; ri++) {
+              fprintf(dbgout, "  x%d=0x%llx", ri,
+                      (unsigned long long)ts->__x[ri]);
+              if (ri % 4 == 3) fprintf(dbgout, "\n");
+            }
+            fprintf(dbgout, "  x25(vsp)=0x%llx x28(tcr)=0x%llx x29(fp)=0x%llx x30(lr)=0x%llx\n",
+                    (unsigned long long)ts->__x[25], (unsigned long long)ts->__x[28],
+                    (unsigned long long)ts->__x[29], (unsigned long long)ts->__x[30]);
             unsigned int *pc_ptr = (unsigned int *)(uintptr_t)ts->__pc;
-            fprintf(dbgout, "  Code: [-8]=%08x [-4]=%08x [0]=%08x [+4]=%08x\n",
-                    pc_ptr[-2], pc_ptr[-1], pc_ptr[0], pc_ptr[1]);
+            fprintf(dbgout, "  Code: ");
+            for (int ci = -4; ci <= 4; ci++) {
+              fprintf(dbgout, "[%+d]=%08x ", ci*4, pc_ptr[ci]);
+            }
+            fprintf(dbgout, "\n");
+            /* Dump stack around SP */
+            unsigned long long *sp_ptr = (unsigned long long *)(uintptr_t)ts->__sp;
+            fprintf(dbgout, "  Stack:\n");
+            for (int si = 0; si < 16; si++) {
+              fprintf(dbgout, "    [sp+%d] = 0x%llx\n", si*8, sp_ptr[si]);
+            }
+            fflush(dbgout);
             abort();
           }
-          /* Legitimate cursor write — resume without delivering signal */
-          return KERN_SUCCESS;
+          /* Legitimate cursor write — skip past the store instruction.
+             ARM64 watchpoints fire before the store commits.
+             We perform the store manually, advance PC, and return
+             the modified thread state. */
+          unsigned long long dest_addr = ts->__x[(insn >> 5) & 0x1F]; /* Rn = base reg */
+          dest_addr &= 0x00FFFFFFFFFFFFFFULL; /* strip TBI */
+          /* Perform the store manually */
+          *(unsigned long long *)dest_addr = write_val;
+          /* Copy old state to output, advance PC */
+          *out_ts = *ts;
+          out_ts->__pc = ts->__pc + 4;
+          *out_state_count = NATIVE_THREAD_STATE_COUNT;
+          kret = KERN_SUCCESS;
+          goto done;
         }
       }
       signum = SIGTRAP;

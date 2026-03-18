@@ -209,7 +209,14 @@ lisp_read(int fd, void *buf, size_t count)
       dbg_fasl_cursor_expected = *(unsigned long long *)dbg_fasl_cursor_addr;
       fprintf(stderr, "DBG cursor_addr=%p cursor_val=%016llx\n",
               dbg_fasl_cursor_addr, dbg_fasl_cursor_expected);
-      /* Start monitor immediately when cursor addr is known */
+      /* Arm hardware watchpoint immediately on main thread */
+      {
+        mach_port_t self = pthread_mach_thread_np(pthread_self());
+        if (dbg_set_hw_watchpoint(self, dbg_fasl_cursor_addr) == 0) {
+          fprintf(stderr, "DBG: Watchpoint armed on cursor cell from main thread\n");
+        }
+      }
+      /* Start monitor as backup */
       dbg_start_cursor_monitor();
     }
     /* Check cursor on every call */
