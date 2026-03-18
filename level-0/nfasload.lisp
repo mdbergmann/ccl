@@ -239,12 +239,9 @@
       (setf (schar new i) (schar str i)))))
 
 (defun %fasl-dispatch (s op)
-  (declare (fixnum op)) 
+  (declare (fixnum op))
   (setf (faslstate.faslepush s) (logbitp $fasl-epush-bit op))
-  #+debug
-  (format t "~& dispatch: op = ~d at ~x" (logand op (lognot (ash 1 $fasl-epush-bit)))
-          (1- (%fasl-get-file-pos s)))
-  (funcall (svref (faslstate.fasldispatch s) (logand op (lognot (ash 1 $fasl-epush-bit)))) 
+  (funcall (svref (faslstate.fasldispatch s) (logand op (lognot (ash 1 $fasl-epush-bit))))
            s))
 
 (defun %fasl-expr (s)
@@ -1013,7 +1010,7 @@
                            (%err-disp (if (>= version #xff00) $xfaslvers $xnotfasl))
                            (progn
                              (setf (faslstate.faslversion s) version)
-                             (%fasl-read-word s) 
+                             (%fasl-read-word s)
                              (%fasl-read-word s) ; Ignore kernel version stuff
                              (setf (faslstate.faslevec s) nil
                                    (faslstate.faslecnt s) 0)

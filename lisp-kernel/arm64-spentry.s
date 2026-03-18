@@ -382,27 +382,36 @@ _spentry(builtin_logxor)
 1:              
         __(jump_builtin(_builtin_logxor,2))
 
+/* Bug 164: builtin_aref1/aset1 extract the TBI reference tag via
+   extract_tag (lsr #56), but subtag_misc_ref/set expect the HEADER
+   subtag in arg_x/temp0.  Reference tag has bit 6 set (uvector_ref=0x40);
+   header subtag has bit 7 set (uvector_header=0x80).  Convert by
+   XORing with uvector_mask (0xC0) before calling subtag_misc_ref/set. */
 _spentry(builtin_aref1)
         __(extract_tag(arg_x,arg_y))
         __(cmp arg_x,#tag_simple_vector)
-        __(beq _SPsubtag_misc_ref)
+        __(beq 1f)
         __(and imm0,arg_x,#uvector_mask)
         __(cmp imm0,#uvector_ref)
         __(bne 0f)
         __(tbnz arg_x,#gvector_tag_bit,0f)
-        __(tbnz arg_x,#cl_ivector_tag_bit,_SPsubtag_misc_ref)
+        __(tbnz arg_x,#cl_ivector_tag_bit,1f)
 0:      __(jump_builtin(_builtin_aref1,2))
+1:      __(eor arg_x,arg_x,#uvector_mask)
+        __(b _SPsubtag_misc_ref)
 
 _spentry(builtin_aset1)
         __(extract_tag(temp0,arg_x))
         __(cmp temp0,#tag_simple_vector)
-        __(beq _SPsubtag_misc_set)
+        __(beq 1f)
         __(and imm0,temp0,#uvector_mask)
         __(cmp imm0,#uvector_ref)
         __(bne 0f)
         __(tbnz temp0,#gvector_tag_bit,0f)
-        __(tbnz temp0,#cl_ivector_tag_bit,_SPsubtag_misc_set)
+        __(tbnz temp0,#cl_ivector_tag_bit,1f)
 0:      __(jump_builtin(_builtin_aset1,3))
+1:      __(eor temp0,temp0,#uvector_mask)
+        __(b _SPsubtag_misc_set)
                 	
 
 	/*  Call nfn if it's either a symbol or function */
