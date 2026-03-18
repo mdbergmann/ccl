@@ -5389,7 +5389,34 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
 
     case EXC_BREAKPOINT:
       /* BRK instructions generate EXC_BREAKPOINT on ARM64.
-         HLT generates EXC_BAD_INSTRUCTION (handled above). */
+         HLT generates EXC_BAD_INSTRUCTION (handled above).
+         Hardware watchpoints also generate EXC_BREAKPOINT. */
+      {
+        extern volatile void *dbg_fasl_cursor_addr;
+        if (dbg_fasl_cursor_addr) {
+          unsigned long long cv = *(unsigned long long *)dbg_fasl_cursor_addr;
+          if (cv != 0 && cv < 0x10000) {
+            /* Bug 162: Watchpoint caught the corrupting write! */
+            fprintf(dbgout, "\n\n=== Bug 162: WATCHPOINT CAUGHT CORRUPTION ===\n");
+            fprintf(dbgout, "  PC  = 0x%lx\n", (unsigned long)ts->__pc);
+            fprintf(dbgout, "  LR  = 0x%lx\n", (unsigned long)ts->__lr);
+            fprintf(dbgout, "  SP  = 0x%lx  FP = 0x%lx\n",
+                    (unsigned long)ts->__sp, (unsigned long)ts->__fp);
+            fprintf(dbgout, "  cursor_addr=%p val=0x%llx\n", dbg_fasl_cursor_addr, cv);
+            fprintf(dbgout, "  x0=%lx x1=%lx x11=%lx x12=%lx x13=%lx x14=%lx x15=%lx\n",
+                    (unsigned long)ts->__x[0], (unsigned long)ts->__x[1],
+                    (unsigned long)ts->__x[11], (unsigned long)ts->__x[12],
+                    (unsigned long)ts->__x[13], (unsigned long)ts->__x[14],
+                    (unsigned long)ts->__x[15]);
+            unsigned int *pc_ptr = (unsigned int *)(uintptr_t)ts->__pc;
+            fprintf(dbgout, "  Code: [-8]=%08x [-4]=%08x [0]=%08x [+4]=%08x\n",
+                    pc_ptr[-2], pc_ptr[-1], pc_ptr[0], pc_ptr[1]);
+            abort();
+          }
+          /* Legitimate cursor write — resume without delivering signal */
+          return KERN_SUCCESS;
+        }
+      }
       signum = SIGTRAP;
       break;
 
