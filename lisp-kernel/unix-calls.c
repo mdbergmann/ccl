@@ -39,10 +39,12 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <sys/mman.h>
 
 /* Debug global: address of FASL buffer cursor (8 bytes before data area) */
 #ifdef ARM64
 volatile void *dbg_fasl_cursor_addr = NULL;
+volatile unsigned long long dbg_fasl_cursor_expected = 0;
 #endif
 
 ssize_t
@@ -61,8 +63,10 @@ lisp_read(int fd, void *buf, size_t count)
     /* Track the FASL buffer cursor location (8 bytes before buf) */
     if (count == 2048 && result > 0 && read_trace_count <= 3) {
       dbg_fasl_cursor_addr = (void *)((char *)buf - 8);
+      dbg_fasl_cursor_expected = *(unsigned long long *)dbg_fasl_cursor_addr;
       fprintf(stderr, "DBG cursor_addr=%p cursor_val=%016llx\n",
-              dbg_fasl_cursor_addr, *(unsigned long long *)dbg_fasl_cursor_addr);
+              dbg_fasl_cursor_addr, dbg_fasl_cursor_expected);
+      /* Use lldb to set: watchpoint set expression -w write -- (long long *)0x<cursor_addr> */
     }
     /* Check cursor on every call */
     if (dbg_fasl_cursor_addr) {

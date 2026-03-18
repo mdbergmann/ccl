@@ -3675,6 +3675,17 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
         fprintf(dbgout, "\n  *** ALLOCPTR CONTAMINATED: tag=0x%02lx ***",
                 (unsigned long)(ts->__x[26] >> 56));
       }
+      /* Bug 162: Check FASL cursor corruption */
+      {
+        extern volatile void *dbg_fasl_cursor_addr;
+        if (dbg_fasl_cursor_addr) {
+          unsigned long long cv = *(unsigned long long *)dbg_fasl_cursor_addr;
+          if (cv != 0 && cv < 0x10000) {
+            fprintf(dbgout, "\n  *** CURSOR CORRUPT @MACH[%d]: addr=%p val=0x%llx sp=0x%lx ***",
+                    dbg_exc_count, dbg_fasl_cursor_addr, cv, (unsigned long)ts->__sp);
+          }
+        }
+      }
       if (exception == EXC_BAD_ACCESS) {
         fprintf(dbgout, " addr=0x%llx x0=0x%lx x9=0x%lx x10=0x%lx x15=0x%lx sp=0x%lx",
                 (long long)code[1],
