@@ -92,8 +92,12 @@
         (return
          (prog1
            (%get-unsigned-byte bufptr)
-           (setf (%get-ptr buffer)
-                 (%incf-ptr bufptr))))
+           ;; Bug 163: Use raw pointer arithmetic instead of %incf-ptr
+           ;; to avoid compiler register allocation issues with macptr ops.
+           #+64-bit-target
+           (incf (%%get-unsigned-longlong buffer 0))
+           #-64-bit-target
+           (setf (%get-ptr buffer) (%incf-ptr bufptr))))
         (%fasl-read-buffer s)))))
 
 (defun %fasl-read-word (s)
@@ -137,6 +141,11 @@
           (decf (the fixnum (faslstate.bufcount s)) nthere)
           (%copy-ptr-to-ivector bufptr 0 ivector byte-offset nthere)
           (incf byte-offset nthere)
+          ;; Bug 163: Use raw pointer arithmetic instead of %incf-ptr
+          ;; to avoid compiler register allocation issues with macptr ops.
+          #+64-bit-target
+          (incf (%%get-unsigned-longlong buffer 0) nthere)
+          #-64-bit-target
           (setf (%get-ptr buffer)
                 (%incf-ptr bufptr nthere)))))))
         

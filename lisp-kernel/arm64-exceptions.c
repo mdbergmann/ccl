@@ -3659,7 +3659,7 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
   {
     static int dbg_exc_count = 0;
     static int initfn_dumped = 0;
-    if (dbg_exc_count < 50) {
+    if (0 && dbg_exc_count < 50) {
       dbg_exc_count++;
       fprintf(dbgout, "MACH[%d]: exc=%d code0=%lld pc=0x%lx lr=0x%lx vsp=0x%lx rnil=0x%lx rt=0x%lx fp=0x%lx catch_top=0x%lx allocptr=0x%lx x10=0x%lx",
               dbg_exc_count, exception, (long long)code0,
@@ -5215,11 +5215,45 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
       int dest_reg = insn & 0x1f;  /* bits 4:0 = destination register */
       static int null_deref_count = 0;
       null_deref_count++;
-      if (null_deref_count <= 3 || (null_deref_count % 500) == 0)
-        fprintf(dbgout, "null-deref skip: pc=0x%lx insn=0x%08x dest=x%d (#%d)\n",
-                (unsigned long)fault_pc, insn, dest_reg, null_deref_count);
-      if (null_deref_count > 50000) {
-        fprintf(dbgout, "too many null-deref skips (%d), aborting\n", null_deref_count);
+      fprintf(dbgout, "null-deref #%d: pc=0x%lx insn=0x%08x dest=x%d addr=0x%llx\n",
+              null_deref_count, (unsigned long)fault_pc, insn, dest_reg, (long long)code[1]);
+      fprintf(dbgout, "  x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx\n",
+              (unsigned long long)ts->__x[0], (unsigned long long)ts->__x[1],
+              (unsigned long long)ts->__x[2], (unsigned long long)ts->__x[3]);
+      fprintf(dbgout, "  x9=0x%llx x10=0x%llx x11=0x%llx x12=0x%llx\n",
+              (unsigned long long)ts->__x[9], (unsigned long long)ts->__x[10],
+              (unsigned long long)ts->__x[11], (unsigned long long)ts->__x[12]);
+      fprintf(dbgout, "  x13=0x%llx x14=0x%llx x15=0x%llx\n",
+              (unsigned long long)ts->__x[13], (unsigned long long)ts->__x[14],
+              (unsigned long long)ts->__x[15]);
+      fprintf(dbgout, "  lr=0x%llx sp=0x%llx fp=0x%llx vsp=0x%llx allocptr=0x%llx\n",
+              (unsigned long long)ts->__lr, (unsigned long long)ts->__sp,
+              (unsigned long long)ts->__fp, (unsigned long long)ts->__x[25],
+              (unsigned long long)ts->__x[26]);
+      /* Dump code around PC */
+      {
+        unsigned int *pc_ptr = (unsigned int *)(uintptr_t)fault_pc;
+        fprintf(dbgout, "  code:");
+        for (int ci = -8; ci <= 8; ci++)
+          fprintf(dbgout, " %s%08x%s", ci==0?">>>":"", pc_ptr[ci], ci==0?"<<<":"");
+        fprintf(dbgout, "\n");
+      }
+      /* Walk lisp frames via fp chain */
+      {
+        unsigned long long fp_val = ts->__fp;
+        fprintf(dbgout, "  frames:");
+        for (int fi = 0; fi < 8 && fp_val > 0x100000000ULL; fi++) {
+          unsigned long long *fp_ptr = (unsigned long long *)fp_val;
+          unsigned long long saved_lr = fp_ptr[1];    /* lisp frame: [0]=savevsp [1]=savelr [2]=savefn [3]=savefp */
+          unsigned long long saved_fn = fp_ptr[2];
+          fprintf(dbgout, " [lr=0x%llx fn=0x%llx]", saved_lr, saved_fn);
+          fp_val = fp_ptr[3];  /* next frame */
+        }
+        fprintf(dbgout, "\n");
+      }
+      fflush(dbgout);
+      if (null_deref_count > 5) {
+        fprintf(dbgout, "FATAL: too many null-deref skips (%d), aborting\n", null_deref_count);
         fflush(dbgout);
         _exit(1);
       }
@@ -5270,13 +5304,6 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
        entirely. */
     if (exception == EXC_BAD_INSTRUCTION) {
       opcode insn = *(opcode *)(natural)ts->__pc;
-      fprintf(dbgout, "DBG alloc-check: pc=0x%lx insn=0x%08x IS_ALLOC=%d IS_GC=%d IS_HLT=%d imm16=0x%x\n",
-              (unsigned long)ts->__pc, insn,
-              IS_ALLOC_TRAP(insn) ? 1 : 0,
-              IS_GC_TRAP(insn) ? 1 : 0,
-              IS_HLT(insn) ? 1 : 0,
-              IS_HLT(insn) ? HLT_IMM16(insn) : 0);
-      fflush(dbgout);
       if (IS_ALLOC_TRAP(insn)) {
         signed_natural disp = 0;
         opcode *pc = (opcode *)(natural)ts->__pc;
@@ -5319,14 +5346,6 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
                                 align_to_power_of_2(bytes_needed, log2_aq));
 
             if (newlimit <= (natural)a->high) {
-              static int alloc_count = 0;
-              alloc_count++;
-              fprintf(dbgout, "alloc-mach[%d]: disp=%ld bytes=%lu old=0x%lx new=0x%lx allocptr_out=0x%lx x10=0x%lx x29=0x%lx\n",
-                      alloc_count, (long)disp, (unsigned long)bytes_needed,
-                      (unsigned long)oldlimit, (unsigned long)newlimit,
-                      (unsigned long)((LispObj)newlimit + disp),
-                      (unsigned long)ts->__x[10], (unsigned long)ts->__fp);
-              fflush(dbgout);
               a->active = (BytePtr)newlimit;
               /* Zero new memory */
               if ((BytePtr)oldlimit < heap_dirty_limit) {
@@ -5389,69 +5408,7 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
 
     case EXC_BREAKPOINT:
       /* BRK instructions generate EXC_BREAKPOINT on ARM64.
-         HLT generates EXC_BAD_INSTRUCTION (handled above).
-         Hardware watchpoints also generate EXC_BREAKPOINT. */
-      {
-        extern volatile void *dbg_fasl_cursor_addr;
-        if (dbg_fasl_cursor_addr) {
-          /* ARM64 watchpoints fire BEFORE the store commits.
-             Decode the STR instruction to find the value being written.
-             The cursor writes are: str x0, [x1] (opcode 0xf9000020)
-             For any STR Rt, [Xn, ...], Rt is in bits[4:0] of the instruction. */
-          unsigned int insn = *(unsigned int *)(uintptr_t)ts->__pc;
-          int src_reg = insn & 0x1F;  /* source register (Rt field) */
-          unsigned long long write_val = ts->__x[src_reg];
-
-          if (write_val != 0 && write_val < 0x10000) {
-            /* Bug 162: Watchpoint caught the corrupting write! */
-            fprintf(dbgout, "\n\n=== Bug 162: WATCHPOINT CAUGHT CORRUPTION ===\n");
-            fprintf(dbgout, "  PC  = 0x%lx  (insn=0x%08x, Rt=x%d, val=0x%llx)\n",
-                    (unsigned long)ts->__pc, insn, src_reg, write_val);
-            fprintf(dbgout, "  LR  = 0x%lx\n", (unsigned long)ts->__lr);
-            fprintf(dbgout, "  SP  = 0x%lx  FP = 0x%lx\n",
-                    (unsigned long)ts->__sp, (unsigned long)ts->__fp);
-            fprintf(dbgout, "  cursor_addr=%p current_mem=0x%llx\n",
-                    dbg_fasl_cursor_addr,
-                    *(unsigned long long *)dbg_fasl_cursor_addr);
-            for (int ri = 0; ri < 16; ri++) {
-              fprintf(dbgout, "  x%d=0x%llx", ri,
-                      (unsigned long long)ts->__x[ri]);
-              if (ri % 4 == 3) fprintf(dbgout, "\n");
-            }
-            fprintf(dbgout, "  x25(vsp)=0x%llx x28(tcr)=0x%llx x29(fp)=0x%llx x30(lr)=0x%llx\n",
-                    (unsigned long long)ts->__x[25], (unsigned long long)ts->__x[28],
-                    (unsigned long long)ts->__x[29], (unsigned long long)ts->__x[30]);
-            unsigned int *pc_ptr = (unsigned int *)(uintptr_t)ts->__pc;
-            fprintf(dbgout, "  Code: ");
-            for (int ci = -4; ci <= 4; ci++) {
-              fprintf(dbgout, "[%+d]=%08x ", ci*4, pc_ptr[ci]);
-            }
-            fprintf(dbgout, "\n");
-            /* Dump stack around SP */
-            unsigned long long *sp_ptr = (unsigned long long *)(uintptr_t)ts->__sp;
-            fprintf(dbgout, "  Stack:\n");
-            for (int si = 0; si < 16; si++) {
-              fprintf(dbgout, "    [sp+%d] = 0x%llx\n", si*8, sp_ptr[si]);
-            }
-            fflush(dbgout);
-            abort();
-          }
-          /* Legitimate cursor write — skip past the store instruction.
-             ARM64 watchpoints fire before the store commits.
-             We perform the store manually, advance PC, and return
-             the modified thread state. */
-          unsigned long long dest_addr = ts->__x[(insn >> 5) & 0x1F]; /* Rn = base reg */
-          dest_addr &= 0x00FFFFFFFFFFFFFFULL; /* strip TBI */
-          /* Perform the store manually */
-          *(unsigned long long *)dest_addr = write_val;
-          /* Copy old state to output, advance PC */
-          *out_ts = *ts;
-          out_ts->__pc = ts->__pc + 4;
-          *out_state_count = NATIVE_THREAD_STATE_COUNT;
-          kret = KERN_SUCCESS;
-          goto done;
-        }
-      }
+         HLT generates EXC_BAD_INSTRUCTION (handled above). */
       signum = SIGTRAP;
       break;
 

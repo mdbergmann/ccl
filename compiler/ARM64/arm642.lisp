@@ -2701,12 +2701,18 @@
                    (#.hard-reg-class-gpr-mode-address
                     (! macptr->heap dest src))
                    (#.hard-reg-class-gpr-mode-u64
-                    ;; SPmakeu64 takes imm0 (already=src), returns result in arg_z
+                    ;; SPmakeu64 takes input in imm0, returns result in arg_z.
+                    ;; Bug 163: src may be any imm register, not just imm0.
+                    (unless (eql src-gpr (hard-regspec-value arm64::imm0))
+                      (! copy-gpr arm64::imm0 src))
                     (! makeu64)
                     (unless (eql (hard-regspec-value dest) (hard-regspec-value arm64::arg_z))
                       (! copy-gpr dest arm64::arg_z)))
                    (#.hard-reg-class-gpr-mode-s64
-                    ;; SPmakes64 takes imm0 (already=src), returns result in arg_z
+                    ;; SPmakes64 takes input in imm0, returns result in arg_z.
+                    ;; Bug 163: src may be any imm register, not just imm0.
+                    (unless (eql src-gpr (hard-regspec-value arm64::imm0))
+                      (! copy-gpr arm64::imm0 src))
                     (! makes64)
                     (unless (eql (hard-regspec-value dest) (hard-regspec-value arm64::arg_z))
                       (! copy-gpr dest arm64::arg_z)))))

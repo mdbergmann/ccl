@@ -687,11 +687,7 @@ new_semaphore(int count)
 #ifdef USE_MACH_SEMAPHORES
   kern_return_t kret;
   semaphore_t s = (semaphore_t)0;
-  fprintf(dbgout, "DBG new_semaphore: count=%d task=0x%x sp=%p\n", count, mach_task_self(), &s);
-  fflush(dbgout);
   kret = semaphore_create(mach_task_self(),&s, SYNC_POLICY_FIFO, count);
-  fprintf(dbgout, "DBG new_semaphore: kret=%d s=0x%x\n", kret, s);
-  fflush(dbgout);
   if (kret != KERN_SUCCESS) {
     fatal_oserr("Can't create Mach semaphore.",(OSErr)kret);
   }
@@ -1272,10 +1268,6 @@ init_arm64_tcr_sptab(TCR *tcr)
     *q = *p;
     count++;
   }
-  fprintf(dbgout, "DBG sptab init: copied %d entries, sptab=%p sptab_end=%p\n",
-          count, (void*)sptab, (void*)sptab_end);
-  fprintf(dbgout, "  sptab[24]=0x%lx (SPfuncall)\n", (unsigned long)tcr->sptab[24]);
-  fflush(dbgout);
 }
 #endif
   

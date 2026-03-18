@@ -2252,105 +2252,6 @@ main
       }
     }
   }
-  /* DEBUG Bug 131: search for EQUAL symbol and print its fcell */
-  {
-    BytePtr heap_start = (BytePtr)(natural)lisp_global(HEAP_START);
-    LispObj *start = (LispObj *)heap_start;
-    LispObj *end = (LispObj *)active_dynamic_area->active;
-    area *ro = readonly_area;
-    LispObj *ro_low = ro ? (LispObj *)ro->low : NULL;
-    LispObj *ro_high = ro ? (LispObj *)ro->active : NULL;
-    int sym_count = 0, pname_ok_count = 0, pname_bad_count = 0;
-    fprintf(dbgout, "  DEBUG Bug131: searching for EQUAL symbol in dynamic area\n");
-    fprintf(dbgout, "  DEBUG Bug131: dynamic 0x%lx-0x%lx readonly 0x%lx-0x%lx\n",
-            (unsigned long)start, (unsigned long)end,
-            (unsigned long)ro_low, (unsigned long)ro_high);
-    fprintf(dbgout, "  DEBUG Bug131: subtag_symbol=0x%lx subtag_simple_base_string=0x%lx\n",
-            (unsigned long)subtag_symbol, (unsigned long)subtag_simple_base_string);
-
-    while (start < end) {
-      LispObj w0 = *start;
-      natural subtag = header_subtag(w0);
-
-      if (immheader_tag_p(subtag)) {
-        start = (LispObj *)skip_over_ivector((natural)start, w0);
-      } else if (nodeheader_tag_p(subtag)) {
-        natural count = header_element_count(w0);
-        if (subtag == subtag_symbol && count >= 7) {
-          sym_count++;
-          LispObj pname = start[1];
-          LispObj fcell = start[3];
-          if (pname != 0) {
-            LispObj pname_untagged = untag(pname);
-            LispObj *pname_ptr = (LispObj *)pname_untagged;
-            /* Accept pname in dynamic OR readonly area */
-            int pname_ok = ((pname_ptr >= (LispObj*)heap_start && pname_ptr < end) ||
-                           (ro_low && pname_ptr >= ro_low && pname_ptr < ro_high));
-            if (sym_count <= 3) {
-              /* Print first 3 symbols for diagnostic */
-              fprintf(dbgout, "  DEBUG Bug131: sym#%d at %p header=0x%lx pname=0x%lx (untagged 0x%lx) pname_ok=%d\n",
-                      sym_count, start, (unsigned long)w0, (unsigned long)pname, (unsigned long)pname_untagged, pname_ok);
-              if (pname_ok) {
-                LispObj ph = pname_ptr[-1];
-                natural ps = header_subtag(ph);
-                natural pl = header_element_count(ph);
-                fprintf(dbgout, "  DEBUG Bug131:   pname header=0x%lx subtag=0x%lx len=%lu chars='%.10s'\n",
-                        (unsigned long)ph, (unsigned long)ps, (unsigned long)pl, (char*)pname_ptr);
-              }
-            }
-            if (pname_ok) {
-              pname_ok_count++;} else { pname_bad_count++;
-              if (pname_bad_count <= 3) {
-                fprintf(dbgout, "  DEBUG Bug131: pname OUT OF RANGE: sym at %p pname=0x%lx untagged=0x%lx\n",
-                        start, (unsigned long)pname, (unsigned long)pname_untagged);
-              }
-            }
-            if (pname_ok) {
-              LispObj pname_header = pname_ptr[-1];
-              natural pname_subtag = header_subtag(pname_header);
-              natural pname_len = header_element_count(pname_header);
-              if (pname_subtag == subtag_simple_base_string && pname_len == 5) {
-                /* 32-bit element strings: each char at 4-byte intervals */
-                unsigned int *chars32 = (unsigned int *)pname_ptr;
-                if (chars32[0]=='E' && chars32[1]=='Q' && chars32[2]=='U' && chars32[3]=='A' && chars32[4]=='L') {
-                  LispObj sym_tagged = (LispObj)(start + 1) | ((LispObj)tag_symbol << tag_shift);
-                  fprintf(dbgout, "  DEBUG Bug131: FOUND symbol EQUAL at %p (tagged 0x%lx)\n",
-                          start, (unsigned long)sym_tagged);
-                  fprintf(dbgout, "  DEBUG Bug131:   pname=0x%lx vcell=0x%lx fcell=0x%lx\n",
-                          (unsigned long)pname, (unsigned long)start[2], (unsigned long)fcell);
-                  if (fcell != 0) {
-                    LispObj fcell_untagged = untag(fcell);
-                    LispObj *fn_ptr = (LispObj *)fcell_untagged;
-                    int fn_ok = ((fn_ptr >= (LispObj*)heap_start && fn_ptr < end) ||
-                                (ro_low && fn_ptr >= ro_low && fn_ptr < ro_high));
-                    if (fn_ok) {
-                      LispObj fn_header = fn_ptr[-1];
-                      fprintf(dbgout, "  DEBUG Bug131:   fcell target header=0x%lx subtag=0x%lx count=%lu\n",
-                              (unsigned long)fn_header, (unsigned long)header_subtag(fn_header),
-                              (unsigned long)header_element_count(fn_header));
-                      fprintf(dbgout, "  DEBUG Bug131:   fcell target[0]=0x%lx [1]=0x%lx\n",
-                              (unsigned long)fn_ptr[0], (unsigned long)fn_ptr[1]);
-                    } else {
-                      fprintf(dbgout, "  DEBUG Bug131:   fcell target 0x%lx NOT in dynamic or readonly!\n",
-                              (unsigned long)fcell_untagged);
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-        start += 1 + count;
-        if (((natural)start) & (dnode_size - 1)) {
-          start++;
-        }
-      } else {
-        start += 2;
-      }
-    }
-    fprintf(dbgout, "  DEBUG Bug131: search complete: %d symbols found, %d pname_ok, %d pname_bad\n",
-            sym_count, pname_ok_count, pname_bad_count);
-  }
 #endif
 #if defined(DARWIN) && defined(ARM64)
   /* macOS ARM64 W^X: make heap areas executable before entering Lisp.
@@ -2395,19 +2296,6 @@ main
 #endif
 #endif
 #endif
-  {
-    LispObj *ivsp = (LispObj *)(natural)tcr->save_vsp;
-    LispObj initfn = ivsp[0];
-    fprintf(dbgout, "Entering start_lisp: vsp=%p initfn=%016lx tag=0x%02lx\n",
-            ivsp, (unsigned long)initfn, (unsigned long)(initfn >> 56));
-    if ((initfn >> 56) == 0x62) {
-      natural fn_base = (initfn & 0x00FFFFFFFFFFFFFFLL) - 8;
-      LispObj *p = (LispObj *)fn_base;
-      fprintf(dbgout, "  fn hdr=%016lx ep=%016lx cv=%016lx\n",
-              (unsigned long)p[0], (unsigned long)p[1], (unsigned long)p[2]);
-    }
-    fflush(dbgout);
-  }
   start_lisp(TCR_TO_TSD(tcr), 0);
   _exit(0);
 }
@@ -2656,7 +2544,6 @@ xFindSymbol(void* handle, char *name)
 #endif
 #ifdef DARWIN
   void *result;
-  static int xfind_count = 0;
 
   if ((handle == NULL) || (handle == ((void *) -1))) {
     handle = RTLD_DEFAULT;
@@ -2664,16 +2551,6 @@ xFindSymbol(void* handle, char *name)
   result = dlsym(handle, name);
   if ((result == NULL) && (*name == '_')) {
     result = dlsym(handle, name+1);
-  }
-  xfind_count++;
-  if (xfind_count <= 40) {
-    fprintf(dbgout, "xFindSymbol[%d]: name=%p \"%.40s\" hex=",
-            xfind_count, (void*)name, name ? name : "(null)");
-    if (name) {
-      int j; for(j=0; j<16; j++) fprintf(dbgout, "%02x ", (unsigned char)name[j]);
-    }
-    fprintf(dbgout, " result=%p\n", result);
-    fflush(dbgout);
   }
   return result;
 #endif
