@@ -1178,9 +1178,10 @@
         (pushnew pkg force-export-packages))
     pkg))
   (defun force-export-package-p (pkg)
-    (with-lock-grabbed (force-export-packages-lock)
-      (if (memq pkg force-export-packages)
-        t))))
+    ;; Bug 164b: skip lock — single-threaded during boot, and the
+    ;; closed-over lock has a stale macptr from image build.
+    (if (memq pkg force-export-packages)
+      t)))
 
 
 (defun %insert-symbol (symbol package internal-idx external-idx &optional force-export)
@@ -1273,7 +1274,11 @@
                             (when (> idx max)
                               (setq max idx))))))
         (%set-binding-index max))
-      ;; Boot init complete — enable locking for subsequent code.
-      (setq *early-boot* nil)
+      ;; Bug 164b: Keep *early-boot* T during level-1 FASL loading.
+      ;; Closed-over locks (force-export-packages-lock etc.) are stale
+      ;; macptrs from image build and can't be recreated from outside
+      ;; the let scope. Since FASL loading is single-threaded, skip
+      ;; all locking. Level-1 boot code will set *early-boot* to nil
+      ;; after it recreates the necessary locks.
       (%fasload *xload-startup-file*)))
 
