@@ -4844,21 +4844,26 @@
           (unless (= 0 pregs)
             (arm642-save-nvrs seg pregs)
 
+            ;; Bug 165b: On ARM64, fn=nfn=temp2=x10 (same register).
+            ;; Must NOT use temp2 as intermediate for ref-constant because
+            ;; ref-constant loads from [nfn, #offset] — writing to temp2
+            ;; clobbers nfn, breaking subsequent iterations.
+            ;; Currently dormant since ARM64 has no NVRs (*arm642-nvrs*=nil),
+            ;; but fix in place for correctness.
+            ;; Fix: load directly into target register (save reg).
             (dolist (pair reglocatives)
               (declare (cons pair))
               (let* ((constant (car pair))
-                     (reg (cdr pair))
-                     (temp ($ arm64::temp2)))
+                     (reg (cdr pair)))
                 (declare (cons constant))
                 (rplacd constant reg)
                 (let* ((idx (backend-immediate-index (car constant))))
                   ;; ARM64: offset = misc-data-offset + (idx+2)*word-size
                   (if (< (+ arm64::misc-data-offset (ash (+ idx 2) arm64::word-shift)) 32768)
-                    (! ref-constant temp idx)
+                    (! ref-constant reg idx)
                     (with-imm-target () (idxreg :s32)
                       (arm642-lri seg idxreg (+ arm64::misc-data-offset (ash (+ idx 2) arm64::word-shift)))
-                      (! ref-indexed-constant temp idxreg))))
-                (arm642-copy-register seg reg temp))))
+                      (! ref-indexed-constant reg idxreg)))))))
           (when method-var
             (arm642-seq-bind-var seg method-var arm64::next-method-context))
           ;; If arguments are still in arg_x/arg_y/arg_z from a "simple" entry,

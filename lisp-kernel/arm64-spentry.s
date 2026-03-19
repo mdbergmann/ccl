@@ -644,12 +644,27 @@ _spentry(makes128)
 
 
 /* funcall nfn, returning multiple values if it does.  */
+/* Bug 165 ROOT CAUSE: The csel logic was wrong — for nargs <= nargregs*node_size
+   it computed vsp+nargs instead of vsp, and for nargs > nargregs*node_size it
+   computed vsp-24 instead of vsp-24+nargs.  This caused return values to be
+   placed at wrong vstack positions, overwriting let* bindings.
+   Fixed to match SPmvpasssym and ARM32 SPmvpass pattern. */
 _spentry(mvpass)
-        __(cmp nargs,#nargregs*node_size)
+        __(cmp nargs,#node_size*nargregs)
         __(mov imm1,vsp)
-	__(sub imm0,vsp,#node_size*nargregs)
-	__(add imm2,imm1,nargs)
-        __(csel imm1,imm0,imm2,gt)
+        __(ble 0f)
+        __(sub imm1,imm1,#node_size*nargregs)
+        __(add imm1,imm1,nargs)
+0:
+        /* Bug 165 diagnostic: check nfn tag before calling */
+        __(lsr imm0,nfn,#tag_shift)
+        __(cmp imm0,#tag_function)
+        __(beq 1f)
+        __(cmp imm0,#tag_symbol)
+        __(beq 1f)
+        /* nfn is not callable — trap with x29 and vsp info intact */
+        __(hlt #0xFFD0)     /* Bug 165: nfn invalid in SPmvpass */
+1:
 	__(build_lisp_frame(imm1))
 	__(adr lr,C(ret1valn))
 	__(funcall_nfn())

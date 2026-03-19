@@ -4542,6 +4542,83 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
       fflush(dbgout);
       _exit(1);
     }
+    if (imm16 == 0xFFD0) {
+      /* Bug 165: nfn invalid in SPmvpass — trap BEFORE build_lisp_frame
+         so sp/x29/lr still reflect the CALLER's state */
+      natural sp_val = (natural)ts->__sp;
+      natural fp_val = (natural)ts->__fp;  /* x29 = caller's frame */
+      natural lr_val = (natural)ts->__lr;  /* return address in caller */
+      natural nfn_val = (natural)ts->__x[10];
+      natural vsp_val = (natural)ts->__x[25];
+      fprintf(dbgout, "\n*** BUG165-MVPASS: nfn invalid in SPmvpass! ***\n");
+      fprintf(dbgout, "  nfn(x10)=0x%lx (tag=0x%02lx) pc=0x%lx lr=0x%lx\n",
+              (unsigned long)nfn_val, (unsigned long)(nfn_val >> 56),
+              (unsigned long)pc, (unsigned long)lr_val);
+      fprintf(dbgout, "  sp=0x%lx x29=0x%lx vsp=0x%lx nargs(x5)=0x%lx\n",
+              (unsigned long)sp_val, (unsigned long)fp_val,
+              (unsigned long)vsp_val, (unsigned long)ts->__x[5]);
+      fprintf(dbgout, "  fname(x9)=0x%lx arg_z(x15)=0x%lx arg_y(x14)=0x%lx\n",
+              (unsigned long)ts->__x[9], (unsigned long)ts->__x[15],
+              (unsigned long)ts->__x[14]);
+      /* Caller's frame at x29 */
+      if (fp_val > 0x100000000ULL && fp_val < 0x800000000000ULL) {
+        LispObj *f = (LispObj *)fp_val;
+        fprintf(dbgout, "  Caller frame at x29=0x%lx:\n", (unsigned long)fp_val);
+        fprintf(dbgout, "    savevsp=0x%lx savelr=0x%lx savefn=0x%lx savefp=0x%lx\n",
+                (unsigned long)f[0], (unsigned long)f[1],
+                (unsigned long)f[2], (unsigned long)f[3]);
+        /* Check if caller's fn is valid */
+        natural caller_fn = f[2];
+        natural caller_fn_tag = caller_fn >> 56;
+        fprintf(dbgout, "  Caller fn tag=0x%02lx (%s)\n",
+                (unsigned long)caller_fn_tag,
+                caller_fn_tag == 0x62 ? "function" :
+                caller_fn_tag == 0x00 ? "fixnum/entrypoint" : "INVALID");
+        /* If caller's fn is a valid function, dump some of its constants */
+        if (caller_fn_tag == 0x62) {
+          natural fn_raw = caller_fn & 0x00FFFFFFFFFFFFFFULL;  /* strip TBI tag */
+          if (fn_raw > 0x100000000ULL && fn_raw < 0x800000000000ULL) {
+            LispObj *fslots = (LispObj *)fn_raw;
+            fprintf(dbgout, "  Caller fn constants (first 8 slots):\n");
+            int si;
+            for (si = 0; si < 8 && si < 20; si++) {
+              fprintf(dbgout, "    [%d] = 0x%016lx (tag=0x%02lx)\n",
+                      si, (unsigned long)fslots[si],
+                      (unsigned long)(fslots[si] >> 56));
+            }
+          }
+        }
+      }
+      /* Dump code around lr to identify the calling instruction */
+      if (lr_val > 0x20 && lr_val < 0x800000000000ULL) {
+        fprintf(dbgout, "  Code around lr (return addr in caller):\n");
+        unsigned int *code = (unsigned int *)(lr_val - 0x20);
+        int ci;
+        for (ci = 0; ci < 20; ci++) {
+          natural code_addr = lr_val - 0x20 + ci * 4;
+          fprintf(dbgout, "    [0x%lx]: 0x%08x%s\n",
+                  (unsigned long)code_addr, code[ci],
+                  (code_addr == lr_val) ? " <- lr (return)" :
+                  (code_addr == lr_val - 4) ? " <- bl SPmvpass" : "");
+        }
+      }
+      /* Also dump vstack around current vsp */
+      fprintf(dbgout, "  Vstack around vsp=0x%lx:\n", (unsigned long)vsp_val);
+      if (vsp_val > 0x40 && vsp_val < 0x800000000000ULL) {
+        int vi;
+        for (vi = -4; vi <= 8; vi++) {
+          natural vaddr = vsp_val + vi * 8;
+          if (vaddr > 0x100000000ULL && vaddr < 0x800000000000ULL) {
+            LispObj val = *(LispObj *)vaddr;
+            fprintf(dbgout, "    [vsp%+d] = 0x%016lx (tag=0x%02lx)%s\n",
+                    vi * 8, (unsigned long)val, (unsigned long)(val >> 56),
+                    vi == 0 ? " <- vsp" : "");
+          }
+        }
+      }
+      fflush(dbgout);
+      _exit(1);
+    }
     if (imm16 == 0xFFE9) {
       /* Bug 156: SP is above x29 at SPstack_misc_alloc entry!
          The zeroing loop will overwrite the lisp frame. */

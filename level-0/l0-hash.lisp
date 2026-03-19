@@ -65,13 +65,10 @@
 
 (defun %cons-hash-table (keytrans-function compare-function vector
                          threshold rehash-ratio rehash-size find find-new owner lock-free-p &optional min-size)
-  ;; Bug 165: Pre-compute all complex expressions into local variables
-  ;; before the %istruct call.  The ARM64 code generator has a register
-  ;; allocation issue when evaluating complex expressions inline within
-  ;; a very large (16-argument) %istruct call — intermediate computation
-  ;; values (like grow-threshold=60) leak into later slots (like nhash.find).
-  ;; By binding all values first, %istruct only receives simple variable
-  ;; references, avoiding the register pressure that triggers the bug.
+  ;; Bug 165c: Pre-compute all complex expressions before %istruct.
+  ;; On ARM64, inline conditional expressions within a large %istruct call
+  ;; cause vstack corruption — the evaluation of (make-lock) or
+  ;; (make-read-write-lock) shifts the vstack offsets for subsequent args.
   (let* ((lock-val (if lock-free-p $nhash.lock-free 0))
          (excl-lock (if lock-free-p
                       (make-lock)
@@ -500,11 +497,10 @@ before doing so.")
     (report-bad-arg rehash-size '(or (integer 1 *) (real (1) *))))
   (unless (fixnump size) (report-bad-arg size 'fixnum))
   (setq rehash-threshold (/ 1.0 (max 0.01 rehash-threshold)))
-  ;; Bug 165: On ARM64, the compiler's vstack management has a bug where
-  ;; values bound early in a let* get clobbered by later multiple-value-bind
-  ;; results.  Specifically, find-function and find-put-function (bound in the
-  ;; let*) were overwritten by compute-hash-size's return values (60, 71).
-  ;; Fix: compute find-function/find-put-function AFTER compute-hash-size.
+  ;; Bug 165: On ARM64, values bound in a let* before a multiple-value-bind
+  ;; get corrupted by the MVB return values.  The ARM64 compiler's vstack
+  ;; management has a systematic offset error for this pattern.
+  ;; Workaround: compute find-function/find-put-function AFTER the MVB.
   (let* ((default-hash-function
              (cond ((or (eq test 'eq) (eq test #'eq))
                     (setq test 0))
@@ -529,8 +525,6 @@ before doing so.")
       (setq lock-free nil))
     (multiple-value-bind (grow-threshold total-size)
         (compute-hash-size size 0 rehash-threshold)
-      ;; Bug 165: Compute find functions HERE (after compute-hash-size)
-      ;; so they don't get clobbered by the multiple-value-bind.
       (let* ((find-function
               (case test
                 (0 #'eq-hash-find)
