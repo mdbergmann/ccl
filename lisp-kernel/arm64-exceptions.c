@@ -1736,7 +1736,8 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
         unsigned imm16 = HLT_IMM16(arg2);
         unsigned fmt = imm16 & 7;
         unsigned info = (imm16 >> 8) & 0xFF;
-        if (fmt == hlt_code_unary_misc && info == uuo_misc_not_callable) {
+        /* hlt_code_unary_misc=5, uuo_misc_not_callable info=0 (from arm64-uuo.s) */
+        if (fmt == 5 && info == 0) {
           /* Check if this is %kernel-restart being called */
           natural fname_raw = untag(xpGPR(xp, 9));
           natural kr_addr = (natural)&nrs_KERNELRESTART.pname;
@@ -4517,11 +4518,8 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
       /* Dump code around lr to identify the calling function */
       {
         natural lr_val = (natural)ts->__lr;
-        /* Note: lr still has the savelr from the PREVIOUS frame restoration,
-           or the original lr before this frame was entered. Since we haven't
-           done the second ldp yet, lr is still the value from the CALLER. */
         fprintf(dbgout, "  Code at lr-0x40..lr+0x10 (lr=0x%lx):\n", (unsigned long)lr_val);
-        if (lr_val > 0x40 && lr_val < 0x800000000000ULL) {
+        if (lr_val > 0x200000000000ULL && lr_val < 0x400000000000ULL) {
           unsigned int *code = (unsigned int *)(lr_val - 0x40);
           int ci;
           for (ci = 0; ci < 24; ci++) {
@@ -5479,6 +5477,72 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
       opcode *insns = (opcode *)ts->__pc;
       fprintf(dbgout, "  insn@pc: [-4]=%08x [0]=%08x [+4]=%08x [+8]=%08x\n",
               insns[-1], insns[0], insns[1], insns[2]);
+    }
+    /* Decode function name from nfn (x10) */
+    {
+      natural nfn_raw = ts->__x[10] & 0x00FFFFFFFFFFFFFFULL;
+      if (nfn_raw > 0x200000000ULL && nfn_raw < 0x400000000000ULL) {
+        LispObj fn_hdr = ((LispObj *)nfn_raw)[-1];
+        natural fn_nslots = fn_hdr & 0x00FFFFFFFFFFFFFFULL;
+        if (fn_nslots > 2 && fn_nslots < 100) {
+          LispObj *fn_slots = (LispObj *)nfn_raw;
+          LispObj name_slot = fn_slots[fn_nslots - 2];
+          natural name_raw = name_slot & 0x00FFFFFFFFFFFFFFULL;
+          if (name_raw > 0x200000000ULL && name_raw < 0x400000000000ULL) {
+            LispObj pname = ((LispObj *)name_raw)[0];
+            natural pname_raw = pname & 0x00FFFFFFFFFFFFFFULL;
+            if (pname_raw > 0x200000000ULL && pname_raw < 0x400000000000ULL) {
+              LispObj ph = ((LispObj *)pname_raw)[-1];
+              natural plen = ph & 0x00FFFFFFFFFFFFFFULL;
+              if (plen > 0 && plen < 256) {
+                int cs = ((ph >> 56) & 0x7F) == 7 ? 4 : 1;
+                char *pd = (char *)pname_raw;
+                fprintf(dbgout, "  crash fn (nfn): \"");
+                for (int pi = 0; pi < (int)plen; pi++)
+                  fprintf(dbgout, "%c", pd[pi * cs]);
+                fprintf(dbgout, "\"\n");
+              }
+            }
+          }
+        }
+      }
+    }
+    /* Decode lisp frame chain for backtrace */
+    {
+      natural fp = ts->__fp;
+      for (int fi = 0; fi < 8 && fp > 0x100000000ULL && fp < 0x200000000000ULL; fi++) {
+        LispObj *frame = (LispObj *)fp;
+        LispObj savevsp = frame[0], savelr = frame[1], savefn = frame[2], savefp = frame[3];
+        natural fn_raw = savefn & 0x00FFFFFFFFFFFFFFULL;
+        fprintf(dbgout, "  bt[%d] lr=%016lx fn=%016lx", fi,
+                (unsigned long)savelr, (unsigned long)savefn);
+        if (fn_raw > 0x200000000ULL && fn_raw < 0x400000000000ULL) {
+          LispObj fh = ((LispObj *)fn_raw)[-1];
+          natural ns = fh & 0x00FFFFFFFFFFFFFFULL;
+          if (ns > 2 && ns < 100) {
+            LispObj nm = ((LispObj *)fn_raw)[ns - 2];
+            natural nm_raw = nm & 0x00FFFFFFFFFFFFFFULL;
+            if (nm_raw > 0x200000000ULL && nm_raw < 0x400000000000ULL) {
+              LispObj pn = ((LispObj *)nm_raw)[0];
+              natural pn_raw = pn & 0x00FFFFFFFFFFFFFFULL;
+              if (pn_raw > 0x200000000ULL && pn_raw < 0x400000000000ULL) {
+                LispObj ph = ((LispObj *)pn_raw)[-1];
+                natural pl = ph & 0x00FFFFFFFFFFFFFFULL;
+                if (pl > 0 && pl < 256) {
+                  int cs = ((ph >> 56) & 0x7F) == 7 ? 4 : 1;
+                  char *pd = (char *)pn_raw;
+                  fprintf(dbgout, " \"");
+                  for (int pi = 0; pi < (int)pl; pi++)
+                    fprintf(dbgout, "%c", pd[pi * cs]);
+                  fprintf(dbgout, "\"");
+                }
+              }
+            }
+          }
+        }
+        fprintf(dbgout, "\n");
+        fp = (natural)savefp;
+      }
     }
     fflush(dbgout);
     signum = SIGBUS;

@@ -437,6 +437,37 @@
               (hash-mod primary entries vector)
               entries))))
 
+;;; Bug 165e: MVB-free wrapper for compute-hash-code.
+;;; Returns (cons hash-code (cons index entries)) instead of multiple values.
+(defun %compute-hash-code-triple (hash key update-hash-flags &optional
+                                       (vector (nhash.vector hash)))
+  (declare (optimize (speed 0) (safety 0)))
+  (let ((keytransF (nhash.keytransF hash))
+        primary addressp)
+    (if (not (fixnump keytransF))
+      (progn
+        (multiple-value-setq (primary addressp) (funcall keytransF key))
+        (let ((immediate-p (immediate-p-macro primary)))
+          (setq primary (strip-tag-to-fixnum primary))
+          (unless immediate-p
+            (setq primary (mixup-hash-code primary))
+            (setq addressp :key))))
+      (if (and (not (eql keytransF 0))
+	       (need-use-eql key))
+	(setq primary (%%eqlhash-internal key))
+	(multiple-value-setq (primary addressp) (%%eqhash key))))
+    (when update-hash-flags
+      (when addressp
+        (update-hash-flags hash vector addressp)))
+    (unless (eql (typecode vector) target::subtag-hash-vector)
+      (return-from %compute-hash-code-triple (cons 0 (cons 0 0))))
+    (let* ((entries (nhash.vector-size vector)))
+      (declare (fixnum entries))
+      (when (or (eql entries 0)
+                #+arm64-target (> entries (ash (uvsize vector) -1)))
+        (return-from %compute-hash-code-triple (cons 0 (cons 0 0))))
+      (cons primary (cons (hash-mod primary entries vector) entries)))))
+
 (defun %already-rehashed-p (primary rehash-bits)
   (declare (optimize (speed 3)(safety 0)))
   (declare (type (simple-array bit (*)) rehash-bits))
@@ -497,10 +528,12 @@ before doing so.")
     (report-bad-arg rehash-size '(or (integer 1 *) (real (1) *))))
   (unless (fixnump size) (report-bad-arg size 'fixnum))
   (setq rehash-threshold (/ 1.0 (max 0.01 rehash-threshold)))
-  ;; Bug 165: On ARM64, values bound in a let* before a multiple-value-bind
-  ;; get corrupted by the MVB return values.  The ARM64 compiler's vstack
-  ;; management has a systematic offset error for this pattern.
-  ;; Workaround: compute find-function/find-put-function AFTER the MVB.
+  ;; Bug 165d: On ARM64, the compiler's vstack tracking around MVB is broken.
+  ;; Even keyword params read from inside the MVB body get wrong offsets.
+  ;; Workaround: eliminate MVB entirely.  Call compute-hash-size for each
+  ;; value separately, or use a helper that returns a single value.
+  ;;
+  ;; Phase 1: normalize test, compute hash-function
   (let* ((default-hash-function
              (cond ((or (eq test 'eq) (eq test #'eq))
                     (setq test 0))
@@ -516,41 +549,44 @@ before doing so.")
     (setq hash-function
           (if hash-function
             (require-type hash-function 'symbol)
-            default-hash-function))
-    (when (and weak (neq weak :value) (neq test 0))
-      (error "Only EQ hash tables can be weak."))
-    (when (and finalizeable (not weak))
-      (error "Only weak hash tables can be finalizeable."))
-    (when (and (eq lock-free :shared) (not shared))
-      (setq lock-free nil))
-    (multiple-value-bind (grow-threshold total-size)
-        (compute-hash-size size 0 rehash-threshold)
-      (let* ((find-function
-              (case test
-                (0 #'eq-hash-find)
-                (-1 #'eql-hash-find)
-                (t #'general-hash-find)))
-             (find-put-function
-              (case test
-                (0 #'eq-hash-find-for-put)
-                (-1 #'eql-hash-find-for-put)
-                (t #'general-hash-find-for-put)))
-             (flags (+ (if weak (ash 1 $nhash_weak_bit) 0)
-                       (ecase weak
-                         ((t nil :key) 0)
-                         (:value (ash 1 $nhash_weak_value_bit)))
-                       (if finalizeable (ash 1 $nhash_finalizeable_bit) 0)
-                       (if lock-free (ash 1 $nhash_keys_frozen_bit) 0)))
-             (hash (%cons-hash-table
-                    hash-function test
-                    (%cons-nhash-vector total-size flags)
-                    grow-threshold rehash-threshold rehash-size
-                    find-function find-put-function
-                    (unless shared *current-process*)
-                    lock-free
-                    size)))
-        (setf (nhash.vector.hash (nhash.vector hash)) hash)
-        hash))))
+            default-hash-function)))
+  (when (and weak (neq weak :value) (neq test 0))
+    (error "Only EQ hash tables can be weak."))
+  (when (and finalizeable (not weak))
+    (error "Only weak hash tables can be finalizeable."))
+  (when (and (eq lock-free :shared) (not shared))
+    (setq lock-free nil))
+  ;; Phase 2: compute hash sizes WITHOUT using multiple-value-bind.
+  ;; Use %compute-hash-size-pair which returns a cons cell.
+  (let* ((hash-size-pair (%compute-hash-size-pair size 0 rehash-threshold))
+         (grow-threshold (car hash-size-pair))
+         (total-size (cdr hash-size-pair))
+         (find-function
+          (case test
+            (0 #'eq-hash-find)
+            (-1 #'eql-hash-find)
+            (t #'general-hash-find)))
+         (find-put-function
+          (case test
+            (0 #'eq-hash-find-for-put)
+            (-1 #'eql-hash-find-for-put)
+            (t #'general-hash-find-for-put)))
+         (flags (+ (if weak (ash 1 $nhash_weak_bit) 0)
+                   (ecase weak
+                     ((t nil :key) 0)
+                     (:value (ash 1 $nhash_weak_value_bit)))
+                   (if finalizeable (ash 1 $nhash_finalizeable_bit) 0)
+                   (if lock-free (ash 1 $nhash_keys_frozen_bit) 0)))
+         (hash (%cons-hash-table
+                hash-function test
+                (%cons-nhash-vector total-size flags)
+                grow-threshold rehash-threshold rehash-size
+                find-function find-put-function
+                (unless shared *current-process*)
+                lock-free
+                size)))
+    (setf (nhash.vector.hash (nhash.vector hash)) hash)
+    hash))
 
 (defun compute-hash-size (size rehash-size rehash-ratio)
   (declare (optimize (safety 0)))
@@ -563,6 +599,16 @@ before doing so.")
       ;  (values (min (floor vector-size rehash-ratio) (%i- vector-size 2)) vector-size))
       (values new-size vector-size)
       )))
+
+;;; Bug 165d: cons-based variant to avoid multiple-value-bind in make-hash-table
+(defun %compute-hash-size-pair (size rehash-size rehash-ratio)
+  (declare (optimize (safety 0)))
+  (let* ((new-size (max 30 (if (fixnump rehash-size)
+                             (%i+ size rehash-size)
+                             (max (1+ size) (ceiling (* size rehash-size)))))))
+    (declare (fixnum size new-size))
+    (let ((vector-size (%hash-size (max (+ new-size 2) (ceiling (* new-size rehash-ratio))))))
+      (cons new-size vector-size))))
 
 ;;;  Suggested size is a fixnum: number of pairs.  Return a fixnum >=
 ;;;  that size that is relatively prime to all secondary keys.
@@ -934,8 +980,10 @@ before doing so.")
               do (setf (%svref vector (%i- i 1)) deleted-hash-key-marker
                        (%svref vector i) deleted-hash-value-marker)
               finally (setf (nhash.vector.count vector) 0))
-            (multiple-value-bind (grow-threshold vector-size)
-                                 (compute-hash-size (nhash.min-size hash) 0 (nhash.rehash-ratio hash))
+            ;; Bug 165e: Avoid MVB — use cons-returning %compute-hash-size-pair
+            (let* ((size-pair (%compute-hash-size-pair (nhash.min-size hash) 0 (nhash.rehash-ratio hash)))
+                   (grow-threshold (car size-pair))
+                   (vector-size (cdr size-pair)))
               (setf (nhash.grow-threshold hash) 0) ;; prevent puthash from adding new entries
               (loop with vector = (nhash.vector hash) ;; mark entries as obsolete
                 for i fixnum from (%i+ $nhash.vector_overhead 1) below (uvsize vector) by 2
@@ -1271,10 +1319,12 @@ before doing so.")
         ;; There are enough deleted entries. Rehash to get rid of them
         (%rehash hash)
         (return-from grow-hash-table))
-      (multiple-value-bind (size total-size)
-                           (compute-hash-size 
-                            old-size (nhash.rehash-size hash) (nhash.rehash-ratio hash))
-        (unless (eql 0 (nhash.grow-threshold hash))       ; maybe it's done already - shouldnt happen                
+      ;; Bug 165e: Avoid MVB — use cons-returning %compute-hash-size-pair
+      (let* ((size-pair (%compute-hash-size-pair
+                          old-size (nhash.rehash-size hash) (nhash.rehash-ratio hash)))
+             (size (car size-pair))
+             (total-size (cdr size-pair)))
+        (unless (eql 0 (nhash.grow-threshold hash))       ; maybe it's done already - shouldnt happen
           (return-from grow-hash-table ))
         (progn
           (unwind-protect
@@ -1451,36 +1501,42 @@ before doing so.")
 ;;; hash-code is consumed to compute secondary-hash, then goes out of scope
 ;;; BEFORE the loop function is called — ensuring it cannot corrupt index.
 
+;;; Bug 165e: All probe functions rewritten to avoid MVB (ARM64 vstack corruption).
+;;; Use %compute-hash-code-triple which returns cons structure instead of values.
+
 (defun %hash-probe-eq (hash key for-put-p)
   (declare (optimize (speed 0) (safety 0)))
-  (multiple-value-bind (hash-code index entries)
-                       (compute-hash-code hash key for-put-p)
-    (declare (fixnum hash-code index entries))
-    (let* ((vector (nhash.vector hash))
-           (secondary-hash (%svref secondary-keys (logand 7 hash-code))))
-      (declare (fixnum secondary-hash))
-      (%hash-probe-loop-eq vector key for-put-p index entries secondary-hash))))
+  (let* ((triple (%compute-hash-code-triple hash key for-put-p))
+         (hash-code (car triple))
+         (index (cadr triple))
+         (entries (cddr triple))
+         (vector (nhash.vector hash))
+         (secondary-hash (%svref secondary-keys (logand 7 hash-code))))
+    (declare (fixnum hash-code index entries secondary-hash))
+    (%hash-probe-loop-eq vector key for-put-p index entries secondary-hash)))
 
 (defun %hash-probe-eql (hash key for-put-p)
   (declare (optimize (speed 0) (safety 0)))
-  (multiple-value-bind (hash-code index entries)
-                       (compute-hash-code hash key for-put-p)
-    (declare (fixnum hash-code index entries))
-    (let* ((vector (nhash.vector hash))
-           (secondary-hash (%svref secondary-keys (logand 7 hash-code))))
-      (declare (fixnum secondary-hash))
-      (%hash-probe-loop-eql vector key for-put-p index entries secondary-hash))))
+  (let* ((triple (%compute-hash-code-triple hash key for-put-p))
+         (hash-code (car triple))
+         (index (cadr triple))
+         (entries (cddr triple))
+         (vector (nhash.vector hash))
+         (secondary-hash (%svref secondary-keys (logand 7 hash-code))))
+    (declare (fixnum hash-code index entries secondary-hash))
+    (%hash-probe-loop-eql vector key for-put-p index entries secondary-hash)))
 
 (defun %hash-probe-general (hash key for-put-p)
   (declare (optimize (speed 0) (safety 0)))
-  (multiple-value-bind (hash-code index entries)
-                       (compute-hash-code hash key for-put-p)
-    (declare (fixnum hash-code index entries))
-    (let* ((vector (nhash.vector hash))
-           (compareF (nhash.compareF hash))
-           (secondary-hash (%svref secondary-keys (logand 7 hash-code))))
-      (declare (fixnum secondary-hash))
-      (%hash-probe-loop-general vector key for-put-p index entries secondary-hash compareF))))
+  (let* ((triple (%compute-hash-code-triple hash key for-put-p))
+         (hash-code (car triple))
+         (index (cadr triple))
+         (entries (cddr triple))
+         (vector (nhash.vector hash))
+         (compareF (nhash.compareF hash))
+         (secondary-hash (%svref secondary-keys (logand 7 hash-code))))
+    (declare (fixnum hash-code index entries secondary-hash))
+    (%hash-probe-loop-general vector key for-put-p index entries secondary-hash compareF)))
 
 ;;; Bug 130: Thin dispatcher — only 4 live variables (hash, key, for-put-p,
 ;;; compareF).  Each probe function has its own clean stack frame for the
@@ -1704,7 +1760,11 @@ before doing so.")
 
 (defun %rehash-probe (rehash-bits hash key &optional (vector (nhash.vector hash)))
   (declare (optimize (speed 0)(safety 0)))
-  (multiple-value-bind (hash-code index entries)(compute-hash-code hash key t vector)
+  ;; Bug 165e: Avoid MVB — use cons-returning variant
+  (let* ((triple (%compute-hash-code-triple hash key t vector))
+         (hash-code (car triple))
+         (index (cadr triple))
+         (entries (cddr triple)))
     (declare (fixnum hash-code index entries))
     (when (null hash-code)(cerror "nuts" "Nuts"))
     (let* ((vector-index (index->vector-index index)))
@@ -1741,7 +1801,11 @@ before doing so.")
 
 (defun %growhash-probe (vector hash key)
   (declare (optimize (speed 0)(safety 0)))
-  (multiple-value-bind (hash-code index entries)(compute-hash-code hash key t vector)
+  ;; Bug 165e: Avoid MVB — use cons-returning variant
+  (let* ((triple (%compute-hash-code-triple hash key t vector))
+         (hash-code (car triple))
+         (index (cadr triple))
+         (entries (cddr triple)))
     (declare (fixnum hash-code index entries))
     (let* ((vector-index (index->vector-index  index))
            (vector-key nil))

@@ -60,6 +60,10 @@
 (let ((*warn-if-redefine-kernel* nil))
   (compile-file "ccl:lib;compile-ccl.lisp" :output-file "ccl:bin;compile-ccl.dx64fsl" :verbose nil :load t))
 
+;;; Step 3b: Reload macros.lisp to pick up Bug 165e MVB-free macro changes
+(let ((*warn-if-redefine-kernel* nil))
+  (compile-file "ccl:lib;macros.lisp" :output-file "ccl:lib;macros.dx64fsl" :verbose nil :load t))
+
 ;;; Step 4: Cross-compile
 (format t "~%=== Starting cross-compile ===~%")
 (ccl::cross-compile-ccl :darwinarm64)

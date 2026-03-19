@@ -62,6 +62,10 @@
 (load "ccl:lib;number-case-macro.lisp" :verbose nil)
 (provide "NUMBER-CASE-MACRO")
 
+;;; Step 2f: Reload macros.lisp to pick up Bug 165e MVB-free macro changes
+(let ((*warn-if-redefine-kernel* nil))
+  (compile-file "ccl:lib;macros.lisp" :output-file "ccl:lib;macros.dx64fsl" :verbose nil :load t))
+
 ;;; Step 3: Load compile-ccl support
 (let ((*warn-if-redefine-kernel* nil))
   (compile-file "ccl:lib;compile-ccl.lisp" :output-file "ccl:bin;compile-ccl.dx64fsl" :verbose nil :load t))

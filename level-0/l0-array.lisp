@@ -291,6 +291,32 @@
         (values array 0)
         (report-bad-arg array 'array)))))
 
+;;; Bug 165e: MVB-free variant of array-data-and-offset.
+;;; Returns (cons data offset) instead of multiple values, avoiding ARM64
+;;; MVB vstack corruption when callers access outer variables inside MVB body.
+(defun %array-data-and-offset-cons (array)
+  (let* ((typecode (typecode array)))
+    (declare (fixnum typecode))
+    (if (or (= typecode target::subtag-arrayH)
+            (= typecode target::subtag-vectorH))
+      (do* ((header array)
+            (offset 0))
+           (nil)
+        (declare (fixnum offset))
+        (let* ((data (%svref header target::arrayH.data-vector-cell))
+               (disp (the fixnum (%svref header target::arrayH.displacement-cell)))
+               (tc (typecode data)))
+          (declare (fixnum tc))
+          (setq offset (+ offset disp))
+          (if (or (= tc target::subtag-vectorH) (= tc target::subtag-arrayH))
+            (setq header data)
+            (return (cons data offset)))))
+      (if (or (= typecode target::subtag-simple-vector)
+              (>= (the (unsigned-byte 8) (ivector-typecode-p typecode))
+                  target::min-cl-ivector-subtag))
+        (cons array 0)
+        (report-bad-arg array 'array)))))
+
 (defun array-data-offset-subtype (array)
   (let* ((typecode (typecode array)))
     (declare (fixnum typecode))

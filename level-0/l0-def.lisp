@@ -190,7 +190,11 @@
 	    old-name))))))
 
 (defun lfun-name (fun &optional (new-name nil set-name-p))
-  (multiple-value-bind (stored-name stored?) (lookup-lfun-name fun)
+  ;; Bug 165e: Avoid multiple-value-bind — ARM64 MVB vstack tracking is broken.
+  ;; Use fun itself as sentinel for gethash default (function objects are never
+  ;; used as function names, so this is safe).
+  (let* ((stored-name (gethash fun *lfun-names* fun))
+         (stored? (neq stored-name fun)))
     (unless stored?
       (setq stored-name (lfun-vector-name fun)))
     (when (and set-name-p (neq new-name stored-name))
