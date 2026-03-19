@@ -390,6 +390,11 @@ define(`build_lisp_frame',`
 
 define(`restore_lisp_frame',`
         __(ldp nfn,x29,[sp,#lisp_frame.savefn])
+        /* Bug 165: validate x29 is a stack addr (bits 40-63 must be 0) */
+        __(tst x29,#0xFFFFFF0000000000)
+        __(beq 86f)
+        __(hlt #0xFFE8)    /* Bug 165: x29 corrupted in restore_lisp_frame! */
+86:
         __(ldp vsp,lr,[sp],#lisp_frame.size)
         ')
 
@@ -400,6 +405,11 @@ define(`return_lisp_frame',`
 
 define(`discard_lisp_frame',`
 	__(ldr x29,[sp,#lisp_frame.savefp])
+        /* Bug 165: validate x29 is a stack addr (bits 40-63 must be 0) */
+        __(tst x29,#0xFFFFFF0000000000)
+        __(beq 86f)
+        __(hlt #0xFFE8)    /* Bug 165: x29 corrupted in discard_lisp_frame! */
+86:
 	__(add sp,sp,#lisp_frame.size)
 	')
 	

@@ -35,7 +35,10 @@
     (%symbol-bits sym (bitset $sym_vbit_special oldbits))
     initp))
 
-(setq *lfun-names* (make-hash-table :test 'eq :weak t))
+;; Bug 165: Pass :lock-free nil to avoid lock-free hash table path during
+;; early boot.  Lock-free gethash calls compute-hash-code which has ARM64
+;; code generation issues.  The standard (non-lock-free) path works.
+(setq *lfun-names* (make-hash-table :test 'eq :weak t :lock-free nil))
 
 (defun lookup-lfun-name (lfun) 
   (gethash lfun *lfun-names*))

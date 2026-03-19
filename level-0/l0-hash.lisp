@@ -65,28 +65,36 @@
 
 (defun %cons-hash-table (keytrans-function compare-function vector
                          threshold rehash-ratio rehash-size find find-new owner lock-free-p &optional min-size)
-  (let ((result
-         (%istruct
-          'HASH-TABLE                          ; type
-          keytrans-function                    ; nhash.keytransF
-          compare-function                     ; nhash.compareF
-          nil                                  ; nhash.rehash-bits
-          vector                               ; nhash.vector
-          (if lock-free-p $nhash.lock-free 0)  ; nhash.lock
-          owner                                ; nhash.owner
-          threshold                            ; nhash.grow-threshold
-          rehash-ratio                         ; nhash.rehash-ratio
-          rehash-size                          ; nhash.rehash-size
-          0                                    ; nhash.puthash-count
-          (if lock-free-p
-            (make-lock)
-            (unless owner (make-read-write-lock))) ; nhash.exclusion-lock
-          find                                 ; nhash.find
-          find-new                             ; nhash.find-new
-          nil                                  ; nhash.read-only
-          (or min-size 0)                      ; nhash.min-size
-          )))
-    result))
+  ;; Bug 165: Pre-compute all complex expressions into local variables
+  ;; before the %istruct call.  The ARM64 code generator has a register
+  ;; allocation issue when evaluating complex expressions inline within
+  ;; a very large (16-argument) %istruct call — intermediate computation
+  ;; values (like grow-threshold=60) leak into later slots (like nhash.find).
+  ;; By binding all values first, %istruct only receives simple variable
+  ;; references, avoiding the register pressure that triggers the bug.
+  (let* ((lock-val (if lock-free-p $nhash.lock-free 0))
+         (excl-lock (if lock-free-p
+                      (make-lock)
+                      (unless owner (make-read-write-lock))))
+         (min-size-val (or min-size 0)))
+    (%istruct
+     'HASH-TABLE                          ; type
+     keytrans-function                    ; nhash.keytransF
+     compare-function                     ; nhash.compareF
+     nil                                  ; nhash.rehash-bits
+     vector                               ; nhash.vector
+     lock-val                             ; nhash.lock
+     owner                                ; nhash.owner
+     threshold                            ; nhash.grow-threshold
+     rehash-ratio                         ; nhash.rehash-ratio
+     rehash-size                          ; nhash.rehash-size
+     0                                    ; nhash.puthash-count
+     excl-lock                            ; nhash.exclusion-lock
+     find                                 ; nhash.find
+     find-new                             ; nhash.find-new
+     nil                                  ; nhash.read-only
+     min-size-val                         ; nhash.min-size
+     )))
 
 (defun nhash.vector-size (vector)
   (nhash.vector.size vector))
@@ -492,28 +500,23 @@ before doing so.")
     (report-bad-arg rehash-size '(or (integer 1 *) (real (1) *))))
   (unless (fixnump size) (report-bad-arg size 'fixnum))
   (setq rehash-threshold (/ 1.0 (max 0.01 rehash-threshold)))
+  ;; Bug 165: On ARM64, the compiler's vstack management has a bug where
+  ;; values bound early in a let* get clobbered by later multiple-value-bind
+  ;; results.  Specifically, find-function and find-put-function (bound in the
+  ;; let*) were overwritten by compute-hash-size's return values (60, 71).
+  ;; Fix: compute find-function/find-put-function AFTER compute-hash-size.
   (let* ((default-hash-function
-             (cond ((or (eq test 'eq) (eq test #'eq)) 
+             (cond ((or (eq test 'eq) (eq test #'eq))
                     (setq test 0))
-                   ((or (eq test 'eql) (eq test #'eql)) 
+                   ((or (eq test 'eql) (eq test #'eql))
                     (setq test -1))
                    ((or (eq test 'equal) (eq test #'equal))
                     (setq test #'equal) #'%%equalhash)
                    ((or (eq test 'equalp) (eq test #'equalp))
                     (setq test #'equalp) #'%%equalphash)
                    (t (setq test (require-type test 'symbol))
-                      (or hash-function 
-                          (error "non-standard test specified without hash-function")))))
-         (find-function
-          (case test
-            (0 #'eq-hash-find)
-            (-1 #'eql-hash-find)
-            (t #'general-hash-find)))
-         (find-put-function
-          (case test
-            (0 #'eq-hash-find-for-put)
-            (-1 #'eql-hash-find-for-put)
-            (t #'general-hash-find-for-put))))
+                      (or hash-function
+                          (error "non-standard test specified without hash-function"))))))
     (setq hash-function
           (if hash-function
             (require-type hash-function 'symbol)
@@ -526,13 +529,25 @@ before doing so.")
       (setq lock-free nil))
     (multiple-value-bind (grow-threshold total-size)
         (compute-hash-size size 0 rehash-threshold)
-      (let* ((flags (+ (if weak (ash 1 $nhash_weak_bit) 0)
+      ;; Bug 165: Compute find functions HERE (after compute-hash-size)
+      ;; so they don't get clobbered by the multiple-value-bind.
+      (let* ((find-function
+              (case test
+                (0 #'eq-hash-find)
+                (-1 #'eql-hash-find)
+                (t #'general-hash-find)))
+             (find-put-function
+              (case test
+                (0 #'eq-hash-find-for-put)
+                (-1 #'eql-hash-find-for-put)
+                (t #'general-hash-find-for-put)))
+             (flags (+ (if weak (ash 1 $nhash_weak_bit) 0)
                        (ecase weak
                          ((t nil :key) 0)
                          (:value (ash 1 $nhash_weak_value_bit)))
                        (if finalizeable (ash 1 $nhash_finalizeable_bit) 0)
                        (if lock-free (ash 1 $nhash_keys_frozen_bit) 0)))
-             (hash (%cons-hash-table 
+             (hash (%cons-hash-table
                     hash-function test
                     (%cons-nhash-vector total-size flags)
                     grow-threshold rehash-threshold rehash-size

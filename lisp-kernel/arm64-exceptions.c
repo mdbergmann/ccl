@@ -1231,7 +1231,7 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
           }
           /* Also dump first few constant slots */
           int si;
-          for (si = 0; si < (int)fn_nslots && si < 12; si++) {
+          for (si = 0; si < (int)fn_nslots && si < 24; si++) {
             fprintf(dbgout, "  fn_slot[%d]=%016lx\n", si, (unsigned long)fn_slots[si]);
           }
         }
@@ -1941,6 +1941,52 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
             }
             fprintf(dbgout, "early-boot-err: undefined function '%s' called during boot\n",
                     fn_name[0] ? fn_name : "???");
+            /* Bug 165: Dump the hash table that caused the GETHASH failure */
+            {
+              /* arg_y at the time of the inner call is the hash table (key for GETHASH) */
+              /* But by now registers have been modified. Let's dump istruct objects from the vstack */
+              natural vsp_val = xpGPR(xp, 25);
+              fprintf(dbgout, "  Bug165 vstack scan for istructs:\n");
+              for (int vi = 0; vi < 16; vi++) {
+                natural v = *(natural *)(vsp_val + vi * 8);
+                natural v_tag = v >> 56;
+                if (v_tag == 0x6e) { /* reference tag for istruct */
+                  natural v_raw = v & 0x00FFFFFFFFFFFFFFULL;
+                  if (v_raw > 0x100000000ULL && v_raw < 0x400000000000ULL) {
+                    LispObj hdr = *((LispObj *)v_raw - 1);
+                    natural hdr_subtag = hdr >> 56;
+                    natural hdr_count = hdr & 0x00FFFFFFFFFFFFFFULL;
+                    if (hdr_subtag == 0xae && hdr_count == 16) {
+                      fprintf(dbgout, "  Found hash table at vsp[%d]=0x%lx:\n", vi, (unsigned long)v);
+                      LispObj *data = (LispObj *)v_raw;
+                      for (int si = 0; si < 16; si++) {
+                        const char *name = "";
+                        switch (si) {
+                          case 0: name = " (type)"; break;
+                          case 1: name = " (keytransF)"; break;
+                          case 2: name = " (compareF)"; break;
+                          case 3: name = " (rehash-bits)"; break;
+                          case 4: name = " (vector)"; break;
+                          case 5: name = " (lock)"; break;
+                          case 6: name = " (owner)"; break;
+                          case 7: name = " (grow-threshold)"; break;
+                          case 8: name = " (rehash-ratio)"; break;
+                          case 9: name = " (rehash-size)"; break;
+                          case 10: name = " (puthash-count)"; break;
+                          case 11: name = " (exclusion-lock)"; break;
+                          case 12: name = " (nhash.find)"; break;
+                          case 13: name = " (nhash.find-new)"; break;
+                          case 14: name = " (read-only)"; break;
+                          case 15: name = " (min-size)"; break;
+                        }
+                        fprintf(dbgout, "    slot[%2d] = %016lx (tag=0x%02lx)%s\n",
+                                si, (unsigned long)data[si], (unsigned long)(data[si] >> 56), name);
+                      }
+                    }
+                  }
+                }
+              }
+            }
             fprintf(dbgout, "  PC=%016lx LR=%016lx SP=%016lx\n",
                     (unsigned long)(natural)xpPC(xp),
                     (unsigned long)xpGPR(xp, 30),
@@ -4410,6 +4456,85 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
     natural pc = ts->__pc;
     opcode insn = *(opcode *)pc;
     unsigned imm16 = (insn >> 5) & 0xFFFF;
+    if (imm16 == 0xFFE8) {
+      /* Bug 165: x29 corrupted — loaded from frame with non-stack address */
+      natural fp_val = (natural)ts->__fp;
+      natural sp_val = (natural)ts->__sp;
+      fprintf(dbgout, "\n*** BUG165: x29 CORRUPTED in frame restore! ***\n");
+      fprintf(dbgout, "  x29=0x%lx sp=0x%lx lr=0x%lx pc=0x%lx\n",
+              (unsigned long)fp_val, (unsigned long)sp_val,
+              (unsigned long)ts->__lr, (unsigned long)pc);
+      fprintf(dbgout, "  nfn(x10)=0x%lx vsp(x25)=0x%lx allocptr(x15)=0x%lx\n",
+              (unsigned long)ts->__x[10], (unsigned long)ts->__x[25],
+              (unsigned long)ts->__x[15]);
+      fprintf(dbgout, "  imm0(x9)=0x%lx imm1(x12)=0x%lx imm2(x13)=0x%lx\n",
+              (unsigned long)ts->__x[9], (unsigned long)ts->__x[12],
+              (unsigned long)ts->__x[13]);
+      fprintf(dbgout, "  temp0(x0)=0x%lx temp1(x1)=0x%lx temp2(x2)=0x%lx\n",
+              (unsigned long)ts->__x[0], (unsigned long)ts->__x[1],
+              (unsigned long)ts->__x[2]);
+      fprintf(dbgout, "  arg_x(x3)=0x%lx arg_y(x4)=0x%lx arg_z(x5)=0x%lx\n",
+              (unsigned long)ts->__x[3], (unsigned long)ts->__x[4],
+              (unsigned long)ts->__x[5]);
+      fprintf(dbgout, "  fname(x6)=0x%lx rnil(x11)=0x%lx imm3(x14)=0x%lx\n",
+              (unsigned long)ts->__x[6], (unsigned long)ts->__x[11],
+              (unsigned long)ts->__x[14]);
+      /* The HLT fires AFTER ldp nfn,x29,[sp,#savefn] but BEFORE ldp vsp,lr,[sp],#size
+         So sp still points to the frame. Dump frame contents. */
+      fprintf(dbgout, "  Frame at sp (pre-pop):\n");
+      if (sp_val > 0x100000000ULL && sp_val < 0x800000000ULL) {
+        LispObj *f = (LispObj *)sp_val;
+        fprintf(dbgout, "    [sp+0]  savevsp=0x%lx\n", (unsigned long)f[0]);
+        fprintf(dbgout, "    [sp+8]  savelr =0x%lx\n", (unsigned long)f[1]);
+        fprintf(dbgout, "    [sp+16] savefn =0x%lx\n", (unsigned long)f[2]);
+        fprintf(dbgout, "    [sp+24] savefp =0x%lx\n", (unsigned long)f[3]);
+        /* Walk backwards through frames from the savefp slot */
+        fprintf(dbgout, "  Frame chain (from savefp):\n");
+        natural prev_fp = (natural)f[3];  /* This is the corrupted x29 */
+        fprintf(dbgout, "    [0] fp=0x%lx (CORRUPTED — this triggered the halt)\n",
+                (unsigned long)prev_fp);
+        /* Try the PREVIOUS frame (the one that saved this corrupted x29).
+           That frame's savefp is in f[3]. But f[3] is the corrupted value.
+           Instead, walk sp backwards to find earlier frames. */
+        fprintf(dbgout, "  Stack dump sp-0x80 to sp+0x80:\n");
+        natural dump_start = (sp_val > 0x80) ? sp_val - 0x80 : sp_val;
+        natural dump_end = sp_val + 0x80;
+        natural addr;
+        for (addr = dump_start; addr < dump_end; addr += 8) {
+          if (addr >= 0x100000000ULL && addr < 0x800000000ULL) {
+            LispObj val = *(LispObj *)addr;
+            const char *label = "";
+            if (addr == sp_val) label = " <- sp (savevsp)";
+            else if (addr == sp_val + 8) label = " <- sp+8 (savelr)";
+            else if (addr == sp_val + 16) label = " <- sp+16 (savefn)";
+            else if (addr == sp_val + 24) label = " <- sp+24 (savefp)";
+            else if (addr == sp_val + 32) label = " <- sp+32 (prev frame start?)";
+            fprintf(dbgout, "    [0x%lx] = 0x%016lx%s\n",
+                    (unsigned long)addr, (unsigned long)val, label);
+          }
+        }
+      }
+      /* Dump code around lr to identify the calling function */
+      {
+        natural lr_val = (natural)ts->__lr;
+        /* Note: lr still has the savelr from the PREVIOUS frame restoration,
+           or the original lr before this frame was entered. Since we haven't
+           done the second ldp yet, lr is still the value from the CALLER. */
+        fprintf(dbgout, "  Code at lr-0x40..lr+0x10 (lr=0x%lx):\n", (unsigned long)lr_val);
+        if (lr_val > 0x40 && lr_val < 0x800000000000ULL) {
+          unsigned int *code = (unsigned int *)(lr_val - 0x40);
+          int ci;
+          for (ci = 0; ci < 24; ci++) {
+            natural code_addr = lr_val - 0x40 + ci * 4;
+            fprintf(dbgout, "    [0x%lx]: 0x%08x%s\n",
+                    (unsigned long)code_addr, code[ci],
+                    (code_addr == lr_val) ? " <- lr" : "");
+          }
+        }
+      }
+      fflush(dbgout);
+      _exit(1);
+    }
     if (imm16 == 0xFFFC) {
       fprintf(dbgout, "FATAL: nthrow with NULL catch_top pc=0x%lx lr=0x%lx temp2(x10)=0x%lx sp=0x%lx\n",
               (unsigned long)pc, (unsigned long)ts->__lr,

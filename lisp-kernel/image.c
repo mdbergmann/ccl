@@ -527,6 +527,64 @@ load_openmcl_image(int fd, openmcl_image_file_header *h)
      On ARM64 with fixnumshift=0, l0-symbol.lisp increments binding-index by 8
      (= node_size), so indices are already byte offsets. No image-load scaling needed. */
   fprintf(dbgout, "  load_openmcl_image returning image_nil=0x%lx\n", (unsigned long)image_nil);
+  /* Bug 165 diagnostic: scan dynamic area for istructs with 16 elements,
+     dump their slot 12 (nhash.find) to check hash table validity */
+  {
+    area *da = active_dynamic_area;
+    if (da) {
+      LispObj *scan = (LispObj *)da->low;
+      LispObj *end = (LispObj *)da->active;
+      int ht_count = 0;
+      fprintf(dbgout, "  Bug165: scanning dynamic area for hash tables...\n");
+      while (scan < end) {
+        LispObj header = *scan;
+        natural subtag = header >> 56;
+        natural count = header & 0x00FFFFFFFFFFFFFFULL;
+        if (subtag == 0xae && count == 16) {
+          /* istruct with 16 elements = likely hash table */
+          LispObj *data = scan + 1; /* data starts after header */
+          ht_count++;
+          if (ht_count <= 10) {
+            fprintf(dbgout, "    HT#%d @%p: slot0=%016lx slot12(find)=%016lx slot15(min-size)=%016lx\n",
+                    ht_count, (void*)scan,
+                    (unsigned long)data[0], (unsigned long)data[12], (unsigned long)data[15]);
+            /* Check if slot12 looks wrong (not a function/symbol) */
+            natural s12_tag = data[12] >> 56;
+            if (s12_tag != 0x62 && s12_tag != 0x63 && data[12] != 0) {
+              fprintf(dbgout, "    *** SUSPICIOUS: slot12 tag=0x%02lx (expected 0x62 function or 0x63 symbol) ***\n",
+                      (unsigned long)s12_tag);
+              /* Dump all 16 slots */
+              for (int si = 0; si < 16; si++) {
+                fprintf(dbgout, "      slot[%2d] = %016lx (tag=0x%02lx)\n",
+                        si, (unsigned long)data[si], (unsigned long)(data[si] >> 56));
+              }
+            }
+          }
+          scan += 1 + count; /* skip header + 16 elements */
+        } else {
+          /* Skip this object */
+          if (subtag >= 0x80) {
+            /* uvector: header + data words */
+            natural nwords;
+            if (subtag >= 0xa0) {
+              /* node vector: count = element_count */
+              nwords = count;
+            } else {
+              /* imm vector: need to compute from element count and subtag */
+              /* For simplicity, use dnode-aligned size */
+              nwords = (count + 1) & ~1; /* rough alignment */
+            }
+            scan += 1 + nwords;
+            /* Align to dnode */
+            scan = (LispObj *)(((natural)scan + 15) & ~15);
+          } else {
+            scan += 2; /* cons or other pair */
+          }
+        }
+      }
+      fprintf(dbgout, "  Bug165: found %d hash tables in dynamic area\n", ht_count);
+    }
+  }
   return image_nil;
 }
  
