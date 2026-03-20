@@ -443,35 +443,6 @@ _spentry(mkcatchmv)
 	__(ret)
 
 _spentry(mkunwind)
-        /* Bug 157: verify nfn has function tag (0x62) at mkunwind entry.
-           If the top byte is not 0x62, nfn was corrupted before the call. */
-        __(lsr imm0,nfn,#56)
-        __(cmp imm0,#0x62)
-        __(beq 3f)
-        __(hlt #0xFFE0)       /* nfn tag mismatch — nfn already corrupted */
-3:
-        /* Check that frame savefn matches nfn */
-        __(ldr imm0,[x29,#0x10])
-        __(cmp imm0,nfn)
-        __(beq 4f)
-        __(hlt #0xFFE1)       /* frame savefn != nfn — frame was corrupted */
-4:
-        /* Bug 158: verify lr is within nfn's code vector.
-           If nfn is the wrong function, lr (return address) won't be
-           in nfn's code vector range. */
-        __(ldr imm0,[nfn,#node_size])   /* slot[1] = code vector (tagged) */
-        __(ubfx imm0,imm0,#0,#56)      /* strip TBI tag */
-        __(ldr imm1,[imm0,#-node_size]) /* cv header (before data) */
-        __(ubfx imm1,imm1,#0,#56)      /* extract element count */
-        __(lsl imm1,imm1,#2)            /* byte_len = count * 4 (32-bit elements) */
-        __(cmp lr,imm0)                 /* lr >= cv_data? */
-        __(blo 5f)                      /* lr below cv_data → mismatch */
-        __(add imm0,imm0,imm1)          /* cv_end = cv_data + byte_len */
-        __(cmp lr,imm0)                 /* lr < cv_end? */
-        __(blo 6f)                      /* lr within range → OK */
-5:
-        __(hlt #0xFFE2)                 /* Bug 158: lr NOT in nfn's cv! */
-6:
         __(mov imm2,#-fixnumone)
         __(mov imm1,#INTERRUPT_LEVEL_BINDING_INDEX)
         __(ldr temp0,[rcontext,#tcr.tlb_pointer])
@@ -3781,7 +3752,7 @@ local_label(throw_all_values):
         __(ubfx imm0,temp0,#0,#56)
         __(sub imm0,imm0,#node_size)  /* back to header = 16-byte aligned */
         __(mov sp,imm0)
-        __(ldr imm1,[sp,#catch_frame.size+lisp_frame.savevsp+node_size])
+        __(ldr imm1,[sp,#catch_frame_alloc+lisp_frame.savevsp])
         __(bne local_label(throw_push_test_entry))
         __(ldr arg_z,[imm2,#-node_size])
         __(b local_label(throw_pushed_values))
@@ -3798,9 +3769,9 @@ local_label(throw_pushed_values):
         __(mov vsp,imm1)
         __(ldr imm0,[temp0,#catch_frame.link])
         __(str imm0,[rcontext,#tcr.catch_top])
-        __(ldr lr,[sp,#catch_frame.size+lisp_frame.savelr+node_size])
-        __(ldp nfn,x29,[sp,#catch_frame.size+lisp_frame.savefn+node_size])
-        __(add sp,sp,#catch_frame.size+lisp_frame.size+node_size)
+        __(ldr lr,[sp,#catch_frame_alloc+lisp_frame.savelr])
+        __(ldp nfn,x29,[sp,#catch_frame_alloc+lisp_frame.savefn])
+        __(add sp,sp,#catch_frame_alloc+lisp_frame.size)
         __(pop_lisp_fprs())
         __(ret)
 _endfn(C(_throw_found))        
@@ -3831,10 +3802,10 @@ local_label(_nthrow1v_dont_unbind):
         __(beq local_label(_nthrow1v_do_unwind))
         /* A catch frame.  If the last one, restore context from there.  */
         __(cbnz temp2,0f)
-        __(ldr vsp,[sp,#catch_frame.size+lisp_frame.savevsp+node_size])
+        __(ldr vsp,[sp,#catch_frame_alloc+lisp_frame.savevsp])
 0:
-        __(ldr x29,[sp,#catch_frame.size+lisp_frame.savefp+node_size])
-        __(add sp,sp,#catch_frame.size+lisp_frame.size+node_size)
+        __(ldr x29,[sp,#catch_frame_alloc+lisp_frame.savefp])
+        __(add sp,sp,#catch_frame_alloc+lisp_frame.size)
         __(pop_lisp_fprs())
         __(b local_label(_nthrow1v_nextframe))
 local_label(_nthrow1v_do_unwind):
@@ -3842,7 +3813,7 @@ local_label(_nthrow1v_do_unwind):
         /* multiple-value case.  */
         /* Save our caller's LR and FN in the csp frame created by the unwind-  */
         /* protect.  (Clever, eh ?)  */
-        __(add sp,sp,#catch_frame.size+node_size)
+        __(add sp,sp,#catch_frame_alloc)
         /* We used to use a swp instruction to exchange the lr with
         the lisp_frame.savelr field of the lisp frame that temp0 addresses.
         Multicore ARMv7 machines include the ability to disable the swp
@@ -3862,11 +3833,11 @@ local_label(_nthrow1v_do_unwind):
         .globl C(swap_lr_lisp_frame_temp0)
         .globl C(swap_lr_lisp_frame_temp0_end)
         /* This instruction sequence needs support from pc_luser_xp() */
-C(swap_lr_lisp_frame_temp0):            
+C(swap_lr_lisp_frame_temp0):
         __(ldr imm0,[temp0,#lisp_frame.savelr])
         __(str lr,[temp0,#lisp_frame.savelr])
         __(mov lr,imm0)
-C(swap_lr_lisp_frame_temp0_end):            
+C(swap_lr_lisp_frame_temp0_end):
         __(ldp nfn,x29,[temp0,#lisp_frame.savefn])
         __(str fn,[temp0,#lisp_frame.savefn])
         __(ldr vsp,[temp0,#lisp_frame.savevsp])
@@ -3925,7 +3896,7 @@ local_label(nthrownv_dont_unbind):
         __(cmp temp2,#0)
 /* A catch frame.  If the last one, restore context from there.  */
 	__(bne local_label(nthrownv_skip))
-        __(ldr imm0,[sp,#catch_frame.size+lisp_frame.savevsp+node_size])
+        __(ldr imm0,[sp,#catch_frame_alloc+lisp_frame.savevsp])
         __(add imm1,vsp,nargs)
         __(mov arg_z,nargs)
         __(b local_label(nthrownv_push_test))
@@ -3937,8 +3908,8 @@ local_label(nthrownv_push_test):
         __(cbnz arg_z,local_label(nthrownv_push_loop))
         __(mov vsp,imm0)
 local_label(nthrownv_skip):
-        __(ldr x29,[sp,#catch_frame.size+lisp_frame.savefp+node_size])
-        __(add sp,sp,#catch_frame.size+lisp_frame.size+node_size)
+        __(ldr x29,[sp,#catch_frame_alloc+lisp_frame.savefp])
+        __(add sp,sp,#catch_frame_alloc+lisp_frame.size)
         __(pop_lisp_fprs())
         __(b local_label(nthrownv_nextframe))                
 local_label(nthrownv_do_unwind):
@@ -3949,7 +3920,7 @@ local_label(nthrownv_do_unwind):
         __(mov sp,imm0)
         __(str arg_x,[rcontext,#tcr.xframe])
         __(str arg_z,[rcontext,#tcr.last_lisp_frame])
-        __(add sp,sp,#catch_frame.size+node_size)
+        __(add sp,sp,#catch_frame_alloc)
         __(add imm1,nargs,#node_size)
         __(mov arg_z,sp)
         __(dnode_align(imm0,imm1,node_size))
@@ -3974,7 +3945,7 @@ C(swap_lr_lisp_frame_arg_z):
         __(ldr imm0,[arg_z,#lisp_frame.savelr])
         __(str lr,[arg_z,#lisp_frame.savelr])
         __(mov lr,imm0)
-C(swap_lr_lisp_frame_arg_z_end):                   
+C(swap_lr_lisp_frame_arg_z_end):
         __(ldp nfn,x29,[arg_z,#lisp_frame.savefn])
         __(str fn,[arg_z,#lisp_frame.savefn])
         __(ldr vsp,[arg_z,#lisp_frame.savevsp])
@@ -3987,18 +3958,23 @@ C(swap_lr_lisp_frame_arg_z_end):
         __(ldr imm0,[sp])
         __(header_length(imm0,imm0))
         __(subs nargs,imm0,#node_size)
+        /* Bug 166: if nargs <= 0, skip the value restore loop entirely.
+           When the saved-values header has 0 count, nargs = -8 and the
+           loop would run forever, overflowing the vstack. */
+        __(ble local_label(nthrownv_tpop_done))
         __(add imm0,imm0,#node_size)
         __(add temp0,sp,imm0)
         __(mov imm0,nargs)
         __(add arg_z,temp0,#node_size)
         __(bic arg_z,arg_z,#fulltagmask)
         __(b local_label(nthrownv_tpoptest))
-local_label(nthrownv_tpoploop):  
-        __(subs imm0,imm0,#node_size)        
+local_label(nthrownv_tpoploop):
+        __(subs imm0,imm0,#node_size)
         __(vpush1(temp2))
-local_label(nthrownv_tpoptest):  
+local_label(nthrownv_tpoptest):
         __(ldr temp2,[temp0,#-node_size]!)
         __(bne local_label(nthrownv_tpoploop))
+local_label(nthrownv_tpop_done):
         /* Bug 151: fn=nfn=temp2=x10 on ARM64.  The old code saved temp2
            to imm0, loaded fn (clobbering x10), then restored temp2 from
            imm0 (clobbering fn).  Skip the pointless fn load; temp2

@@ -4458,80 +4458,100 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
     opcode insn = *(opcode *)pc;
     unsigned imm16 = (insn >> 5) & 0xFFFF;
     if (imm16 == 0xFFE8) {
-      /* Bug 165: x29 corrupted — loaded from frame with non-stack address */
-      natural fp_val = (natural)ts->__fp;
+      /* Bug 165: x29 corrupted — loaded from frame with non-stack address.
+         The HLT fires AFTER ldp nfn,x29,[sp,#savefn] but BEFORE ldp vsp,lr,[sp],#size.
+         Recover by fixing x29 and skipping the HLT. */
+      static int bug165_count = 0;
       natural sp_val = (natural)ts->__sp;
-      fprintf(dbgout, "\n*** BUG165: x29 CORRUPTED in frame restore! ***\n");
-      fprintf(dbgout, "  x29=0x%lx sp=0x%lx lr=0x%lx pc=0x%lx\n",
-              (unsigned long)fp_val, (unsigned long)sp_val,
-              (unsigned long)ts->__lr, (unsigned long)pc);
-      fprintf(dbgout, "  nfn(x10)=0x%lx vsp(x25)=0x%lx allocptr(x15)=0x%lx\n",
-              (unsigned long)ts->__x[10], (unsigned long)ts->__x[25],
-              (unsigned long)ts->__x[15]);
-      fprintf(dbgout, "  imm0(x9)=0x%lx imm1(x12)=0x%lx imm2(x13)=0x%lx\n",
-              (unsigned long)ts->__x[9], (unsigned long)ts->__x[12],
-              (unsigned long)ts->__x[13]);
-      fprintf(dbgout, "  temp0(x0)=0x%lx temp1(x1)=0x%lx temp2(x2)=0x%lx\n",
-              (unsigned long)ts->__x[0], (unsigned long)ts->__x[1],
-              (unsigned long)ts->__x[2]);
-      fprintf(dbgout, "  arg_x(x3)=0x%lx arg_y(x4)=0x%lx arg_z(x5)=0x%lx\n",
-              (unsigned long)ts->__x[3], (unsigned long)ts->__x[4],
-              (unsigned long)ts->__x[5]);
-      fprintf(dbgout, "  fname(x6)=0x%lx rnil(x11)=0x%lx imm3(x14)=0x%lx\n",
-              (unsigned long)ts->__x[6], (unsigned long)ts->__x[11],
-              (unsigned long)ts->__x[14]);
-      /* The HLT fires AFTER ldp nfn,x29,[sp,#savefn] but BEFORE ldp vsp,lr,[sp],#size
-         So sp still points to the frame. Dump frame contents. */
-      fprintf(dbgout, "  Frame at sp (pre-pop):\n");
+      bug165_count++;
+
+      if (bug165_count <= 10 && sp_val > 0x100000000ULL && sp_val < 0x800000000ULL) {
+        LispObj *f = (LispObj *)sp_val;
+        fprintf(dbgout, "BUG165[%d]: x29=0x%lx sp=0x%lx frame=[0x%lx,0x%lx,0x%lx,0x%lx] lr=0x%lx nfn=0x%lx\n",
+                bug165_count,
+                (unsigned long)ts->__fp, (unsigned long)sp_val,
+                (unsigned long)f[0], (unsigned long)f[1],
+                (unsigned long)f[2], (unsigned long)f[3],
+                (unsigned long)ts->__lr, (unsigned long)ts->__x[10]);
+        fflush(dbgout);
+      }
+
+      /* Recover: fix x29, skip past HLT, let the second LDP execute */
+      *out_ts = *ts;
+      out_ts->__pc = ts->__pc + 4;  /* skip past HLT to the ldp vsp,lr,[sp],#32 */
+
       if (sp_val > 0x100000000ULL && sp_val < 0x800000000ULL) {
         LispObj *f = (LispObj *)sp_val;
-        fprintf(dbgout, "    [sp+0]  savevsp=0x%lx\n", (unsigned long)f[0]);
-        fprintf(dbgout, "    [sp+8]  savelr =0x%lx\n", (unsigned long)f[1]);
-        fprintf(dbgout, "    [sp+16] savefn =0x%lx\n", (unsigned long)f[2]);
-        fprintf(dbgout, "    [sp+24] savefp =0x%lx\n", (unsigned long)f[3]);
-        /* Walk backwards through frames from the savefp slot */
-        fprintf(dbgout, "  Frame chain (from savefp):\n");
-        natural prev_fp = (natural)f[3];  /* This is the corrupted x29 */
-        fprintf(dbgout, "    [0] fp=0x%lx (CORRUPTED — this triggered the halt)\n",
-                (unsigned long)prev_fp);
-        /* Try the PREVIOUS frame (the one that saved this corrupted x29).
-           That frame's savefp is in f[3]. But f[3] is the corrupted value.
-           Instead, walk sp backwards to find earlier frames. */
-        fprintf(dbgout, "  Stack dump sp-0x80 to sp+0x80:\n");
-        natural dump_start = (sp_val > 0x80) ? sp_val - 0x80 : sp_val;
-        natural dump_end = sp_val + 0x80;
-        natural addr;
-        for (addr = dump_start; addr < dump_end; addr += 8) {
-          if (addr >= 0x100000000ULL && addr < 0x800000000ULL) {
-            LispObj val = *(LispObj *)addr;
-            const char *label = "";
-            if (addr == sp_val) label = " <- sp (savevsp)";
-            else if (addr == sp_val + 8) label = " <- sp+8 (savelr)";
-            else if (addr == sp_val + 16) label = " <- sp+16 (savefn)";
-            else if (addr == sp_val + 24) label = " <- sp+24 (savefp)";
-            else if (addr == sp_val + 32) label = " <- sp+32 (prev frame start?)";
-            fprintf(dbgout, "    [0x%lx] = 0x%016lx%s\n",
-                    (unsigned long)addr, (unsigned long)val, label);
+        natural slot1 = (natural)f[1];  /* labeled savelr */
+        natural slot3 = (natural)f[3];  /* labeled savefp */
+        /* Check if slot1 and slot3 appear swapped:
+           slot1 has stack addr (should be code), slot3 has code addr (should be stack) */
+        int slot1_is_stack = (slot1 > 0x100000000ULL && slot1 < 0x200000000ULL);
+        int slot3_is_code = (slot3 > 0x200000000000ULL ||
+                             (slot3 > 0x100000000ULL && slot3 < 0x110000000ULL));
+        if (slot1_is_stack && slot3_is_code) {
+          /* Swap: put code addr in savelr, stack addr in savefp */
+          f[1] = slot3;  /* savelr = code addr (the real return address) */
+          f[3] = slot1;  /* savefp = stack addr (the real frame pointer) */
+          out_ts->__fp = slot1;  /* fix x29 to the stack address */
+          if (bug165_count <= 10) {
+            fprintf(dbgout, "  SWAPPED: savelr=0x%lx savefp=0x%lx\n",
+                    (unsigned long)slot3, (unsigned long)slot1);
+            fflush(dbgout);
+          }
+        } else {
+          /* Can't identify swap pattern — just set x29 = sp */
+          out_ts->__fp = sp_val;
+          if (bug165_count <= 10) {
+            fprintf(dbgout, "  NO-SWAP: x29=sp=0x%lx\n", (unsigned long)sp_val);
+            fflush(dbgout);
           }
         }
+      } else {
+        out_ts->__fp = sp_val;
       }
-      /* Dump code around lr to identify the calling function */
-      {
-        natural lr_val = (natural)ts->__lr;
-        fprintf(dbgout, "  Code at lr-0x40..lr+0x10 (lr=0x%lx):\n", (unsigned long)lr_val);
-        if (lr_val > 0x200000000000ULL && lr_val < 0x400000000000ULL) {
-          unsigned int *code = (unsigned int *)(lr_val - 0x40);
-          int ci;
-          for (ci = 0; ci < 24; ci++) {
-            natural code_addr = lr_val - 0x40 + ci * 4;
-            fprintf(dbgout, "    [0x%lx]: 0x%08x%s\n",
-                    (unsigned long)code_addr, code[ci],
-                    (code_addr == lr_val) ? " <- lr" : "");
-          }
+      kret = KERN_SUCCESS;
+      goto done;
+    }
+    if (imm16 == 0xFFE7) {
+      /* Bug 166: x29 corrupt BEFORE build_lisp_frame — tells us WHERE corruption enters.
+         The HLT fires BEFORE the stp/mov instructions, so sp/lr/nfn are still the caller's.
+         Recover by setting x29 = sp and skipping the HLT. */
+      static int bug166_count = 0;
+      bug166_count++;
+      if (bug166_count <= 20) {
+        fprintf(dbgout, "BUG166[%d]: x29=0x%lx corrupt BEFORE build_lisp_frame! sp=0x%lx lr=0x%lx nfn=0x%lx pc=0x%lx\n",
+                bug166_count,
+                (unsigned long)ts->__fp, (unsigned long)ts->__sp,
+                (unsigned long)ts->__lr, (unsigned long)ts->__x[10],
+                (unsigned long)pc);
+        /* Walk up the stack to find the caller's frame */
+        natural fp_val = (natural)ts->__fp;
+        if (fp_val > 0x100000000ULL && fp_val < 0x200000000ULL) {
+          /* x29 is in stack range but has upper bits — this shouldn't trigger */
+        } else if (fp_val > 0x200000000000ULL) {
+          /* x29 points to code area — look at what's there */
+          fprintf(dbgout, "  x29 is in CODE area (0x%lx). This is a return address, not a frame pointer!\n",
+                  (unsigned long)fp_val);
         }
+        /* Dump the stack around sp to show the caller's frame */
+        natural sp_val = (natural)ts->__sp;
+        if (sp_val > 0x100000000ULL && sp_val < 0x800000000ULL) {
+          fprintf(dbgout, "  Stack at sp: [+0]=0x%lx [+8]=0x%lx [+16]=0x%lx [+24]=0x%lx [+32]=0x%lx\n",
+                  (unsigned long)*(LispObj *)sp_val,
+                  (unsigned long)*(LispObj *)(sp_val + 8),
+                  (unsigned long)*(LispObj *)(sp_val + 16),
+                  (unsigned long)*(LispObj *)(sp_val + 24),
+                  (unsigned long)*(LispObj *)(sp_val + 32));
+        }
+        fflush(dbgout);
       }
-      fflush(dbgout);
-      _exit(1);
+      /* Recover: fix x29 = sp, skip past HLT */
+      *out_ts = *ts;
+      out_ts->__fp = ts->__sp;  /* x29 = sp (will be correct for the new frame) */
+      out_ts->__pc = ts->__pc + 4;  /* skip past HLT to the stp instruction */
+      kret = KERN_SUCCESS;
+      goto done;
     }
     if (imm16 == 0xFFFC) {
       fprintf(dbgout, "FATAL: nthrow with NULL catch_top pc=0x%lx lr=0x%lx temp2(x10)=0x%lx sp=0x%lx\n",
@@ -5158,6 +5178,68 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
         fflush(dbgout);
         _exit(1);
       }
+      {
+        /* Bug 166: Log the original exception details before signal handler setup.
+           Register mapping: nargs=x5, nfn=x10, arg_x=x13, arg_y=x14, arg_z=x15,
+           vsp=x25, allocptr=x26, allocbase=x27, rcontext=x28 */
+        static int sigbus_count = 0;
+        sigbus_count++;
+        if (sigbus_count <= 5) {
+          natural orig_pc = (natural)ts->__pc;
+          natural orig_lr = (natural)ts->__lr;
+          natural orig_fp = (natural)ts->__fp;
+          natural orig_sp = (natural)ts->__sp;
+          fprintf(dbgout, "\nBUG166-SIGBUS[%d]: pc=0x%lx lr=0x%lx fp=0x%lx sp=0x%lx addr=0x%llx\n",
+                  sigbus_count, (unsigned long)orig_pc, (unsigned long)orig_lr,
+                  (unsigned long)orig_fp, (unsigned long)orig_sp, (long long)code[1]);
+          fprintf(dbgout, "  nfn(x10)=0x%lx vsp(x25)=0x%lx allocptr(x26)=0x%lx nargs(x5)=0x%lx\n",
+                  (unsigned long)ts->__x[10], (unsigned long)ts->__x[25],
+                  (unsigned long)ts->__x[26], (unsigned long)ts->__x[5]);
+          fprintf(dbgout, "  arg_z(x15)=0x%lx arg_y(x14)=0x%lx arg_x(x13)=0x%lx\n",
+                  (unsigned long)ts->__x[15], (unsigned long)ts->__x[14],
+                  (unsigned long)ts->__x[13]);
+          /* Check if PC is on the control stack (ret to non-executable address) */
+          area *cs = tcr->cs_area;
+          if (cs && (BytePtr)orig_pc >= cs->low && (BytePtr)orig_pc <= cs->high) {
+            fprintf(dbgout, "  *** PC IS ON CONTROL STACK! ret to non-executable addr ***\n");
+            fprintf(dbgout, "  cs_area: low=0x%lx active=0x%lx high=0x%lx\n",
+                    (unsigned long)cs->low, (unsigned long)cs->active, (unsigned long)cs->high);
+            /* Scan the stack for code addresses (potential return addresses) */
+            fprintf(dbgout, "  Stack scan for code addresses (sp upward):\n");
+            natural scan;
+            int found = 0;
+            for (scan = orig_sp; scan < orig_sp + 0x400 && scan < (natural)cs->high && found < 20; scan += 8) {
+              natural val = *(natural *)scan;
+              /* Check if val looks like a code address (readonly 0x300000xxx or kernel 0x100xxx) */
+              int is_readonly = (val > 0x200000000000ULL && val < 0x400000000000ULL && (val >> 56) == 0);
+              int is_kernel = (val > 0x100000000ULL && val < 0x110000000ULL);
+              if (is_readonly || is_kernel) {
+                fprintf(dbgout, "    [sp+0x%lx]=0x%lx (%s)\n",
+                        (unsigned long)(scan - orig_sp), (unsigned long)val,
+                        is_readonly ? "READONLY/CODE" : "KERNEL");
+                found++;
+              }
+            }
+          }
+          /* Dump frame at fp and stack at sp */
+          if (orig_fp > 0x100000000ULL && orig_fp < 0x800000000ULL) {
+            LispObj *f = (LispObj *)orig_fp;
+            fprintf(dbgout, "  Frame@fp: [+0]=0x%lx [+8]=0x%lx [+16]=0x%lx [+24]=0x%lx\n",
+                    (unsigned long)f[0], (unsigned long)f[1], (unsigned long)f[2], (unsigned long)f[3]);
+          }
+          if (orig_sp > 0x100000000ULL && orig_sp < 0x800000000ULL) {
+            LispObj *s = (LispObj *)orig_sp;
+            fprintf(dbgout, "  Stack@sp: ");
+            int si;
+            for (si = 0; si < 12; si++) {
+              fprintf(dbgout, "[%d]=0x%lx ", si, (unsigned long)s[si]);
+              if (si == 3 || si == 7) fprintf(dbgout, "\n    ");
+            }
+            fprintf(dbgout, "\n");
+          }
+          fflush(dbgout);
+        }
+      }
       kret = setup_signal_frame(thread,
                                 (void *)DARWIN_EXCEPTION_HANDLER,
                                 signum,
@@ -5631,16 +5713,45 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
               out_ts->__x[allocbase] = (LispObj)oldlimit;
               tcr->save_allocbase = (void *)oldlimit;
               out_ts->__pc = ts->__pc + 4;
-              /* Bug 156: check frame after alloc */
+              /* Bug 166: check x29 validity at every alloc trap */
               {
-                natural fp156a = (natural)ts->__fp;
-                if (fp156a > 0x100000000ULL && fp156a < 0x200000000ULL) {
-                  LispObj sl = ((LispObj *)fp156a)[1];
-                  LispObj sf = ((LispObj *)fp156a)[2];
-                  if (sl == 0 && sf == 0) {
-                    fprintf(dbgout, "BUG156-ALLOC: frame zeroed during alloc! fp=0x%lx pc=0x%lx disp=%ld\n",
-                            (unsigned long)fp156a, (unsigned long)ts->__pc, (long)disp);
-                    fflush(dbgout);
+                static int alloc_check_count = 0;
+                natural fp166 = (natural)ts->__fp;
+                alloc_check_count++;
+                /* Check if x29 has upper bits set (code area) or is invalid */
+                if (fp166 & 0xFFFFFF0000000000ULL) {
+                  fprintf(dbgout, "BUG166-ALLOC[%d]: x29=0x%lx INVALID at alloc trap! pc=0x%lx lr=0x%lx sp=0x%lx nfn=0x%lx\n",
+                          alloc_check_count, (unsigned long)fp166,
+                          (unsigned long)ts->__pc, (unsigned long)ts->__lr,
+                          (unsigned long)ts->__sp, (unsigned long)ts->__x[10]);
+                  /* Dump frame at the PREVIOUS valid fp if possible */
+                  LispObj *f = (LispObj *)fp166;
+                  /* Try reading — this might be in code area which is readable */
+                  if (fp166 > 0x200000000000ULL && fp166 < 0x400000000000ULL) {
+                    fprintf(dbgout, "  Data@x29(code): [+0]=0x%lx [+8]=0x%lx [+16]=0x%lx [+24]=0x%lx\n",
+                            (unsigned long)f[0], (unsigned long)f[1],
+                            (unsigned long)f[2], (unsigned long)f[3]);
+                  }
+                  fflush(dbgout);
+                }
+                /* Also check frame contents at valid fp */
+                if (fp166 > 0x100000000ULL && fp166 < 0x200000000ULL) {
+                  LispObj *f = (LispObj *)fp166;
+                  LispObj savefp = f[3];
+                  /* Check if savefp (slot 3) has code address (corruption) */
+                  if (savefp & 0xFFFFFF0000000000ULL) {
+                    static int frame_corrupt_count = 0;
+                    frame_corrupt_count++;
+                    if (frame_corrupt_count <= 10) {
+                      fprintf(dbgout, "BUG166-FRAME[%d]: savefp=0x%lx at alloc#%d! fp=0x%lx pc=0x%lx lr=0x%lx\n",
+                              frame_corrupt_count, (unsigned long)savefp,
+                              alloc_check_count, (unsigned long)fp166,
+                              (unsigned long)ts->__pc, (unsigned long)ts->__lr);
+                      fprintf(dbgout, "  frame: [+0]=0x%lx [+8]=0x%lx [+16]=0x%lx [+24]=0x%lx\n",
+                              (unsigned long)f[0], (unsigned long)f[1],
+                              (unsigned long)f[2], (unsigned long)f[3]);
+                      fflush(dbgout);
+                    }
                   }
                 }
               }

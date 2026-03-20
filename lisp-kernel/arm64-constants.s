@@ -361,6 +361,11 @@ max_1_bit_constant_index = 0
 	 _node(last_lisp_frame) /* from TCR */
 	_endstructf
 
+/* Bug 166: dnode-aligned allocation size for catch frame vector on the stack.
+   stack_allocate_zeroed_vector uses dnode_align(element_count*8 + 8) bytes.
+   catch_frame has 14 elements: dnode_align(14*8 + 8) = dnode_align(120) = 128.
+   This MUST match the deallocation in nthrow1v/nthrownv. */
+catch_frame_alloc = ((catch_frame.element_count * node_size + node_size + (dnode_size - 1)) & ~(dnode_size - 1))
 
 	_structf(vectorH)
 	 _node(logsize)
