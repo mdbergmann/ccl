@@ -86,6 +86,18 @@ extern Boolean grow_dynamic_area(natural);
 
 Boolean allocation_enabled = true;
 
+/* Bug 167: subprim entry counter and breadcrumb for tracking crash timing */
+unsigned int sp_entry_counter = 0;
+typedef struct {
+  natural saved_lr;       /* return address (where in compiled code the sp was called from) */
+  natural saved_nfn;      /* current function (x10) at sp entry */
+  natural saved_fp;       /* frame pointer (x29) at sp entry */
+  natural saved_sp_addr;  /* address of the subprim entry point */
+} sp_breadcrumb_t;
+sp_breadcrumb_t sp_breadcrumb = {0, 0, 0, 0};
+unsigned int sp_entry_threshold = 0;  /* disabled */
+natural nthrow_saved_lr = 0;  /* Bug 167: save lr across nthrow processing */
+
 Boolean
 did_gc_notification_since_last_full_gc = false;
 
@@ -2126,9 +2138,47 @@ callback_to_lisp(LispObj callback_macptr, ExceptionInformation *xp,
   /* Call back to Lisp.  Lisp will handle trampolining through some
      code that will push lr/fn & pc/nfn stack frames for backtrace. */
   callback_ptr = deref(callback_macptr, 1);  /* macptr.address */
+
+  /* Bug 167: count callback_to_lisp calls */
+  {
+    static int callback_count = 0;
+    callback_count++;
+    if (callback_count <= 3) {
+      fprintf(dbgout, "BUG167-CBK[%d]: pc=0x%lx lr=0x%lx fp=0x%lx sp=0x%lx arg1=0x%lx\n",
+              callback_count, (unsigned long)(natural)xpPC(xp), (unsigned long)(natural)xpLR(xp),
+              (unsigned long)(natural)xpFP(xp), (unsigned long)(natural)xpSP(xp),
+              (unsigned long)arg1);
+      fflush(dbgout);
+    }
+  }
+
+  /* Bug 167: save critical registers from xp BEFORE callback */
+  natural bug167_saved_lr = (natural)xpLR(xp);
+  natural bug167_saved_fp = (natural)xpFP(xp);
+  natural bug167_saved_pc = (natural)xpPC(xp);
+  natural bug167_saved_sp = (natural)xpSP(xp);
+
   UNLOCK(lisp_global(EXCEPTION_LOCK), tcr);
   delta = ((int (*)())callback_ptr)(xp, arg1, arg2, fnreg, offset);
   LOCK(lisp_global(EXCEPTION_LOCK), tcr);
+
+  /* Bug 167: check if callback corrupted critical registers in xp */
+  if ((natural)xpLR(xp) != bug167_saved_lr || (natural)xpFP(xp) != bug167_saved_fp ||
+      (natural)xpPC(xp) != bug167_saved_pc || (natural)xpSP(xp) != bug167_saved_sp) {
+    fprintf(dbgout, "\n*** BUG167-CALLBACK: exception context CORRUPTED by callback! ***\n");
+    fprintf(dbgout, "  BEFORE: pc=0x%lx lr=0x%lx sp=0x%lx fp=0x%lx\n",
+            (unsigned long)bug167_saved_pc, (unsigned long)bug167_saved_lr,
+            (unsigned long)bug167_saved_sp, (unsigned long)bug167_saved_fp);
+    fprintf(dbgout, "  AFTER:  pc=0x%lx lr=0x%lx sp=0x%lx fp=0x%lx\n",
+            (unsigned long)(natural)xpPC(xp), (unsigned long)(natural)xpLR(xp),
+            (unsigned long)(natural)xpSP(xp), (unsigned long)(natural)xpFP(xp));
+    fprintf(dbgout, "  nfn BEFORE=0x%lx AFTER=0x%lx\n",
+            (unsigned long)bug167_saved_lr,  /* not nfn, but useful */
+            (unsigned long)xpGPR(xp, 10));  /* x10=nfn */
+    fprintf(dbgout, "  xp=%p callback_ptr=0x%lx delta=%d\n",
+            xp, (unsigned long)callback_ptr, delta);
+    fflush(dbgout);
+  }
 
   if (bumpP) {
     *bumpP = delta;
@@ -4637,6 +4687,212 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
       fflush(dbgout);
       _exit(1);
     }
+    if (imm16 == 0xFFB0) {
+      /* Bug 167: x29 corrupt at subprim entry.
+         x29 is in heap/code space instead of control stack.
+         lr = return address in compiled code that called this subprim.
+         sp = original sp (scratch regs restored before hlt). */
+      extern unsigned int sp_entry_counter;
+      natural fp_val = (natural)ts->__fp;
+      natural lr_val = (natural)ts->__lr;
+      natural sp_val = (natural)ts->__sp;
+      fprintf(dbgout, "\n*** BUG167: x29 CORRUPT at subprim entry! ***\n");
+      fprintf(dbgout, "  sp_entry_counter=%u pc=0x%lx (subprim) lr=0x%lx (caller)\n",
+              sp_entry_counter, (unsigned long)pc, (unsigned long)lr_val);
+      fprintf(dbgout, "  x29=0x%lx (CORRUPT!) sp=0x%lx vsp(x25)=0x%lx\n",
+              (unsigned long)fp_val, (unsigned long)sp_val,
+              (unsigned long)ts->__x[25]);
+      fprintf(dbgout, "  nfn(x10)=0x%lx nargs(x5)=0x%lx\n",
+              (unsigned long)ts->__x[10], (unsigned long)ts->__x[5]);
+      fprintf(dbgout, "  arg_z(x15)=0x%lx arg_y(x14)=0x%lx arg_x(x13)=0x%lx\n",
+              (unsigned long)ts->__x[15], (unsigned long)ts->__x[14],
+              (unsigned long)ts->__x[13]);
+      fprintf(dbgout, "  save0(x16)=0x%lx save1(x17)=0x%lx save2(x18)=0x%lx save3(x19)=0x%lx\n",
+              (unsigned long)ts->__x[16], (unsigned long)ts->__x[17],
+              (unsigned long)ts->__x[18], (unsigned long)ts->__x[19]);
+      fprintf(dbgout, "  save4(x20)=0x%lx save5(x21)=0x%lx save6(x22)=0x%lx save7(x23)=0x%lx\n",
+              (unsigned long)ts->__x[20], (unsigned long)ts->__x[21],
+              (unsigned long)ts->__x[22], (unsigned long)ts->__x[23]);
+      fprintf(dbgout, "  temp0(x12)=0x%lx temp1(x11)=0x%lx temp3(x9)=0x%lx\n",
+              (unsigned long)ts->__x[12], (unsigned long)ts->__x[11],
+              (unsigned long)ts->__x[9]);
+      /* Dump the frame at sp (should be the current lisp frame) */
+      if (sp_val > 0x100000000ULL && sp_val < 0x200000000ULL) {
+        LispObj *f = (LispObj *)sp_val;
+        fprintf(dbgout, "  frame@sp: savevsp=0x%lx savelr=0x%lx savefn=0x%lx savefp=0x%lx\n",
+                (unsigned long)f[0], (unsigned long)f[1],
+                (unsigned long)f[2], (unsigned long)f[3]);
+        /* Walk frame chain from savefp */
+        natural chain_fp = (natural)f[3];
+        int fi;
+        for (fi = 0; fi < 8; fi++) {
+          if (chain_fp < 0x100000000ULL || chain_fp > 0x200000000ULL) {
+            fprintf(dbgout, "  chain[%d]: fp=0x%lx (OUT OF RANGE)\n", fi, (unsigned long)chain_fp);
+            break;
+          }
+          LispObj *cf = (LispObj *)chain_fp;
+          fprintf(dbgout, "  chain[%d]: fp=0x%lx savevsp=0x%lx savelr=0x%lx savefn=0x%lx savefp=0x%lx\n",
+                  fi, (unsigned long)chain_fp,
+                  (unsigned long)cf[0], (unsigned long)cf[1],
+                  (unsigned long)cf[2], (unsigned long)cf[3]);
+          chain_fp = (natural)cf[3];
+        }
+      }
+      /* Dump code around lr (the calling instruction) */
+      if (lr_val > 0x40 && lr_val < 0x800000000000ULL) {
+        fprintf(dbgout, "  Code around lr=0x%lx:\n", (unsigned long)lr_val);
+        unsigned int *code = (unsigned int *)(lr_val - 0x28);
+        int ci;
+        for (ci = 0; ci < 20; ci++) {
+          natural code_addr = lr_val - 0x28 + ci * 4;
+          fprintf(dbgout, "    [0x%lx]: 0x%08x%s\n",
+                  (unsigned long)code_addr, code[ci],
+                  (code_addr == lr_val) ? " <- lr (return to here)" :
+                  (code_addr == lr_val - 4) ? " <- blr (call)" : "");
+        }
+      }
+      fflush(dbgout);
+      _exit(1);
+    }
+    if (imm16 == 0xFFB1) {
+      /* Bug 167: threshold trap — dump full state at specific sp_entry_counter */
+      extern unsigned int sp_entry_counter;
+      extern sp_breadcrumb_t sp_breadcrumb;
+      natural fp_val = (natural)ts->__fp;
+      natural lr_val = (natural)ts->__lr;
+      natural sp_val = (natural)ts->__sp;
+      fprintf(dbgout, "\n*** BUG167-THRESHOLD: sp_entry_counter=%u ***\n", sp_entry_counter);
+      fprintf(dbgout, "  pc=0x%lx lr=0x%lx sp=0x%lx x29=0x%lx\n",
+              (unsigned long)pc, (unsigned long)lr_val,
+              (unsigned long)sp_val, (unsigned long)fp_val);
+      fprintf(dbgout, "  nfn(x10)=0x%lx nargs(x5)=0x%lx\n",
+              (unsigned long)ts->__x[10], (unsigned long)ts->__x[5]);
+      fprintf(dbgout, "  arg_z(x15)=0x%lx arg_y(x14)=0x%lx arg_x(x13)=0x%lx\n",
+              (unsigned long)ts->__x[15], (unsigned long)ts->__x[14],
+              (unsigned long)ts->__x[13]);
+      fprintf(dbgout, "  temp0(x12)=0x%lx temp1(x11)=0x%lx temp3(x9)=0x%lx\n",
+              (unsigned long)ts->__x[12], (unsigned long)ts->__x[11],
+              (unsigned long)ts->__x[9]);
+      fprintf(dbgout, "  save0-7: x16=0x%lx x17=0x%lx x18=0x%lx x19=0x%lx x20=0x%lx x21=0x%lx x22=0x%lx x23=0x%lx\n",
+              (unsigned long)ts->__x[16], (unsigned long)ts->__x[17],
+              (unsigned long)ts->__x[18], (unsigned long)ts->__x[19],
+              (unsigned long)ts->__x[20], (unsigned long)ts->__x[21],
+              (unsigned long)ts->__x[22], (unsigned long)ts->__x[23]);
+      fprintf(dbgout, "  vsp(x25)=0x%lx allocptr(x26)=0x%lx\n",
+              (unsigned long)ts->__x[25], (unsigned long)ts->__x[26]);
+      fprintf(dbgout, "  Previous breadcrumb: lr=0x%lx nfn=0x%lx fp=0x%lx sp_addr=0x%lx\n",
+              (unsigned long)sp_breadcrumb.saved_lr, (unsigned long)sp_breadcrumb.saved_nfn,
+              (unsigned long)sp_breadcrumb.saved_fp, (unsigned long)sp_breadcrumb.saved_sp_addr);
+      /* Dump frame chain from x29 */
+      if (fp_val > 0x100000000ULL && fp_val < 0x200000000ULL) {
+        fprintf(dbgout, "  Frame chain from x29=0x%lx:\n", (unsigned long)fp_val);
+        natural chain_fp = fp_val;
+        int fi;
+        for (fi = 0; fi < 10; fi++) {
+          if (chain_fp < 0x100000000ULL || chain_fp > 0x200000000ULL) break;
+          LispObj *cf = (LispObj *)chain_fp;
+          fprintf(dbgout, "    [%d] fp=0x%lx savevsp=0x%lx savelr=0x%lx savefn=0x%lx savefp=0x%lx\n",
+                  fi, (unsigned long)chain_fp,
+                  (unsigned long)cf[0], (unsigned long)cf[1],
+                  (unsigned long)cf[2], (unsigned long)cf[3]);
+          chain_fp = (natural)cf[3];
+        }
+      }
+      /* Dump stack around sp */
+      if (sp_val > 0x100000000ULL && sp_val < 0x200000000ULL) {
+        fprintf(dbgout, "  Stack around sp (sp-0x40 to sp+0xc0):\n");
+        int si;
+        for (si = -8; si < 24; si++) {
+          natural addr = sp_val + si * 8;
+          if (addr >= 0x100000000ULL && addr < 0x200000000ULL) {
+            natural val = *(natural *)addr;
+            long offset = si * 8;
+            fprintf(dbgout, "    [sp%+ld]=0x%lx\n", offset, (unsigned long)val);
+          }
+        }
+      }
+      /* Dump code around lr */
+      if (lr_val > 0x40 && lr_val < 0x800000000000ULL) {
+        fprintf(dbgout, "  Code around lr=0x%lx:\n", (unsigned long)lr_val);
+        unsigned int *code167 = (unsigned int *)(lr_val - 0x20);
+        int ci;
+        for (ci = 0; ci < 24; ci++) {
+          natural caddr = lr_val - 0x20 + ci * 4;
+          fprintf(dbgout, "    [0x%lx]: 0x%08x%s\n",
+                  (unsigned long)caddr, code167[ci],
+                  (caddr == lr_val) ? " <- lr" : "");
+        }
+      }
+      /* Dump vstack */
+      {
+        natural vsp_val = (natural)ts->__x[25];
+        if (vsp_val > 0x100000000ULL && vsp_val < 0x200000000ULL) {
+          fprintf(dbgout, "  Vstack from vsp=0x%lx:\n", (unsigned long)vsp_val);
+          int vi;
+          for (vi = 0; vi < 16; vi++) {
+            natural vaddr = vsp_val + vi * 8;
+            if (vaddr >= 0x100000000ULL && vaddr < 0x200000000ULL) {
+              fprintf(dbgout, "    [vsp+%d]=0x%lx\n", vi*8, (unsigned long)*(LispObj *)vaddr);
+            }
+          }
+        }
+      }
+      fflush(dbgout);
+      _exit(1);
+    }
+    if (imm16 == 0xFFB2 || imm16 == 0xFFB3 || imm16 == 0xFFB4) {
+      /* Bug 167: x29 or lr corrupt at nthrow1v/nthrownv */
+      extern unsigned int sp_entry_counter;
+      const char *when = (imm16 == 0xFFB3) ? "BEFORE check_pending_interrupt" :
+                         (imm16 == 0xFFB4) ? "AFTER check_pending_interrupt" :
+                         "at ret";
+      fprintf(dbgout, "\n*** BUG167: STATE CORRUPT %s in nthrow! counter=%u ***\n", when, sp_entry_counter);
+      fprintf(dbgout, "  pc=0x%lx lr=0x%lx sp=0x%lx x29=0x%lx\n",
+              (unsigned long)pc, (unsigned long)ts->__lr,
+              (unsigned long)ts->__sp, (unsigned long)ts->__fp);
+      fprintf(dbgout, "  nfn(x10)=0x%lx nargs(x5)=0x%lx vsp(x25)=0x%lx\n",
+              (unsigned long)ts->__x[10], (unsigned long)ts->__x[5],
+              (unsigned long)ts->__x[25]);
+      fprintf(dbgout, "  All regs: x0-x7: 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx\n",
+              (unsigned long)ts->__x[0], (unsigned long)ts->__x[1],
+              (unsigned long)ts->__x[2], (unsigned long)ts->__x[3],
+              (unsigned long)ts->__x[4], (unsigned long)ts->__x[5],
+              (unsigned long)ts->__x[6], (unsigned long)ts->__x[7]);
+      fprintf(dbgout, "  x8-x15: 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx\n",
+              (unsigned long)ts->__x[8], (unsigned long)ts->__x[9],
+              (unsigned long)ts->__x[10], (unsigned long)ts->__x[11],
+              (unsigned long)ts->__x[12], (unsigned long)ts->__x[13],
+              (unsigned long)ts->__x[14], (unsigned long)ts->__x[15]);
+      fprintf(dbgout, "  x16-x23: 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx\n",
+              (unsigned long)ts->__x[16], (unsigned long)ts->__x[17],
+              (unsigned long)ts->__x[18], (unsigned long)ts->__x[19],
+              (unsigned long)ts->__x[20], (unsigned long)ts->__x[21],
+              (unsigned long)ts->__x[22], (unsigned long)ts->__x[23]);
+      /* Stack dump: show sp-0x80 to sp+0x80 (covers x29 if x29 = sp - 80) */
+      {
+        natural sp_val = (natural)ts->__sp;
+        natural fp_val = (natural)ts->__fp;
+        if (sp_val > 0x100000000ULL && sp_val < 0x200000000ULL) {
+          fprintf(dbgout, "  Stack (sp-0x80 to sp+0x80):\n");
+          int si;
+          for (si = -16; si < 16; si++) {
+            natural addr = sp_val + si * 8;
+            if (addr >= 0x100000000ULL && addr < 0x200000000ULL) {
+              natural val = *(natural *)addr;
+              long off = si * 8;
+              fprintf(dbgout, "    [sp%+ld]=0x%lx", off, (unsigned long)val);
+              if (addr == fp_val) fprintf(dbgout, " (x29 frame)");
+              if (addr == fp_val + 8) fprintf(dbgout, " (savelr)");
+              if (addr == fp_val + 16) fprintf(dbgout, " (savefn)");
+              if (addr == fp_val + 24) fprintf(dbgout, " (savefp)");
+              fprintf(dbgout, "\n");
+            }
+          }
+        }
+      }
+      fflush(dbgout);
+      _exit(1);
+    }
     if (imm16 == 0xFFE9) {
       /* Bug 156: SP is above x29 at SPstack_misc_alloc entry!
          The zeroing loop will overwrite the lisp frame. */
@@ -5236,6 +5492,47 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
               if (si == 3 || si == 7) fprintf(dbgout, "\n    ");
             }
             fprintf(dbgout, "\n");
+          }
+          /* Bug 167: dump breadcrumb from last subprim entry */
+          {
+            extern unsigned int sp_entry_counter;
+            extern sp_breadcrumb_t sp_breadcrumb;
+            fprintf(dbgout, "  Bug167 breadcrumb: sp_entry_counter=%u\n", sp_entry_counter);
+            fprintf(dbgout, "    last_sp: addr=0x%lx lr=0x%lx nfn=0x%lx fp=0x%lx\n",
+                    (unsigned long)sp_breadcrumb.saved_sp_addr, (unsigned long)sp_breadcrumb.saved_lr,
+                    (unsigned long)sp_breadcrumb.saved_nfn, (unsigned long)sp_breadcrumb.saved_fp);
+            /* Dump code from before the call through the code after lr */
+            if (sp_breadcrumb.saved_lr > 0x80 && sp_breadcrumb.saved_lr < 0x800000000000ULL) {
+              fprintf(dbgout, "  Code from lr-0x40 for 64 insns (lr=0x%lx):\n", (unsigned long)sp_breadcrumb.saved_lr);
+              unsigned int *bcode = (unsigned int *)(sp_breadcrumb.saved_lr - 0x40);
+              int bi;
+              for (bi = 0; bi < 64; bi++) {
+                natural baddr = sp_breadcrumb.saved_lr - 0x40 + bi * 4;
+                fprintf(dbgout, "    [0x%lx]: 0x%08x%s\n",
+                        (unsigned long)baddr, bcode[bi],
+                        (baddr == sp_breadcrumb.saved_lr) ? " <- lr (return)" :
+                        (baddr == sp_breadcrumb.saved_lr - 4) ? " <- call to SP" : "");
+              }
+            }
+            /* Dump control stack around fp for frame analysis */
+            if (orig_fp > 0x100000000ULL && orig_fp < 0x200000000ULL) {
+              fprintf(dbgout, "  Stack around fp=0x%lx (fp-0x60 to fp+0x80):\n", (unsigned long)orig_fp);
+              natural scan_start = orig_fp - 0x60;
+              int si;
+              for (si = 0; si < 28; si++) {
+                natural addr = scan_start + si * 8;
+                if (addr >= 0x100000000ULL && addr < 0x200000000ULL) {
+                  natural val = *(natural *)addr;
+                  long offset = (long)(addr - orig_fp);
+                  fprintf(dbgout, "    [fp%+ld]=0x%lx", offset, (unsigned long)val);
+                  if (offset == 0) fprintf(dbgout, " (savevsp)");
+                  else if (offset == 8) fprintf(dbgout, " (savelr)");
+                  else if (offset == 16) fprintf(dbgout, " (savefn)");
+                  else if (offset == 24) fprintf(dbgout, " (savefp)");
+                  fprintf(dbgout, "\n");
+                }
+              }
+            }
           }
           fflush(dbgout);
         }

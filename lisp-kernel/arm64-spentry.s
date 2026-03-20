@@ -23,7 +23,7 @@
 local_label(start):
 define(`_spentry',`ifdef(`__func_name',`_endfn',`')
 	_startfn(_SP$1)
-L__SP$1:                        
+L__SP$1:
 	.line  __line__
 ')
 
@@ -3778,6 +3778,9 @@ _endfn(C(_throw_found))
 
 _startfn(C(nthrow1v))
         new_local_labels()
+        /* Bug 167: save lr to global — throw processing may corrupt lr */
+        __(adrp imm0,_nthrow_saved_lr@PAGE)
+        __(str lr,[imm0,_nthrow_saved_lr@PAGEOFF])
 local_label(_nthrow1v_nextframe):
         __(subs temp2,temp2,#fixnum_one)
         __(ldr temp0,[rcontext,#tcr.catch_top])
@@ -3864,14 +3867,19 @@ local_label(_nthrow1v_no_catch):
 local_label(_nthrow1v_done):
         __(mov imm0,#0)
         __(str imm0,[rcontext,#tcr.unwinding])
-        /* nargs has an undefined value here, so we can clobber it while */
-        /* polling for a deferred interrupt  */
+        /* Bug 167: same sp/lr fix as nthrownv */
+        __(mov sp,x29)
+        __(adrp imm0,_nthrow_saved_lr@PAGE)
+        __(ldr lr,[imm0,_nthrow_saved_lr@PAGEOFF])
         __(check_pending_interrupt(nargs))
         __(ret)
 _endfn
 
 _startfn(C(nthrownv))
         new_local_labels()
+        /* Bug 167: save lr to global — throw processing may corrupt lr */
+        __(adrp imm0,_nthrow_saved_lr@PAGE)
+        __(str lr,[imm0,_nthrow_saved_lr@PAGEOFF])
 local_label(nthrownv_nextframe):
         __(subs temp2,temp2,#fixnum_one)
         __(ldr temp0,[rcontext,#tcr.catch_top])
@@ -3990,6 +3998,15 @@ local_label(nthrownv_no_catch):
 local_label(nthrownv_done):
         __(mov imm0,#0)
         __(str imm0,[rcontext,#tcr.unwinding])
+        /* Bug 167: after throw processing, sp may be below x29 due to data
+           pushed between the function's frame and the mkcatch.  The throw pops
+           catch+frame+FPR (240 bytes) but doesn't account for this gap.
+           Restore sp to x29 so caller's restore_lisp_frame reads from the
+           correct frame position.  Also restore lr since it may be corrupted
+           if sp was wrong during the throw loop. */
+        __(mov sp,x29)
+        __(adrp imm0,_nthrow_saved_lr@PAGE)
+        __(ldr lr,[imm0,_nthrow_saved_lr@PAGEOFF])
         __(check_pending_interrupt(imm1))
         __(ret)
 _endfn
