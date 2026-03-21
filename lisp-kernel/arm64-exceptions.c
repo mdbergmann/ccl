@@ -97,6 +97,7 @@ typedef struct {
 sp_breadcrumb_t sp_breadcrumb = {0, 0, 0, 0};
 unsigned int sp_entry_threshold = 0;  /* disabled */
 natural nthrow_saved_lr = 0;  /* Bug 167: save lr across nthrow processing */
+natural nthrow_unwind_sp = 0; /* Bug 168: save sp across unwind-protect cleanup calls */
 
 Boolean
 did_gc_notification_since_last_full_gc = false;
@@ -4490,7 +4491,6 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
                   (unsigned long)savefn_tag,
                   (unsigned long)ts->__x[10],
                   (unsigned long)ts->__pc, (unsigned long)ts->__lr);
-          /* Also dump what x10 (nfn register) currently holds */
           fprintf(dbgout, "  x10_tag=0x%02lx frame[0-3]: 0x%lx 0x%lx 0x%lx 0x%lx\n",
                   (unsigned long)(ts->__x[10] >> 56),
                   (unsigned long)*(natural *)(fp_val),
@@ -5851,11 +5851,66 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
             (unsigned long)ts->__x[6], (unsigned long)ts->__x[9],
             (unsigned long)ts->__x[10], (unsigned long)ts->__x[15],
             (unsigned long)ts->__x[25], tcr->valence);
+    /* Bug 168: Check if pc is in control stack (executing from stack = very bad) */
+    if (ts->__pc > 0x100000000ULL && ts->__pc < 0x200000000ULL) {
+      fprintf(dbgout, "  *** PC IS IN CONTROL STACK! Branched to stack address. ***\n");
+      fprintf(dbgout, "  pc-fp = 0x%lx (%ld bytes)\n",
+              (unsigned long)(ts->__pc - ts->__fp),
+              (long)(ts->__pc - ts->__fp));
+      /* Dump control stack around fp: 512 bytes before and after */
+      natural dump_start = (ts->__fp > 256) ? (ts->__fp - 256) : ts->__fp;
+      natural dump_end = ts->__fp + 512;
+      if (dump_start > 0x100000000ULL && dump_end < 0x200000000ULL) {
+        fprintf(dbgout, "  Control stack dump around fp=0x%lx:\n", (unsigned long)ts->__fp);
+        for (natural addr = dump_start; addr < dump_end; addr += 8) {
+          LispObj val = *(LispObj *)addr;
+          const char *marker = "";
+          if (addr == ts->__fp) marker = " <- fp";
+          if (addr == ts->__pc) marker = " <- pc (EXECUTING HERE)";
+          if (addr == (ts->__fp + 0x18)) marker = " <- fp+24 (savefp slot)";
+          /* Check if value looks like a readonly code address */
+          int is_code = (val > 0x200000000000ULL && val < 0x400000000000ULL);
+          /* Check if value looks like a stack address */
+          int is_stack = (val > 0x100000000ULL && val < 0x200000000ULL);
+          fprintf(dbgout, "    [0x%lx] %016lx%s%s%s\n",
+                  (unsigned long)addr, (unsigned long)val, marker,
+                  is_code ? " (CODE)" : "",
+                  is_stack ? " (STACK)" : "");
+        }
+      }
+    }
     /* Dump instruction at faulting PC if in lisp code */
     if (ts->__pc > 0x200000000000ULL && ts->__pc < 0x400000000000ULL) {
       opcode *insns = (opcode *)ts->__pc;
       fprintf(dbgout, "  insn@pc: [-4]=%08x [0]=%08x [+4]=%08x [+8]=%08x\n",
               insns[-1], insns[0], insns[1], insns[2]);
+    }
+    /* Bug 168: Dump code around lr to see what called/branched to the stack */
+    if (ts->__lr > 0x200000000000ULL && ts->__lr < 0x400000000000ULL) {
+      fprintf(dbgout, "  Code around lr=0x%lx (caller):\n", (unsigned long)ts->__lr);
+      opcode *lr_code = (opcode *)(ts->__lr - 0x30);
+      for (int ci = 0; ci < 28; ci++) {
+        natural addr = (natural)(ts->__lr - 0x30 + ci * 4);
+        opcode insn = lr_code[ci];
+        const char *marker = "";
+        if (addr == ts->__lr) marker = " <- lr (return here)";
+        if (addr == ts->__lr - 4) marker = " <- CALL INSN";
+        /* Decode blr/br instructions */
+        const char *decode = "";
+        if ((insn & 0xFFFFFC1F) == 0xD63F0000) {  /* blr Xn */
+          static char buf[32];
+          snprintf(buf, sizeof(buf), " [blr x%d]", (insn >> 5) & 0x1F);
+          decode = buf;
+        } else if ((insn & 0xFFFFFC1F) == 0xD61F0000) {  /* br Xn */
+          static char buf[32];
+          snprintf(buf, sizeof(buf), " [br x%d]", (insn >> 5) & 0x1F);
+          decode = buf;
+        } else if (insn == 0xD65F03C0) {
+          decode = " [ret]";
+        }
+        fprintf(dbgout, "    [0x%lx] %08x%s%s\n",
+                (unsigned long)addr, insn, marker, decode);
+      }
     }
     /* Decode function name from nfn (x10) */
     {

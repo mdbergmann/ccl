@@ -20,6 +20,7 @@
 	.align 2
 
 
+
 local_label(start):
 define(`_spentry',`ifdef(`__func_name',`_endfn',`')
 	_startfn(_SP$1)
@@ -700,7 +701,7 @@ local_label(return_values):
 /* Come here with saved context on top of stack.  */
 _spentry(nvalret)
 	.globl C(nvalret)
-C(nvalret): 
+C(nvalret):
 	__(ldr lr,[sp,#lisp_frame.savelr])
 	__(ldr temp0,[sp,#lisp_frame.savevsp])
 	__(discard_lisp_frame())
@@ -3847,7 +3848,12 @@ C(swap_lr_lisp_frame_temp0_end):
         __(add temp0,temp0,#lisp_frame.size)
         __(restore_lisp_fprs(temp0))
         __(str imm1,[rcontext,#tcr.unwinding])
+        /* Bug 168: save sp across cleanup call (same as nthrownv) */
+        __(str save0,[sp,#-8]!)
+        __(mov save0,sp)
         __(blr lr)
+        __(mov sp,save0)
+        __(ldr save0,[sp],#8)
         __(mov imm1,#1)
         __(ldr arg_z,[sp,#2*node_size])
         __(str imm1,[rcontext,#tcr.unwinding])
@@ -3867,8 +3873,7 @@ local_label(_nthrow1v_no_catch):
 local_label(_nthrow1v_done):
         __(mov imm0,#0)
         __(str imm0,[rcontext,#tcr.unwinding])
-        /* Bug 167: same sp/lr fix as nthrownv */
-        __(mov sp,x29)
+        /* Bug 167/168: gap-skipping moved to per-frame (same as nthrownv) */
         __(adrp imm0,_nthrow_saved_lr@PAGE)
         __(ldr lr,[imm0,_nthrow_saved_lr@PAGEOFF])
         __(check_pending_interrupt(nargs))
@@ -3960,7 +3965,15 @@ C(swap_lr_lisp_frame_arg_z_end):
         __(add arg_z,arg_z,#lisp_frame.size)
         __(restore_lisp_fprs(arg_z))
         __(str imm1,[rcontext,#tcr.unwinding])
+        /* Bug 168: save sp across cleanup call.  The cleanup may call
+           SPnthrowvalues which pops catch frames and moves sp.  Use save0
+           (callee-saved in Lisp convention) to hold sp across the call. */
+        __(str save0,[sp,#-8]!)
+        __(mov save0,sp)
         __(blr lr)
+        /* Bug 168: restore sp from save0, then restore save0 from stack */
+        __(mov sp,save0)
+        __(ldr save0,[sp],#8)
         __(mov imm1,#1)
         __(str imm1,[rcontext,#tcr.unwinding])
         __(ldr imm0,[sp])
@@ -3998,13 +4011,11 @@ local_label(nthrownv_no_catch):
 local_label(nthrownv_done):
         __(mov imm0,#0)
         __(str imm0,[rcontext,#tcr.unwinding])
-        /* Bug 167: after throw processing, sp may be below x29 due to data
-           pushed between the function's frame and the mkcatch.  The throw pops
-           catch+frame+FPR (240 bytes) but doesn't account for this gap.
-           Restore sp to x29 so caller's restore_lisp_frame reads from the
-           correct frame position.  Also restore lr since it may be corrupted
-           if sp was wrong during the throw loop. */
-        __(mov sp,x29)
+        /* Bug 167/168: The gap-skipping `mov sp,x29` was moved to
+           nthrownv_skip (per catch frame pop) because doing it here
+           at nthrownv_done corrupted sp when nthrownv was called
+           recursively from an unwind-protect cleanup function.
+           sp should now already be correct from the per-frame skip. */
         __(adrp imm0,_nthrow_saved_lr@PAGE)
         __(ldr lr,[imm0,_nthrow_saved_lr@PAGEOFF])
         __(check_pending_interrupt(imm1))
