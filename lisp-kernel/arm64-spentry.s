@@ -3849,11 +3849,15 @@ C(swap_lr_lisp_frame_temp0_end):
         __(restore_lisp_fprs(temp0))
         __(str imm1,[rcontext,#tcr.unwinding])
         /* Bug 168: save sp across cleanup call (same as nthrownv) */
-        __(str save0,[sp,#-8]!)
-        __(mov save0,sp)
+        /* Bug 169: use save3 (x19) instead of save0 (x16=IP0) since x16 is
+           NOT callee-saved in C ABI and gets clobbered by linker PLT stubs.
+           x19 IS callee-saved in both C and Lisp ABIs.
+           Also use stp/ldp with 16 bytes to maintain ARM64 SP alignment. */
+        __(stp save3,xzr,[sp,#-16]!)
+        __(mov save3,sp)
         __(blr lr)
-        __(mov sp,save0)
-        __(ldr save0,[sp],#8)
+        __(mov sp,save3)
+        __(ldp save3,xzr,[sp],#16)
         __(mov imm1,#1)
         __(ldr arg_z,[sp,#2*node_size])
         __(str imm1,[rcontext,#tcr.unwinding])
@@ -3966,14 +3970,16 @@ C(swap_lr_lisp_frame_arg_z_end):
         __(restore_lisp_fprs(arg_z))
         __(str imm1,[rcontext,#tcr.unwinding])
         /* Bug 168: save sp across cleanup call.  The cleanup may call
-           SPnthrowvalues which pops catch frames and moves sp.  Use save0
-           (callee-saved in Lisp convention) to hold sp across the call. */
-        __(str save0,[sp,#-8]!)
-        __(mov save0,sp)
+           SPnthrowvalues which pops catch frames and moves sp.  Use save3
+           (x19, callee-saved in both C and Lisp ABIs) to hold sp across call.
+           Bug 169: x16 (save0/IP0) gets clobbered by C linker PLT stubs;
+           use stp/ldp with 16 bytes to maintain ARM64 SP alignment. */
+        __(stp save3,xzr,[sp,#-16]!)
+        __(mov save3,sp)
         __(blr lr)
-        /* Bug 168: restore sp from save0, then restore save0 from stack */
-        __(mov sp,save0)
-        __(ldr save0,[sp],#8)
+        /* Bug 168: restore sp from save3, then restore save3 from stack */
+        __(mov sp,save3)
+        __(ldp save3,xzr,[sp],#16)
         __(mov imm1,#1)
         __(str imm1,[rcontext,#tcr.unwinding])
         __(ldr imm0,[sp])

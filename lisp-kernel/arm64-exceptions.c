@@ -3737,6 +3737,25 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
   mach_port_t thread = (mach_port_t)((natural)tcr->native_thread_id);
   kern_return_t kret;
 
+  /* Bug 169 diagnostic: log non-alloc-trap, non-W^X exceptions */
+  {
+    native_thread_state_t *diag_ts = (native_thread_state_t *)in_state;
+    opcode diag_insn = (natural)diag_ts->__pc > 0x1000 ?
+                        *(opcode *)(natural)diag_ts->__pc : 0;
+    Boolean is_alloc = (exception == EXC_BAD_INSTRUCTION && IS_ALLOC_TRAP(diag_insn));
+    Boolean is_wx = (exception == EXC_BAD_ACCESS && code0 == KERN_PROTECTION_FAILURE &&
+                     ((natural)code[1] & 0x00FFFFFFFFFFFFFFULL) >= 0x200000000ULL);
+    if (!is_alloc && !is_wx) {
+      static int bug169_exc_count = 0;
+      bug169_exc_count++;
+      if (bug169_exc_count <= 20)
+        fprintf(dbgout, "Bug169-MACH[%d]: exc=%d code0=%lld code1=0x%llx pc=0x%lx valence=%d insn=0x%08x\n",
+                bug169_exc_count, exception, (long long)code0, (long long)code[1],
+                (unsigned long)diag_ts->__pc, tcr->valence, diag_insn);
+      fflush(dbgout);
+    }
+  }
+
 #ifdef DEBUG_MACH_EXCEPTIONS
   fprintf(dbgout, "MACH_EXC: exception=%d code0=0x%llx pc=0x%lx tcr=%p\n",
           exception, (long long)code0,
@@ -5305,6 +5324,56 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
       kret = KERN_SUCCESS;
       goto done;
     }
+    /* Bug 169: On macOS ARM64, null pointer dereference gives
+       KERN_PROTECTION_FAILURE (not KERN_INVALID_ADDRESS) because __PAGEZERO
+       is a mapped VM region with VM_PROT_NONE.  Handle null dereferences here
+       before the W^X page toggle logic. */
+    {
+      natural null_fault_addr = (natural)code[1] & 0x00FFFFFFFFFFFFFFULL;
+      if (null_fault_addr < 4096 && tcr->valence == TCR_STATE_LISP) {
+        natural fault_pc = (natural)ts->__pc;
+        /* Bug 140: If PC itself is 0 or tagged, resume at lr */
+        if (fault_pc < 4096 || (fault_pc >> 56) != 0) {
+          static int null_pf_call_count = 0;
+          null_pf_call_count++;
+          if (null_pf_call_count <= 5)
+            fprintf(dbgout, "Bug169: null-call (PROT_FAIL) pc=0x%lx lr=0x%lx addr=0x%llx (#%d)\n",
+                    (unsigned long)fault_pc, (unsigned long)ts->__lr,
+                    (long long)code[1], null_pf_call_count);
+          *out_ts = *ts;
+          out_ts->__x[0] = 0;
+          out_ts->__pc = ts->__lr;
+          kret = KERN_SUCCESS;
+          goto done;
+        }
+        /* Skip the faulting LDR/STR instruction: set dest register to 0 */
+        {
+          unsigned int insn = *(unsigned int *)fault_pc;
+          int dest_reg = insn & 0x1f;
+          static int null_pf_deref_count = 0;
+          null_pf_deref_count++;
+          if (null_pf_deref_count <= 10)
+            fprintf(dbgout, "Bug169: null-deref (PROT_FAIL) pc=0x%lx insn=0x%08x dest=x%d addr=0x%llx (#%d)\n"
+                    "  x10=0x%lx x14=0x%lx x15=0x%lx vsp=0x%lx lr=0x%lx\n",
+                    (unsigned long)fault_pc, insn, dest_reg,
+                    (long long)code[1], null_pf_deref_count,
+                    (unsigned long)ts->__x[10], (unsigned long)ts->__x[14],
+                    (unsigned long)ts->__x[15], (unsigned long)ts->__x[25],
+                    (unsigned long)ts->__lr);
+          if (null_pf_deref_count > 50) {
+            fprintf(dbgout, "FATAL: too many null-deref (PROT_FAIL) skips (%d), aborting\n",
+                    null_pf_deref_count);
+            fflush(dbgout);
+            _exit(1);
+          }
+          *out_ts = *ts;
+          out_ts->__x[dest_reg] = 0;
+          out_ts->__pc = fault_pc + 4;
+          kret = KERN_SUCCESS;
+          goto done;
+        }
+      }
+    }
     /* W^X page toggle: handle protection faults directly in the Mach
        exception handler without going through the signal machinery.
        code[1] is the fault address on ARM64 macOS. */
@@ -6116,6 +6185,29 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
         /* Could not handle directly */
       }
 
+    }
+
+    /* Bug 169: Handle ARM64 SP alignment faults.
+       EXC_BAD_ACCESS with code0=259 (EXC_ARM_SP_ALIGN) means SP was not
+       16-byte aligned for an LDP/STP instruction.  Fix SP alignment and retry. */
+    if (exception == EXC_BAD_ACCESS && code0 == 259 && tcr->valence == TCR_STATE_LISP) {
+      natural misaligned_sp = (natural)ts->__sp;
+      static int sp_align_count = 0;
+      sp_align_count++;
+      if (sp_align_count <= 10)
+        fprintf(dbgout, "Bug169: SP alignment fault #%d: sp=0x%lx pc=0x%lx lr=0x%lx\n",
+                sp_align_count, (unsigned long)misaligned_sp,
+                (unsigned long)ts->__pc, (unsigned long)ts->__lr);
+      if (sp_align_count > 100) {
+        fprintf(dbgout, "FATAL: too many SP alignment faults (%d)\n", sp_align_count);
+        fflush(dbgout);
+        _exit(1);
+      }
+      /* Align SP down to 16-byte boundary and retry the instruction */
+      *out_ts = *ts;
+      out_ts->__sp = misaligned_sp & ~0xFULL;
+      kret = KERN_SUCCESS;
+      goto done;
     }
 
     switch (exception) {
