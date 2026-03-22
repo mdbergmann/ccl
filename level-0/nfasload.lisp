@@ -1361,6 +1361,9 @@
         (setq %documentation-lock% (make-lock)))
       (when (and (boundp '*package-refs-lock*) *package-refs-lock*)
         (setq *package-refs-lock* (make-lock)))
+      ;; Bug 172: Clear *lfun-names* — stale EQ hash entries from image build.
+      (when (and (boundp '*lfun-names*) *lfun-names*)
+        (clrhash *lfun-names*))
       (dolist (f (prog1 *xload-cold-load-functions* (setq *xload-cold-load-functions* nil)))
         (funcall f))
       (dolist (pair (prog1 *early-class-cells* (setq *early-class-cells* nil)))

@@ -3467,8 +3467,15 @@
               (arm642-vpush-register-arg seg arm64::arg_z)
               (dolist (v inherited-vars)
                 (arm642-vpush-register-arg seg (var-to-reg v arm64::arg_z)))
-              (! load-nil arm64::arg_z)
-              (arm642-vpush-register-arg seg arm64::arg_z)
+              ;; Bug 172: Store the actual function name (was NIL)
+              (let* ((closure-name (afunc-name afunc)))
+                (if closure-name
+                  (progn
+                    (arm642-store-immediate seg closure-name arm64::arg_z)
+                    (arm642-vpush-register-arg seg arm64::arg_z))
+                  (progn
+                    (! load-nil arm64::arg_z)
+                    (arm642-vpush-register-arg seg arm64::arg_z))))
               (arm642-lri seg arm64::arg_z (ash (ash 1 $lfbits-trampoline-bit) *arm642-target-fixnum-shift*))
               (arm642-vpush-register-arg seg arm64::arg_z)
               (arm642-set-nargs seg (1+ vsize))
@@ -3494,8 +3501,13 @@
                        (t2r (if inherited-vars (var-to-reg (pop inherited-vars) t2)))
                        (t3r (if inherited-vars (var-to-reg (pop inherited-vars) t3))))
                   (setq cell (set-some-cells dest cell t0r t1r t2r t3r)))))
+            ;; Bug 172: Store the actual function name in the closure's name slot
+            ;; (was NIL, causing %defun/function-name to fail for closures).
+            (let* ((closure-name (afunc-name afunc)))
+              (if closure-name
+                (arm642-store-immediate seg closure-name arm64::arg_x)
+                (! load-nil arm64::arg_x)))
             (arm642-lri seg arm64::arg_y (ash (ash 1 $lfbits-trampoline-bit) *arm642-target-fixnum-shift*))
-            (! load-nil arm64::arg_x)
             (! misc-set-c-node arm64::arg_x dest cell)
             (! misc-set-c-node arm64::arg_y dest (1+ cell))))
         dest))))

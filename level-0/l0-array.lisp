@@ -905,6 +905,25 @@ minimum number of elements to add if it must be extended."
     (declare (fixnum ivector-class element-bit-shift total-bits))
     (ash (the fixnum (+ 7 total-bits)) -3)))
 
+;;; ARM64 TBI subtag encoding: ivectors have subtag ranges by element size.
+;;; Dispatch by subtag range using the same classification as arm64-misc-byte-count.
+#+arm64-target
+(defun subtag-bytes (subtag element-count)
+  (declare (fixnum subtag element-count))
+  (cond ((<= subtag target::max-32-bit-ivector-subtag)
+         (ash element-count 2))
+        ((<= subtag target::max-64-bit-ivector-subtag)
+         (ash element-count 3))
+        ((<= subtag target::max-8-bit-ivector-subtag)
+         element-count)
+        ((<= subtag target::max-16-bit-ivector-subtag)
+         (ash element-count 1))
+        ((= subtag target::subtag-complex-double-float-vector)
+         (ash element-count 4))
+        ((= subtag target::subtag-bit-vector)
+         (ash (the fixnum (+ element-count 7)) -3))
+        (t (error "Not an ivector subtag: ~s" subtag))))
+
 (defun element-type-subtype (type)
   "Convert element type specifier to internal array subtype code"
   (ctype-subtype (specifier-type type)))
