@@ -3848,16 +3848,19 @@ C(swap_lr_lisp_frame_temp0_end):
         __(add temp0,temp0,#lisp_frame.size)
         __(restore_lisp_fprs(temp0))
         __(str imm1,[rcontext,#tcr.unwinding])
-        /* Bug 168: save sp across cleanup call (same as nthrownv) */
-        /* Bug 169: use save3 (x19) instead of save0 (x16=IP0) since x16 is
-           NOT callee-saved in C ABI and gets clobbered by linker PLT stubs.
-           x19 IS callee-saved in both C and Lisp ABIs.
-           Also use stp/ldp with 16 bytes to maintain ARM64 SP alignment. */
-        __(stp save3,xzr,[sp,#-16]!)
-        __(mov save3,sp)
+        /* Bug 170: save sp and nthrow_saved_lr to TCR spare slots
+           across cleanup call (same approach as nthrownv). */
+        __(mov imm0,sp)
+        __(str imm0,[rcontext,#tcr_nthrow_sp])
+        __(adrp imm0,_nthrow_saved_lr@PAGE)
+        __(ldr imm0,[imm0,_nthrow_saved_lr@PAGEOFF])
+        __(str imm0,[rcontext,#tcr_nthrow_lr])
         __(blr lr)
-        __(mov sp,save3)
-        __(ldp save3,xzr,[sp],#16)
+        __(ldr imm0,[rcontext,#tcr_nthrow_sp])
+        __(mov sp,imm0)
+        __(ldr imm1,[rcontext,#tcr_nthrow_lr])
+        __(adrp imm0,_nthrow_saved_lr@PAGE)
+        __(str imm1,[imm0,_nthrow_saved_lr@PAGEOFF])
         __(mov imm1,#1)
         __(ldr arg_z,[sp,#2*node_size])
         __(str imm1,[rcontext,#tcr.unwinding])
@@ -3969,17 +3972,25 @@ C(swap_lr_lisp_frame_arg_z_end):
         __(add arg_z,arg_z,#lisp_frame.size)
         __(restore_lisp_fprs(arg_z))
         __(str imm1,[rcontext,#tcr.unwinding])
-        /* Bug 168: save sp across cleanup call.  The cleanup may call
-           SPnthrowvalues which pops catch frames and moves sp.  Use save3
-           (x19, callee-saved in both C and Lisp ABIs) to hold sp across call.
-           Bug 169: x16 (save0/IP0) gets clobbered by C linker PLT stubs;
-           use stp/ldp with 16 bytes to maintain ARM64 SP alignment. */
-        __(stp save3,xzr,[sp,#-16]!)
-        __(mov save3,sp)
+        /* Bug 170: save sp to TCR spare slot across cleanup call.
+           Neither save registers nor global variables survive cleanup:
+           save0/x16 clobbered by linker (Bug 169), save3/x19 clobbered
+           by Lisp code (Bug 170), globals zeroed (Bug 170).
+           TCR spare slot at offset 0x160 is untouched by any code path.
+           Also save nthrow_saved_lr to TCR spare[1] so nested throws
+           inside cleanup don't overwrite the outer nthrownv's entry lr. */
+        __(mov imm0,sp)
+        __(str imm0,[rcontext,#tcr_nthrow_sp])
+        __(adrp imm0,_nthrow_saved_lr@PAGE)
+        __(ldr imm0,[imm0,_nthrow_saved_lr@PAGEOFF])
+        __(str imm0,[rcontext,#tcr_nthrow_lr])
         __(blr lr)
-        /* Bug 168: restore sp from save3, then restore save3 from stack */
-        __(mov sp,save3)
-        __(ldp save3,xzr,[sp],#16)
+        /* Bug 170: restore sp and nthrow_saved_lr from TCR spare slots */
+        __(ldr imm0,[rcontext,#tcr_nthrow_sp])
+        __(mov sp,imm0)
+        __(ldr imm1,[rcontext,#tcr_nthrow_lr])
+        __(adrp imm0,_nthrow_saved_lr@PAGE)
+        __(str imm1,[imm0,_nthrow_saved_lr@PAGEOFF])
         __(mov imm1,#1)
         __(str imm1,[rcontext,#tcr.unwinding])
         __(ldr imm0,[sp])
@@ -3993,7 +4004,11 @@ C(swap_lr_lisp_frame_arg_z_end):
         __(add temp0,sp,imm0)
         __(mov imm0,nargs)
         __(add arg_z,temp0,#node_size)
-        __(bic arg_z,arg_z,#fulltagmask)
+        /* Bug 170: fulltagmask=0xff on ARM64 (TBI tag in high byte).
+           Using bic with fulltagmask strips 8 low bits of the raw stack
+           address, corrupting it by up to 255 bytes.  Use dnode_size-1
+           instead for proper 16-byte alignment. */
+        __(bic arg_z,arg_z,#(dnode_size-1))
         __(b local_label(nthrownv_tpoptest))
 local_label(nthrownv_tpoploop):
         __(subs imm0,imm0,#node_size)
@@ -4028,7 +4043,7 @@ local_label(nthrownv_done):
         __(ret)
 _endfn
 
-               
+
 _startfn(stack_misc_alloc_init_no_room)
 /* Too large to safely fit on tstack.  Heap-cons the vector, but make  */
 /* sure that there's an empty tsp frame to keep the compiler happy.  */

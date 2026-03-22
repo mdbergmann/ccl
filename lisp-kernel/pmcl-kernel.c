@@ -2280,6 +2280,7 @@ main
       if (ro && ro->low < ro->active) {
         natural base = truncate_to_power_of_2((natural)ro->low, log2_page_size);
         natural limit = align_to_power_of_2((natural)ro->active, log2_page_size);
+        /* No diagnostic patching needed — Bug 170 fulltagmask fix applied */
         sys_icache_invalidate((void *)base, limit - base);
         if (mprotect((void *)base, limit - base, PROT_READ | PROT_EXEC) != 0) {
           perror("mprotect readonly area to RX failed");

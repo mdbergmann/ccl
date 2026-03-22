@@ -534,6 +534,13 @@ TCR_BIAS = 0
 	 _node(nfp)		/* native frame pointer for unboxed temps */
 	_ends
 
+/* Bug 170: TCR spare slots (C struct spare[4] at offset 0x160-0x17F).
+   Used to save sp and nthrow_saved_lr across unwind-protect cleanup calls,
+   since no GPR save register is safe (Lisp code can clobber save3/x19,
+   linker clobbers save0/x16, save2/x18 is platform-reserved). */
+tcr_nthrow_sp = 0x160           /* spare[0]: sp saved across cleanup */
+tcr_nthrow_lr = 0x168           /* spare[1]: nthrow_saved_lr across cleanup */
+
 TCR_FLAG_BIT_FOREIGN = 0
 TCR_FLAG_BIT_AWAITING_PRESET = 1
 TCR_FLAG_BIT_ALT_SUSPEND = 2

@@ -3746,11 +3746,11 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
     Boolean is_wx = (exception == EXC_BAD_ACCESS && code0 == KERN_PROTECTION_FAILURE &&
                      ((natural)code[1] & 0x00FFFFFFFFFFFFFFULL) >= 0x200000000ULL);
     if (!is_alloc && !is_wx) {
-      static int bug169_exc_count = 0;
-      bug169_exc_count++;
-      if (bug169_exc_count <= 20)
-        fprintf(dbgout, "Bug169-MACH[%d]: exc=%d code0=%lld code1=0x%llx pc=0x%lx valence=%d insn=0x%08x\n",
-                bug169_exc_count, exception, (long long)code0, (long long)code[1],
+      static int mach_exc_count = 0;
+      mach_exc_count++;
+      if (mach_exc_count <= 20)
+        fprintf(dbgout, "Bug170-MACH[%d]: exc=%d code0=%lld code1=0x%llx pc=0x%lx valence=%d insn=0x%08x\n",
+                mach_exc_count, exception, (long long)code0, (long long)code[1],
                 (unsigned long)diag_ts->__pc, tcr->valence, diag_insn);
       fflush(dbgout);
     }
