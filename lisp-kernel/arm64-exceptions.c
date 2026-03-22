@@ -1045,6 +1045,252 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
 {
   LispObj errdisp = nrs_ERRDISP.vcell;
 
+  /* Bug 171: During early boot (%err-disp unbound), handle errors FIRST
+     before doing expensive diagnostics that may crash on bad addresses. */
+  if (errdisp == unbound_marker && arg1 == 0 && arg2 != 0) {
+    unsigned imm16 = HLT_IMM16(arg2);
+    unsigned fmt = imm16 & 7;
+    unsigned info = (imm16 >> 8) & 0xFF;
+    if (fmt == 5 && info == 0) {
+      /* Undefined function call.  Try to handle common functions at C level. */
+      natural fname_raw = untag(xpGPR(xp, 9));
+      natural nargs_val = xpGPR(xp, 5);
+      char fn_name[64] = {0};
+      if (fname_raw > 0x100000000LL && fname_raw < 0x400000000000LL) {
+        LispObj pn = ((LispObj *)fname_raw)[0];
+        natural pn_raw = untag(pn);
+        if (pn_raw > 0x100000000LL && pn_raw < 0x400000000000LL) {
+          LispObj pn_hdr = ((LispObj *)pn_raw)[-1];
+          natural pn_len = header_element_count(pn_hdr);
+          int cs = ((header_subtag(pn_hdr) & 0x7F) == 7) ? 4 : 1;
+          if (pn_len > 0 && pn_len < 60) {
+            for (natural i = 0; i < pn_len; i++)
+              fn_name[i] = ((char *)pn_raw)[i * cs];
+            fn_name[pn_len] = 0;
+          }
+        }
+      }
+
+      /* Check for %kernel-restart */
+      if (fname_raw == (natural)&nrs_KERNELRESTART.pname) {
+        LispObj restart_type = (nargs_val == 3 * node_size) ?
+          xpGPR(xp, 13) : xpGPR(xp, 14);
+        if (restart_type == 130) { /* $xnopkg */
+          LispObj pkg_name = xpGPR(xp, 15);
+          natural sraw = untag(pkg_name);
+          LispObj found_pkg = 0;
+          if (sraw > 0x100000000LL && sraw < 0x400000000000LL) {
+            LispObj shdr = *((LispObj *)sraw - 1);
+            natural slen = header_element_count(shdr);
+            int scs = ((header_subtag(shdr) & 0x7F) == 7) ? 4 : 1;
+            LispObj pkglist = nrs_ALL_PACKAGES.vcell;
+            while (fulltag_of(pkglist) == fulltag_cons) {
+              LispObj pkg = car(pkglist);
+              LispObj names = deref(pkg, 5);
+              LispObj nl = names;
+              while (fulltag_of(nl) == fulltag_cons) {
+                LispObj ns = car(nl);
+                natural ns_raw = untag(ns);
+                if (ns_raw > 0x100000000LL) {
+                  LispObj ns_hdr = *((LispObj *)ns_raw - 1);
+                  natural ns_len = header_element_count(ns_hdr);
+                  int ns_cs = ((header_subtag(ns_hdr) & 0x7F) == 7) ? 4 : 1;
+                  if (ns_len == slen) {
+                    int match = 1;
+                    for (natural ci = 0; ci < slen; ci++) {
+                      if (((unsigned char *)sraw)[ci * scs] !=
+                          ((unsigned char *)ns_raw)[ci * ns_cs]) {
+                        match = 0; break;
+                      }
+                    }
+                    if (match) { found_pkg = pkg; break; }
+                  }
+                }
+                nl = cdr(nl);
+              }
+              if (found_pkg) break;
+              pkglist = cdr(pkglist);
+            }
+          }
+          if (found_pkg) {
+            xpPC(xp) = (pc)(natural)xpGPR(xp, 30);
+            xpGPR(xp, 15) = found_pkg;
+            xpGPR(xp, 5) = node_size;
+            *bumpP = 0;
+            return true;
+          }
+        }
+        /* Other restart types: return NIL */
+        fprintf(dbgout, "Bug171: %%kernel-restart type=%ld\n", (long)restart_type);
+        fflush(dbgout);
+        xpPC(xp) = (pc)(natural)xpGPR(xp, 30);
+        xpGPR(xp, 15) = lisp_nil;
+        xpGPR(xp, 5) = node_size;
+        *bumpP = 0;
+        return true;
+      }
+
+      /* Check for %err-disp */
+      if (fname_raw == (natural)&nrs_ERRDISP.pname) {
+        LispObj err_num = xpGPR(xp, 15);
+        if (nargs_val > node_size) err_num = xpGPR(xp, 14);
+        if (nargs_val > 2 * node_size) err_num = xpGPR(xp, 13);
+        static int errdisp_count = 0;
+        errdisp_count++;
+        if (errdisp_count <= 10)
+          fprintf(dbgout, "Bug171: %%err-disp #%d err=%ld nargs=%lu LR=%016lx\n",
+                  errdisp_count, (long)err_num, (unsigned long)nargs_val,
+                  (unsigned long)xpGPR(xp, 30));
+        fflush(dbgout);
+        xpPC(xp) = (pc)(natural)xpGPR(xp, 30);
+        xpGPR(xp, 15) = lisp_nil;
+        xpGPR(xp, 5) = node_size;
+        *bumpP = 0;
+        return true;
+      }
+
+      /* Bug 171: Handle SET-PACKAGE at C level */
+      if (strcmp(fn_name, "SET-PACKAGE") == 0) {
+        static int setpkg_count = 0;
+        setpkg_count++;
+        LispObj pkg_name = xpGPR(xp, 15);
+        natural sraw = untag(pkg_name);
+        LispObj found_pkg = 0;
+        if (sraw > 0x100000000LL && sraw < 0x400000000000LL) {
+          LispObj shdr = *((LispObj *)sraw - 1);
+          natural slen = header_element_count(shdr);
+          int scs = ((header_subtag(shdr) & 0x7F) == 7) ? 4 : 1;
+          LispObj pkglist = nrs_ALL_PACKAGES.vcell;
+          while (fulltag_of(pkglist) == fulltag_cons) {
+            LispObj pkg = car(pkglist);
+            LispObj names = deref(pkg, 5);
+            LispObj nl = names;
+            while (fulltag_of(nl) == fulltag_cons) {
+              LispObj ns = car(nl);
+              natural ns_raw = untag(ns);
+              if (ns_raw > 0x100000000LL) {
+                LispObj ns_hdr = *((LispObj *)ns_raw - 1);
+                natural ns_len = header_element_count(ns_hdr);
+                int ns_cs = ((header_subtag(ns_hdr) & 0x7F) == 7) ? 4 : 1;
+                if (ns_len == slen) {
+                  int match = 1;
+                  for (natural ci = 0; ci < slen; ci++) {
+                    if (((unsigned char *)sraw)[ci * scs] !=
+                        ((unsigned char *)ns_raw)[ci * ns_cs]) {
+                      match = 0; break;
+                    }
+                  }
+                  if (match) { found_pkg = pkg; break; }
+                }
+              }
+              nl = cdr(nl);
+            }
+            if (found_pkg) break;
+            pkglist = cdr(pkglist);
+          }
+        }
+        if (found_pkg) {
+          if (setpkg_count <= 5)
+            fprintf(dbgout, "Bug171: set-package #%d → pkg=%016lx\n",
+                    setpkg_count, (unsigned long)found_pkg);
+          nrs_PACKAGE.vcell = found_pkg;
+          xpPC(xp) = (pc)(natural)xpGPR(xp, 30);
+          xpGPR(xp, 15) = found_pkg;
+          xpGPR(xp, 5) = node_size;
+          *bumpP = 0;
+          fflush(dbgout);
+          return true;
+        }
+      }
+
+      /* Bug 171: Handle undefined ERROR — return NIL but detect loops.
+         ERROR calls that loop (same LR repeated) need frame unwinding
+         to break out. Walk the stack frame chain to find a valid frame. */
+      if (strcmp(fn_name, "ERROR") == 0 ||
+          fname_raw == (natural)&nrs_ERROR.pname) {
+        static int error_count = 0;
+        static natural last_error_lr = 0;
+        static int same_lr_count = 0;
+        error_count++;
+        natural this_lr = xpGPR(xp, 30);
+        if (this_lr == last_error_lr) {
+          same_lr_count++;
+        } else {
+          same_lr_count = 1;
+          last_error_lr = this_lr;
+        }
+        if (error_count <= 10 || same_lr_count == 2) {
+          fprintf(dbgout, "Bug171: ERROR #%d nargs=%lu LR=%016lx arg_z=%016lx same_lr=%d\n",
+                  error_count, (unsigned long)nargs_val,
+                  (unsigned long)this_lr, (unsigned long)xpGPR(xp, 15),
+                  same_lr_count);
+          fflush(dbgout);
+        }
+        if (same_lr_count >= 3) {
+          /* Infinite loop detected — walk FP chain to find a caller's
+             caller frame and return there. */
+          LispObj fp = xpFP(xp);
+          if (fp > 0x100000000LL && fp < 0x800000000000LL) {
+            LispObj *fptr = (LispObj *)fp;
+            LispObj savelr = fptr[1];
+            LispObj savefn = fptr[2];
+            LispObj savefp = fptr[3];
+            LispObj savevsp = fptr[0];
+            if (same_lr_count <= 5)
+              fprintf(dbgout, "Bug171: ERROR loop break via FP=%016lx → lr=%016lx\n",
+                      (unsigned long)fp, (unsigned long)savelr);
+            xpGPR(xp, 25) = savevsp;
+            xpGPR(xp, 10) = savefn;
+            xpGPR(xp, 15) = lisp_nil;
+            xpFP(xp) = savefp;
+            xpPC(xp) = (pc)(natural)savelr;
+            xpSP(xp) = fp + 32;
+            xpGPR(xp, 5) = node_size;
+            *bumpP = 0;
+            same_lr_count = 0;
+            last_error_lr = 0;
+            return true;
+          }
+        }
+        if (error_count > 50000) {
+          fprintf(dbgout, "Bug171: too many ERROR calls (%d), aborting\n", error_count);
+          fflush(dbgout);
+          _exit(1);
+        }
+        /* First occurrence: just return NIL to caller */
+        xpPC(xp) = (pc)(natural)this_lr;
+        xpGPR(xp, 15) = lisp_nil;
+        xpGPR(xp, 5) = node_size;
+        *bumpP = 0;
+        return true;
+      }
+
+      /* Other undefined function — log and return NIL */
+      {
+        static int undef_count = 0;
+        static int undef_suppressed = 0;
+        undef_count++;
+        if (undef_count <= 30 || (undef_count % 500) == 0)
+          fprintf(dbgout, "Bug171: undefined '%s' #%d LR=%016lx nargs=%lu\n",
+                  fn_name[0] ? fn_name : "???", undef_count,
+                  (unsigned long)xpGPR(xp, 30), (unsigned long)nargs_val);
+        else
+          undef_suppressed++;
+        if (undef_count > 50000) {
+          fprintf(dbgout, "Bug171: too many undefined (%d, %d suppressed), aborting\n",
+                  undef_count, undef_suppressed);
+          fflush(dbgout);
+          _exit(1);
+        }
+        xpPC(xp) = (pc)(natural)xpGPR(xp, 30);
+        xpGPR(xp, 15) = lisp_nil;
+        xpGPR(xp, 5) = node_size;
+        *bumpP = 0;
+        return true;
+      }
+    }
+  }
+
   fprintf(dbgout, "handle_error: PC=%016lx LR=%016lx arg1=%u arg2=%08x errdisp=%016lx tag=0x%02lx\n",
           (unsigned long)(natural)xpPC(xp), (unsigned long)xpGPR(xp, 30),
           arg1, arg2, (unsigned long)errdisp, (unsigned long)fulltag_of(errdisp));
@@ -1931,14 +2177,11 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
             }
           }
 
-          /* Other not-callable during early boot (Bug 161).
-             Don't just return NIL — the caller likely can't handle it
-             (e.g., ERROR is not supposed to return).  Print diagnostic
-             info and abort cleanly. */
+          /* Bug 171: Other not-callable during early boot.
+             Extract function name and handle known functions at C level. */
           {
             natural fn_raw = untag(xpGPR(xp, 9));
             char fn_name[64] = {0};
-            /* Try to extract the function name from the symbol's pname */
             if (fn_raw > 0x100000000LL && fn_raw < 0x400000000000LL) {
               LispObj pn = ((LispObj *)fn_raw)[0]; /* pname */
               natural pn_raw = untag(pn);
@@ -1953,90 +2196,86 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
                 }
               }
             }
-            fprintf(dbgout, "early-boot-err: undefined function '%s' called during boot\n",
-                    fn_name[0] ? fn_name : "???");
-            /* Bug 165: Dump the hash table that caused the GETHASH failure */
-            {
-              /* arg_y at the time of the inner call is the hash table (key for GETHASH) */
-              /* But by now registers have been modified. Let's dump istruct objects from the vstack */
-              natural vsp_val = xpGPR(xp, 25);
-              fprintf(dbgout, "  Bug165 vstack scan for istructs:\n");
-              for (int vi = 0; vi < 16; vi++) {
-                natural v = *(natural *)(vsp_val + vi * 8);
-                natural v_tag = v >> 56;
-                if (v_tag == 0x6e) { /* reference tag for istruct */
-                  natural v_raw = v & 0x00FFFFFFFFFFFFFFULL;
-                  if (v_raw > 0x100000000ULL && v_raw < 0x400000000000ULL) {
-                    LispObj hdr = *((LispObj *)v_raw - 1);
-                    natural hdr_subtag = hdr >> 56;
-                    natural hdr_count = hdr & 0x00FFFFFFFFFFFFFFULL;
-                    if (hdr_subtag == 0xae && hdr_count == 16) {
-                      fprintf(dbgout, "  Found hash table at vsp[%d]=0x%lx:\n", vi, (unsigned long)v);
-                      LispObj *data = (LispObj *)v_raw;
-                      for (int si = 0; si < 16; si++) {
-                        const char *name = "";
-                        switch (si) {
-                          case 0: name = " (type)"; break;
-                          case 1: name = " (keytransF)"; break;
-                          case 2: name = " (compareF)"; break;
-                          case 3: name = " (rehash-bits)"; break;
-                          case 4: name = " (vector)"; break;
-                          case 5: name = " (lock)"; break;
-                          case 6: name = " (owner)"; break;
-                          case 7: name = " (grow-threshold)"; break;
-                          case 8: name = " (rehash-ratio)"; break;
-                          case 9: name = " (rehash-size)"; break;
-                          case 10: name = " (puthash-count)"; break;
-                          case 11: name = " (exclusion-lock)"; break;
-                          case 12: name = " (nhash.find)"; break;
-                          case 13: name = " (nhash.find-new)"; break;
-                          case 14: name = " (read-only)"; break;
-                          case 15: name = " (min-size)"; break;
+
+            /* Bug 171: Handle SET-PACKAGE at C level.
+               arg_z = package name string.  Look up package and set *package*. */
+            if (strcmp(fn_name, "SET-PACKAGE") == 0) {
+              static int setpkg_count = 0;
+              setpkg_count++;
+              LispObj pkg_name = xpGPR(xp, 15); /* arg_z */
+              natural sraw = untag(pkg_name);
+              LispObj found_pkg = 0;
+              if (sraw > 0x100000000LL && sraw < 0x400000000000LL) {
+                LispObj shdr = *((LispObj *)sraw - 1);
+                natural slen = header_element_count(shdr);
+                int scs = ((header_subtag(shdr) & 0x7F) == 7) ? 4 : 1;
+                char *sdata = (char *)sraw;
+                LispObj pkglist = nrs_ALL_PACKAGES.vcell;
+                while (fulltag_of(pkglist) == fulltag_cons) {
+                  LispObj pkg = car(pkglist);
+                  LispObj names = deref(pkg, 5);
+                  LispObj nl = names;
+                  while (fulltag_of(nl) == fulltag_cons) {
+                    LispObj ns = car(nl);
+                    natural ns_raw = untag(ns);
+                    if (ns_raw > 0x100000000LL) {
+                      LispObj ns_hdr = *((LispObj *)ns_raw - 1);
+                      natural ns_len = header_element_count(ns_hdr);
+                      int ns_cs = ((header_subtag(ns_hdr) & 0x7F) == 7) ? 4 : 1;
+                      if (ns_len == slen) {
+                        int match = 1;
+                        for (natural ci = 0; ci < slen; ci++) {
+                          if (((unsigned char *)sraw)[ci * scs] !=
+                              ((unsigned char *)ns_raw)[ci * ns_cs]) {
+                            match = 0; break;
+                          }
                         }
-                        fprintf(dbgout, "    slot[%2d] = %016lx (tag=0x%02lx)%s\n",
-                                si, (unsigned long)data[si], (unsigned long)(data[si] >> 56), name);
+                        if (match) { found_pkg = pkg; break; }
                       }
                     }
+                    nl = cdr(nl);
                   }
+                  if (found_pkg) break;
+                  pkglist = cdr(pkglist);
                 }
               }
-            }
-            fprintf(dbgout, "  PC=%016lx LR=%016lx SP=%016lx\n",
-                    (unsigned long)(natural)xpPC(xp),
-                    (unsigned long)xpGPR(xp, 30),
-                    (unsigned long)xpGPR(xp, 31));
-            /* Print arg_z which often has an error message string */
-            {
-              LispObj errarg = xpGPR(xp, 15);
-              natural az_raw = untag(errarg);
-              if (az_raw > 0x100000000LL && az_raw < 0x400000000000LL) {
-                LispObj az_hdr = ((LispObj *)az_raw)[-1];
-                natural az_tag = header_subtag(az_hdr);
-                /* Check if it's a simple-base-string (subtag 0x87) */
-                if (az_tag == 0x87) {
-                  natural slen = header_element_count(az_hdr);
-                  if (slen > 0 && slen < 256) {
-                    fprintf(dbgout, "  arg_z (string): \"");
-                    for (natural i = 0; i < slen; i++)
-                      fprintf(dbgout, "%c", ((char *)az_raw)[i * 4]);
-                    fprintf(dbgout, "\"\n");
-                  }
-                }
+              if (found_pkg) {
+                if (setpkg_count <= 5)
+                  fprintf(dbgout, "Bug171: set-package workaround #%d → pkg=%016lx\n",
+                          setpkg_count, (unsigned long)found_pkg);
+                nrs_PACKAGE.vcell = found_pkg;
+                xpPC(xp) = (pc)(natural)xpGPR(xp, 30); /* return to caller */
+                xpGPR(xp, 15) = found_pkg; /* arg_z = return value */
+                xpGPR(xp, 5) = node_size; /* nargs = 1 */
+                *bumpP = 0;
+                early_err_count--;
+                fflush(dbgout);
+                return true;
               }
+              fprintf(dbgout, "Bug171: set-package — package not found\n");
             }
-            /* Print catch_top for debugging */
+
+            /* Unknown undefined function — log and try returning NIL.
+               Don't do complex diagnostics that might crash. */
             {
-              TCR *tcr = get_tcr(false);
-              if (tcr) {
-                fprintf(dbgout, "  catch_top=%016lx vsp=%016lx\n",
-                        (unsigned long)(natural)tcr->catch_top,
-                        (unsigned long)xpGPR(xp, 25));
+              static int undef_count = 0;
+              undef_count++;
+              fprintf(dbgout, "early-boot-err #%d: undefined function '%s' LR=%016lx\n",
+                      undef_count, fn_name[0] ? fn_name : "???",
+                      (unsigned long)xpGPR(xp, 30));
+              fflush(dbgout);
+              if (undef_count > 100) {
+                fprintf(dbgout, "early-boot-err: too many undefined functions, aborting\n");
+                fflush(dbgout);
+                _exit(1);
               }
+              /* Return NIL and hope the caller can handle it */
+              xpPC(xp) = (pc)(natural)xpGPR(xp, 30);
+              xpGPR(xp, 15) = lisp_nil;
+              xpGPR(xp, 5) = node_size;
+              *bumpP = 0;
+              return true;
             }
-            fflush(dbgout);
-            fprintf(dbgout, "early-boot-err: aborting (undefined function cannot safely return)\n");
-            fflush(dbgout);
-            _exit(1);
           }
         }
         /* Other UUO errors: skip HLT and continue */

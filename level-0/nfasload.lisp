@@ -1110,42 +1110,42 @@
   htab)
 
 
+;;; Bug 171: Rehash package hash tables using the runtime hash function.
+;;; During cross-compilation, hash positions are determined by the host's
+;;; hash function (x86-64, 8-bit chars).  On ARM64 (32-bit chars), the
+;;; hash function produces different values, so all lookups fail.
+;;; This function rehashes all entries using the ARM64 %pname-hash.
+;;; Uses %get-htab-symbol-triple (cons-returning) to avoid MVB (Bug 165e).
 (defun %resize-htab (htab)
   (declare (optimize (speed 0) (safety 0)))
-  (return-from %resize-htab nil)
-  (without-interrupts
-   (let* ((old-vector (htvec htab))
-          (old-len (length old-vector)))
-     (declare (fixnum old-len)
-              (simple-vector old-vector))
-     (let* ((nsyms 0))
-       (declare (fixnum nsyms))
-       (dovector (s old-vector)
-         (when (symbolp s) (incf nsyms)))
-       (%initialize-htab htab 
-                         (the fixnum (+ 
-                                      (the fixnum 
-                                        (+ nsyms (the fixnum (ash nsyms -2))))
-                                      2)))
-       (let* ((new-vector (htvec htab))
-              (nnew 0))
-         (declare (fixnum nnew)
-                  (simple-vector new-vector))
-         (dotimes (i old-len (setf (htcount htab) nnew))
-           (let* ((s (svref old-vector i)))
-               (if (symbolp s)
-                 (let* ((pname (symbol-name s)))
-                   (setf (svref 
-                          new-vector 
-                          (nth-value 
-                           2
-                           (%get-htab-symbol 
-                            pname
-                            (length pname)
-                            htab)))
-                         s)
-                   (incf nnew)))))
-         htab)))))
+  ;; Single-threaded during boot, skip without-interrupts.
+  (let* ((old-vector (htvec htab))
+         (old-len (length old-vector)))
+    (declare (fixnum old-len)
+             (simple-vector old-vector))
+    (let* ((nsyms 0))
+      (declare (fixnum nsyms))
+      (dovector (s old-vector)
+        (when (symbolp s) (incf nsyms)))
+      (%initialize-htab htab
+                        (the fixnum (+
+                                     (the fixnum
+                                       (+ nsyms (the fixnum (ash nsyms -2))))
+                                     2)))
+      (let* ((new-vector (htvec htab))
+             (nnew 0))
+        (declare (fixnum nnew)
+                 (simple-vector new-vector))
+        (dotimes (i old-len (setf (htcount htab) nnew))
+          (let* ((s (svref old-vector i)))
+            (when (symbolp s)
+              (let* ((pname (symbol-name s))
+                     ;; Use cons-returning variant to avoid MVB
+                     (triple (%get-htab-symbol-triple pname (length pname) htab))
+                     (offset (cddr triple)))
+                (setf (svref new-vector offset) s)
+                (incf nnew)))))
+        htab))))
         
 (defun hash-pname (str len)
   (declare (optimize (speed 3) (safety 0)))

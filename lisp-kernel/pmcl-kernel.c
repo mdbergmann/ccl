@@ -2297,6 +2297,163 @@ main
 #endif
 #endif
 #endif
+#if defined(ARM64)
+  /* Bug 171 diagnostic: scan dynamic area symbols, count defined vs undefined fcells.
+     UDF trampoline is the first function in dynamic area. */
+  {
+    LispObj *start = (LispObj *)(natural)lisp_global(HEAP_START);
+    LispObj *end = (LispObj *)active_dynamic_area->active;
+    LispObj udf_fn = 0; /* first function found = UDF trampoline */
+    int sym_total = 0, sym_defined = 0, sym_undefined = 0;
+    int first_defined_shown = 0;
+
+    /* Find UDF trampoline (first function in dynamic area) */
+    {
+      LispObj *p = start;
+      while (p < end) {
+        LispObj w = *p;
+        natural sub = header_subtag(w);
+        if (sub == subtag_function) {
+          udf_fn = ((natural)(p+1)) | ((LispObj)tag_function << 56);
+          break;
+        }
+        if (immheader_tag_p(sub)) {
+          p = (LispObj *)skip_over_ivector((natural)p, w);
+        } else if (nodeheader_tag_p(sub)) {
+          natural cnt = header_element_count(w);
+          p += 1 + cnt;
+          if (((natural)p) & (dnode_size-1)) p++;
+        } else {
+          p += 2;
+        }
+      }
+    }
+    fprintf(dbgout, "Bug171-diag: UDF trampoline tagged=%016lx\n", (unsigned long)udf_fn);
+
+    /* Scan all symbols */
+    {
+      LispObj *p = start;
+      while (p < end) {
+        LispObj w = *p;
+        natural sub = header_subtag(w);
+        if (sub == subtag_symbol) {
+          natural cnt = header_element_count(w);
+          if (cnt >= 3) {
+            LispObj fcell = p[3]; /* slot 2 from tagged = p[1+2] = p[3] */
+            sym_total++;
+            if (fcell == udf_fn) {
+              sym_undefined++;
+              /* Show first 10 undefined symbols */
+              if (sym_undefined <= 10) {
+                LispObj pname = p[1];
+                natural pn_raw = untag(pname);
+                if (pn_raw > 0x100000000LL && pn_raw < 0x400000000000LL) {
+                  LispObj pn_hdr = ((LispObj *)pn_raw)[-1];
+                  natural pn_len = header_element_count(pn_hdr);
+                  int cs = ((header_subtag(pn_hdr) & 0x7F) == 7) ? 4 : 1;
+                  if (pn_len > 0 && pn_len < 60) {
+                    fprintf(dbgout, "  UNDEF[%d]: \"", sym_undefined);
+                    for (natural i = 0; i < pn_len; i++)
+                      fprintf(dbgout, "%c", ((char *)pn_raw)[i * cs]);
+                    fprintf(dbgout, "\"\n");
+                  }
+                }
+              }
+            } else {
+              sym_defined++;
+              if (first_defined_shown < 5) {
+                /* Print name of defined symbols */
+                LispObj pname = p[1]; /* slot 0 */
+                natural pn_raw = untag(pname);
+                if (pn_raw > 0x100000000LL && pn_raw < 0x400000000000LL) {
+                  LispObj pn_hdr = ((LispObj *)pn_raw)[-1];
+                  natural pn_len = header_element_count(pn_hdr);
+                  int cs = ((header_subtag(pn_hdr) & 0x7F) == 7) ? 4 : 1;
+                  if (pn_len > 0 && pn_len < 60) {
+                    fprintf(dbgout, "  defined[%d]: fcell=%016lx \"", first_defined_shown, (unsigned long)fcell);
+                    for (natural i = 0; i < pn_len; i++)
+                      fprintf(dbgout, "%c", ((char *)pn_raw)[i * cs]);
+                    fprintf(dbgout, "\"\n");
+                  }
+                }
+                first_defined_shown++;
+              }
+            }
+          }
+          p += 1 + cnt;
+          if (((natural)p) & (dnode_size-1)) p++;
+        } else if (immheader_tag_p(sub)) {
+          p = (LispObj *)skip_over_ivector((natural)p, w);
+        } else if (nodeheader_tag_p(sub)) {
+          natural cnt = header_element_count(w);
+          p += 1 + cnt;
+          if (((natural)p) & (dnode_size-1)) p++;
+        } else {
+          p += 2;
+        }
+      }
+    }
+    fprintf(dbgout, "Bug171-diag: %d symbols total, %d defined, %d undefined\n",
+            sym_total, sym_defined, sym_undefined);
+    /* Save SET-PACKAGE symbol address for later re-check */
+    fprintf(dbgout, "Bug171-diag: udf_fn=%016lx\n", (unsigned long)udf_fn);
+    /* Check specific known function symbols */
+    {
+      const char *check_names[] = {
+        "SET-PACKAGE", "%FASLOAD", "%DEFUN", "FIND-PACKAGE",
+        "PROVIDE", "REQUIRE", "FUNCALL", "APPLY",
+        "CAR", "CDR", "CONS", "EQ", "LENGTH",
+        "%FHAVE", "FBOUNDP", "SYMBOL-FUNCTION",
+        "VALUES", "ERROR", "FORMAT", "PRINT",
+        NULL
+      };
+      LispObj *p = start;
+      while (p < end) {
+        LispObj w = *p;
+        natural sub = header_subtag(w);
+        if (sub == subtag_symbol) {
+          natural cnt = header_element_count(w);
+          if (cnt >= 3) {
+            LispObj pname = p[1];
+            natural pn_raw = untag(pname);
+            if (pn_raw > 0x100000000LL && pn_raw < 0x400000000000LL) {
+              LispObj pn_hdr = ((LispObj *)pn_raw)[-1];
+              natural pn_len = header_element_count(pn_hdr);
+              int cs = ((header_subtag(pn_hdr) & 0x7F) == 7) ? 4 : 1;
+              if (pn_len > 0 && pn_len < 60) {
+                char name[64] = {0};
+                for (natural i = 0; i < pn_len; i++)
+                  name[i] = ((char *)pn_raw)[i * cs];
+                name[pn_len] = 0;
+                for (int ci = 0; check_names[ci]; ci++) {
+                  if (strcmp(name, check_names[ci]) == 0) {
+                    LispObj fcell = p[3];
+                    /* Print symbol address (data start, like tagged pointer's raw) */
+                    fprintf(dbgout, "  CHECK '%s': sym@%016lx fcell=%016lx %s\n",
+                            name, (unsigned long)(p+1), (unsigned long)fcell,
+                            fcell == udf_fn ? "UNDEFINED" : "defined");
+                    break;
+                  }
+                }
+              }
+            }
+          }
+          p += 1 + cnt;
+          if (((natural)p) & (dnode_size-1)) p++;
+        } else if (immheader_tag_p(sub)) {
+          p = (LispObj *)skip_over_ivector((natural)p, w);
+        } else if (nodeheader_tag_p(sub)) {
+          natural cnt = header_element_count(w);
+          p += 1 + cnt;
+          if (((natural)p) & (dnode_size-1)) p++;
+        } else {
+          p += 2;
+        }
+      }
+    }
+    fflush(dbgout);
+  }
+#endif
   start_lisp(TCR_TO_TSD(tcr), 0);
   _exit(0);
 }
