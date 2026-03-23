@@ -3657,25 +3657,36 @@
 
 ;;; --- Test fixnum(s) ---
 ;;; ARM64 TBI fixnum check: tag byte is 0x00 (positive) or 0xFF (negative).
-;;; Extract tag, add 1 → positive fixnum gives 1, negative gives 0 (wrap).
-;;; Then test if result < 2.
+;;; Extract tag byte, compare with 0 (positive fixnum) then 0xFF (negative).
+;;; After vinsn, Z=1 iff value is a fixnum.
+;;; Callers use cbranch-false with arm64-cond-eq: branches when NOT fixnum.
 
 (define-arm64-vinsn test-fixnum (((dest :crf))
                                  ((src :lisp))
-                                 ((tag :u64)))
+                                 ((tag :u8)))
   (lsr tag src (:$ arm64::tag-shift))
-  (add tag tag (:$ 1))
-  (cmp tag (:$ 2)))
+  (cmp tag (:$ 0))
+  (b.eq :done)
+  (cmp tag (:$ arm64::tag-negative-fixnum))
+  :done)
 
 ;;; Test if both x and y are fixnums.
+;;; Check x first; if not fixnum, Z=0 and we skip checking y.
 (define-arm64-vinsn test-fixnums (((dest :crf))
                                   ((x :lisp)
                                    (y :lisp))
-                                  ((tag :u64)))
-  (orr tag x y)
-  (lsr tag tag (:$ arm64::tag-shift))
-  (add tag tag (:$ 1))
-  (cmp tag (:$ 2)))
+                                  ((tag :u8)))
+  (lsr tag x (:$ arm64::tag-shift))
+  (cmp tag (:$ 0))
+  (b.eq :check-y)
+  (cmp tag (:$ arm64::tag-negative-fixnum))
+  (b.ne :done)
+  :check-y
+  (lsr tag y (:$ arm64::tag-shift))
+  (cmp tag (:$ 0))
+  (b.eq :done)
+  (cmp tag (:$ arm64::tag-negative-fixnum))
+  :done)
 
 
 ;;; --- Typecode predicates ---

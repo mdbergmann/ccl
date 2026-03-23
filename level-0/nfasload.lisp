@@ -288,7 +288,9 @@
     (declare (fixnum n))
     (%fasl-read-utf-8-string s str n nextra)
     (let* ((sym (make-symbol str)))
-      (when idx (ensure-binding-index sym))
+      ;; Bug 173: skip ensure-binding-index during early boot — causes frame
+      ;; corruption on ARM64 (nfn clobber).  Binding indices set up later.
+      (when (and idx (not *early-boot*)) (ensure-binding-index sym))
       (%epushval s sym))))
 
 (defun %fasl-nvmake-symbol (s &optional idx)
@@ -297,7 +299,7 @@
     (declare (fixnum n))
     (%fasl-read-n-string s str 0 n)
     (let* ((sym (make-symbol str)))
-      (when idx (ensure-binding-index sym))
+      (when (and idx (not *early-boot*)) (ensure-binding-index sym))
       (%epushval s sym))))
 
 ;;; Bug 165e: Avoid all MVBs — use cons-returning variants.
@@ -315,7 +317,7 @@
         (unless access
           (unless new-p (setq str (%fasl-copystr str len)))
           (setq symbol (%add-symbol str package internal-offset external-offset)))
-        (when binding-index
+        (when (and binding-index (not *early-boot*))
           (ensure-binding-index symbol))
         (%epushval s symbol)))))
 
@@ -333,7 +335,7 @@
         (unless access
           (unless new-p (setq str (%fasl-copystr str len)))
           (setq symbol (%add-symbol str package internal-offset external-offset)))
-        (when binding-index
+        (when (and binding-index (not *early-boot*))
           (ensure-binding-index symbol))
         (%epushval s symbol)))))
 

@@ -2216,26 +2216,8 @@ main
             code_space_start, code_space_limit,
             (unsigned long)(CODE_HEAP_SIZE / (1024 * 1024)));
   }
-  /* Bug 173 workaround: patch the conditional branch in %FASL-NVINTERN
-     to unconditional BEFORE copying code vectors to code heap, so the
-     code heap gets the patched version. */
-  if (readonly_area) {
-    unsigned int *patchC = (unsigned int *)0x3000000bcd14ULL;
-    if ((BytePtr)patchC >= (BytePtr)readonly_area->low &&
-        (BytePtr)patchC < (BytePtr)readonly_area->active) {
-      fprintf(dbgout, "Bug173-SKIP: addr=0x%lx insn=0x%08x\n",
-              (unsigned long)patchC, *patchC);
-      if (*patchC == 0x54000280) {
-        *patchC = 0x14000014;  /* b #0x50 (unconditional) */
-        fprintf(dbgout, "Bug173-SKIP: PATCHED to 0x%08x (unconditional branch)\n",
-                *patchC);
-        fflush(dbgout);
-      } else {
-        fprintf(dbgout, "Bug173-SKIP: instruction mismatch, NOT patching.\n");
-        fflush(dbgout);
-      }
-    }
-  }
+  /* Bug 173: ensure-binding-index skip is now in source (nfasload.lisp)
+     via (not *early-boot*) guard. No binary patch needed. */
 #endif
   {
     BytePtr heap_start = (BytePtr)(natural)lisp_global(HEAP_START);
