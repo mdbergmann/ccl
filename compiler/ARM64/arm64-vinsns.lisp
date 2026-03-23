@@ -2669,6 +2669,10 @@
 ;;; --- Function calls and jumps ---
 
 ;;; call-known-symbol: fname (x9) holds the symbol; load fcell, get entrypoint, call.
+;;; Bug 173: reload nfn from frame before using fname, in case nfn was stale.
+;;; The ref-constant that loaded fname used nfn, so if nfn was wrong, fname is wrong too.
+;;; This reload is a safety net — the compiler should emit reload-self after calls,
+;;; but there may be code paths where nfn doesn't get reloaded properly.
 (define-arm64-vinsn (call-known-symbol :call) (((result (:lisp arm64::arg_z)))
                                                ())
   (ldr nfn (:@ fname (:$ arm64::symbol.fcell)))
@@ -2711,6 +2715,7 @@
 
 ;;; ref-constant: load from function's constant pool.
 ;;; ARM64 uses nfn instead of fn.  Offset = misc-data-offset + (index+2)*8.
+;;; ref-constant: load a constant from the current function's constant pool.
 (define-arm64-vinsn (ref-constant :constant-ref :predicatable)
     (((dest :lisp))
      ((src :s16const)))
@@ -3352,11 +3357,20 @@
 (define-arm64-subprim-call-vinsn (make-stack-gvector) .SPstkgvector)
 
 ;;; make-stack-closure: allocate via SPstkgvector, then fix up entrypoint.
-;;; ARM64 function layout has only function.entrypoint (no separate codevector).
-;;; TODO: entrypoint fixup may need revision when closure model is finalized.
+;;; After SPstkgvector returns the closure in arg_z, we must store the
+;;; %closure-code% trampoline entry (TBI tag stripped) into slot 0.
+;;; ARM32 loads the code vector from the function itself; on ARM64 all
+;;; closures share the %closure-code% trampoline (same as heap closures).
 (define-arm64-vinsn (make-stack-closure :call :subprim) (() ())
   (ldr imm2 (:@ rcontext (:$ (:apply arm64::arm64-subprimitive-offset '.SPstkgvector))))
   (blr imm2)
+  ;; Fix entrypoint: load %closure-code% trampoline code vector, strip TBI tag,
+  ;; and store untagged address in function.entrypoint (slot 0).
+  ;; br/blr do NOT strip TBI tags on macOS ARM64 (Bug 173).
+  (add lr rnil (:$ (:apply + arm64::symbol.vcell (arm64::nrs-offset %closure-code%))))
+  (ldr lr (:@ lr (:$ 0)))
+  (and lr lr (:$ #x00FFFFFFFFFFFFFF))
+  (str lr (:@ arg_z (:$ arm64::function.entrypoint)))
   (ldr nfn (:@ x29 (:$ arm64::lisp-frame.savefn))))
 
 (define-arm64-subprim-call-vinsn (stack-misc-alloc) .SPstack-misc-alloc)
