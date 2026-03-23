@@ -46,14 +46,7 @@ extern void pseudo_sigreturn(ExceptionInformation *);
 
 #include "threads.h"
 
-/* Bug 173: W^X exception ring buffer */
-struct { natural fault; natural pc; int direction; } wx_ring[64];
-int wx_idx = 0;
-int wx_total = 0;
-/* Bug 173: snapshot of slot[11] when the constant page is flipped to RW */
-LispObj bug173_slot11_at_flip = 0;
-int bug173_flip_count = 0;
-/* Bug 173: (diagnostic globals removed — skip workaround in pmcl-kernel.c) */
+/* Bug 173 diagnostic globals removed (Bug 176) */
 
 /* Bug 156: global scratch for SPgvector exit → SPgvset entry cross-check.
    These must be global (not TCR) because exception handling clobbers TCR fields. */
@@ -1012,6 +1005,22 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
     unsigned imm16 = HLT_IMM16(arg2);
     unsigned fmt = imm16 & 7;
     unsigned info = (imm16 >> 8) & 0xFF;
+    /* Bug 177: require-char-code vinsn checks tag_character on a fixnum input.
+       The compiled code-char operator calls require-char-code before fixnum->char.
+       Since the input is a fixnum (tag 0x00 or 0xFF), NOT a character (tag 0x11),
+       the check always fires.  Just skip past the HLT — fixnum->char handles
+       surrogate checking and constructs the character correctly. */
+    if (fmt == 4 && info == tag_character) {
+      unsigned reg = (imm16 >> 3) & 0x1F;
+      LispObj val = xpGPR(xp, reg);
+      /* Only skip if the value looks like a valid fixnum (tag 0x00 or 0xFF) */
+      unsigned val_tag = val >> tag_shift;
+      if (val_tag == 0 || val_tag == 0xFF) {
+        xpPC(xp) += 4;  /* skip past HLT */
+        *bumpP = 0;
+        return true;
+      }
+    }
     if (fmt == 5 && info == 0) {
       /* Undefined function call.  Try to handle common functions at C level. */
       natural fname_raw = untag(xpGPR(xp, 9));
@@ -3949,49 +3958,7 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
       fflush(dbgout);
     }
   }
-  /* Bug 173: at every exception, check if %FASL-NVINTERN's slot[11] is still correct.
-     Also check if x10 (nfn) was correct relative to frame savefn.
-     fn_raw = 0x30200006da78, slot[11] at fn_raw+0x58 = 0x30200006dad0.
-     Expected value: 0x63003020000678e8. */
-  {
-    native_thread_state_t *chk_ts = (native_thread_state_t *)in_state;
-    /* Only check when PC is in the function's code range (entrypoint to +0x500) */
-    natural chk_pc = (natural)chk_ts->__pc;
-    natural fn_entry = 0x3000000bc9d8ULL;
-    natural fn_end = fn_entry + 0x500;
-    if (chk_pc >= fn_entry && chk_pc < fn_end) {
-      LispObj slot11_val = *(LispObj *)0x30200006dad0ULL;
-      LispObj x10_val = chk_ts->__x[10];
-      natural fp_val = (natural)chk_ts->__fp;
-      static int bug173_chk_count = 0;
-      bug173_chk_count++;
-      if (slot11_val != 0x63003020000678e8ULL) {
-        fprintf(dbgout, "*** Bug173-CHK[%d]: slot11 CORRUPTED! val=0x%lx expected=0x63003020000678e8 pc=0x%lx exc=%d\n",
-                bug173_chk_count, (unsigned long)slot11_val, (unsigned long)chk_pc, exception);
-        fflush(dbgout);
-      }
-      /* Check x10 vs frame savefn */
-      if (fp_val > 0x100000000ULL && fp_val < 0x200000000000ULL) {
-        LispObj frame_savefn = ((LispObj *)fp_val)[2];
-        if (x10_val != frame_savefn && (x10_val >> 56) == 0x62) {
-          /* x10 is a function but doesn't match frame — might be mid-call */
-          /* Check if x10's slot[11] has the hash vector */
-          natural x10_raw = x10_val & 0x00FFFFFFFFFFFFFFULL;
-          if (x10_raw > 0x200000000ULL && x10_raw < 0x400000000000ULL) {
-            LispObj x10_slot11 = *(LispObj *)(x10_raw + 0x58);
-            if (x10_slot11 == 0x6f003020000d5c88ULL) {
-              fprintf(dbgout, "*** Bug173-CHK[%d]: x10=0x%lx has HASH VECTOR at slot[11]! pc=0x%lx exc=%d\n",
-                      bug173_chk_count, (unsigned long)x10_val, (unsigned long)chk_pc, exception);
-              fprintf(dbgout, "  frame_savefn=0x%lx x10=0x%lx lr=0x%lx\n",
-                      (unsigned long)frame_savefn, (unsigned long)x10_val,
-                      (unsigned long)chk_ts->__lr);
-              fflush(dbgout);
-            }
-          }
-        }
-      }
-    }
-  }
+  /* Bug 173: stale hardcoded slot[11] diagnostics removed (Bug 176) */
   /* Bug 169 diagnostic: log non-alloc-trap, non-W^X exceptions */
   {
     native_thread_state_t *diag_ts = (native_thread_state_t *)in_state;
@@ -6317,218 +6284,7 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
         fp = (natural)savefp;
       }
     }
-    /* Bug 173: precise instruction decode + memory verification */
-    {
-      natural fp0 = ts->__fp;
-      LispObj x10_reg = ts->__x[10];
-      LispObj x9_reg = ts->__x[9];
-      natural lr = ts->__lr;
-      {
-        natural rctx = ts->__x[28];
-        LispObj sptab71 = (rctx > 0x100000000ULL) ? *(LispObj *)(rctx + 0x3b8) : 0;
-        fprintf(dbgout, "  Bug173: fp=0x%lx x10=0x%lx x9=0x%lx lr=0x%lx pc=0x%lx sptab71=0x%lx\n",
-                (unsigned long)fp0, (unsigned long)x10_reg, (unsigned long)x9_reg,
-                (unsigned long)lr, (unsigned long)ts->__pc, (unsigned long)sptab71);
-      }
-
-      /* Decode the calling sequence backwards from lr.
-         Expected pattern (4 instructions before lr):
-           lr-16: ldr x9, [x10, #offset]    (ref-constant)
-           lr-12: ldr x10, [x9, #0x10]      (symbol.fcell)
-           lr-8:  ldr x30, [x10, #0x0]      (function.entrypoint)
-           lr-4:  blr x30                    (call -> crash)
-      */
-      if (lr > 0x200000000ULL && lr < 0x400000000000ULL) {
-        opcode *code_at_lr = (opcode *)lr;
-        opcode insn_m4 = code_at_lr[-1];  /* blr x30? */
-        opcode insn_m8 = code_at_lr[-2];  /* ldr x30, [x10, #0]? */
-        opcode insn_m12 = code_at_lr[-3]; /* ldr x10, [x9, #0x10]? */
-        opcode insn_m16 = code_at_lr[-4]; /* ldr x9, [x10, #offset]? */
-        opcode insn_m20 = code_at_lr[-5]; /* ldr x10, [x29, #0x10]? (reload-self) */
-
-        fprintf(dbgout, "  Bug173 insns: [lr-20]=%08x [lr-16]=%08x [lr-12]=%08x [lr-8]=%08x [lr-4]=%08x\n",
-                insn_m20, insn_m16, insn_m12, insn_m8, insn_m4);
-
-        /* Verify pattern: lr-4 should be blr x30 = 0xd63f03c0 */
-        if (insn_m4 == 0xd63f03c0) {
-          fprintf(dbgout, "  Bug173: lr-4 = blr x30 CONFIRMED\n");
-        }
-
-        /* Decode lr-16: should be ldr x9, [x10, #offset]
-           Encoding: 0xf94XXXXX where bits[4:0]=9, bits[9:5]=10 */
-        if ((insn_m16 & 0xFFC003FF) == 0xF9400149) {
-          /* It IS ldr x9, [x10, #imm]. Extract offset. */
-          unsigned imm12 = (insn_m16 >> 10) & 0xFFF;
-          unsigned offset = imm12 * 8;
-          fprintf(dbgout, "  Bug173: ref-constant = ldr x9, [x10, #0x%x] (slot %u)\n",
-                  offset, offset / 8);
-
-          /* Now verify: what does the frame say nfn is? */
-          if (fp0 > 0x100000000ULL && fp0 < 0x200000000000ULL) {
-            LispObj savefn = ((LispObj *)fp0)[2];
-            natural fn_raw = savefn & 0x00FFFFFFFFFFFFFFULL;
-            fprintf(dbgout, "  Bug173: frame savefn=0x%lx (raw 0x%lx)\n",
-                    (unsigned long)savefn, (unsigned long)fn_raw);
-
-            if (fn_raw > 0x200000000ULL && fn_raw < 0x400000000000ULL) {
-              /* Read the EXACT slot the instruction accesses */
-              LispObj *fn_data = (LispObj *)fn_raw;
-              LispObj expected_x9 = *(LispObj *)(fn_raw + offset);
-              fprintf(dbgout, "  Bug173: EXPECTED x9 = [fn+0x%x] = 0x%lx\n",
-                      offset, (unsigned long)expected_x9);
-              fprintf(dbgout, "  Bug173: ACTUAL   x9 = 0x%lx\n",
-                      (unsigned long)x9_reg);
-              fprintf(dbgout, "  Bug173: MATCH = %d\n", expected_x9 == x9_reg);
-
-              /* If mismatch, try to understand why */
-              if (expected_x9 != x9_reg) {
-                /* Maybe x10 was NOT fn at instruction time.
-                   Scan the heap for an object where [obj+offset] == x9_reg */
-                fprintf(dbgout, "  Bug173: MISMATCH! Memory says 0x%lx but CPU loaded 0x%lx\n",
-                        (unsigned long)expected_x9, (unsigned long)x9_reg);
-
-                /* Decode lr-20: should be reload-self = ldr x10, [x29, #0x10] = 0xf9400baa */
-                if (insn_m20 == 0xf9400baa) {
-                  fprintf(dbgout, "  Bug173: reload-self at lr-20 CONFIRMED (ldr x10, [x29, #0x10])\n");
-                } else {
-                  fprintf(dbgout, "  Bug173: lr-20 = 0x%08x is NOT reload-self!\n", insn_m20);
-                  /* Maybe there's intervening code. Search backwards for reload-self */
-                  for (int bi = 6; bi <= 20; bi++) {
-                    if (code_at_lr[-bi] == 0xf9400baa) {
-                      fprintf(dbgout, "  Bug173: reload-self found at lr-%d\n", bi*4);
-                      break;
-                    }
-                  }
-                }
-
-                /* Check if x9 looks like it came from a DIFFERENT function.
-                   Find what object contains x9_reg at that offset. */
-                natural x9_raw = x9_reg & 0x00FFFFFFFFFFFFFFULL;
-
-                /* Check all frames for a function that has x9 at that offset */
-                natural check_fp = fp0;
-                for (int fi = 0; fi < 10 && check_fp > 0x100000000ULL && check_fp < 0x200000000000ULL; fi++) {
-                  LispObj *fr = (LispObj *)check_fp;
-                  LispObj fr_fn = fr[2];
-                  natural fr_fn_raw = fr_fn & 0x00FFFFFFFFFFFFFFULL;
-                  if (fr_fn_raw > 0x200000000ULL && fr_fn_raw < 0x400000000000ULL) {
-                    LispObj slot_val = *(LispObj *)(fr_fn_raw + offset);
-                    fprintf(dbgout, "  Bug173: frame[%d] fn=0x%lx [fn+0x%x]=0x%lx %s\n",
-                            fi, (unsigned long)fr_fn, offset, (unsigned long)slot_val,
-                            slot_val == x9_reg ? "*** MATCH ***" : "");
-                  }
-                  check_fp = (natural)fr[3];
-                }
-
-                /* Raw memory dump around the expected slot */
-                fprintf(dbgout, "  Bug173: raw memory around fn+0x%x:\n", offset);
-                for (int di = -2; di <= 4; di++) {
-                  natural addr = fn_raw + offset + di * 8;
-                  LispObj val = *(LispObj *)addr;
-                  fprintf(dbgout, "    [fn+0x%x] = 0x%016lx%s\n",
-                          (int)(offset + di * 8), (unsigned long)val,
-                          (int)(offset + di * 8) == (int)offset ? " <-- expected" : "");
-                }
-              }
-
-              /* Also dump first 16 slots */
-              LispObj fn_hdr = fn_data[-1];
-              natural nslots = fn_hdr & 0x00FFFFFFFFFFFFFFULL;
-              fprintf(dbgout, "  Bug173: fn hdr=0x%lx nslots=%lu\n",
-                      (unsigned long)fn_hdr, (unsigned long)nslots);
-              if (nslots > 0 && nslots < 200) {
-                for (natural si = 0; si < nslots && si < 20; si++) {
-                  fprintf(dbgout, "    [%lu] = 0x%016lx\n",
-                          (unsigned long)si, (unsigned long)fn_data[si]);
-                }
-              }
-            }
-          }
-        } else {
-          fprintf(dbgout, "  Bug173: lr-16 = 0x%08x NOT ldr x9, [x10, #imm] pattern\n", insn_m16);
-          /* Still dump frame info */
-          if (fp0 > 0x100000000ULL && fp0 < 0x200000000000ULL) {
-            LispObj *fr = (LispObj *)fp0;
-            fprintf(dbgout, "  Bug173: [fp+0]=0x%lx [fp+8]=0x%lx [fp+16]=0x%lx [fp+24]=0x%lx\n",
-                    (unsigned long)fr[0], (unsigned long)fr[1],
-                    (unsigned long)fr[2], (unsigned long)fr[3]);
-          }
-        }
-      }
-    }
-    /* Bug 173: scan entire function for branches to the fcell-load instruction.
-       If a branch skips the reload-self and ref-constant, x9 would have a stale value. */
-    if (ts->__lr > 0x200000000ULL && ts->__lr < 0x400000000000ULL) {
-      natural lr = ts->__lr;
-      natural fp0 = ts->__fp;
-      if (fp0 > 0x100000000ULL && fp0 < 0x200000000000ULL) {
-        LispObj savefn = ((LispObj *)fp0)[2];
-        natural fn_raw = savefn & 0x00FFFFFFFFFFFFFFULL;
-        if (fn_raw > 0x200000000ULL && fn_raw < 0x400000000000ULL) {
-          natural entrypoint = *(natural *)fn_raw;  /* slot[0] = entrypoint */
-          /* Scan from entrypoint to lr for branches to the fcell-load (lr-12) or later */
-          natural fcell_addr = lr - 12;  /* ldr x10, [x9, #0x10] */
-          natural ref_const_addr = lr - 16;  /* ldr x9, [x10, #offset] */
-          natural reload_self_addr = lr - 20;  /* ldr x10, [x29, #0x10] */
-          fprintf(dbgout, "  Bug173 branch scan: entry=0x%lx lr=0x%lx\n",
-                  (unsigned long)entrypoint, (unsigned long)lr);
-          fprintf(dbgout, "  Bug173 targets: reload=0x%lx refconst=0x%lx fcell=0x%lx\n",
-                  (unsigned long)reload_self_addr, (unsigned long)ref_const_addr,
-                  (unsigned long)fcell_addr);
-          for (natural pc = entrypoint; pc < lr; pc += 4) {
-            opcode insn = *(opcode *)pc;
-            natural branch_target = 0;
-            const char *btype = NULL;
-            /* Conditional branch: b.cond */
-            if ((insn >> 24) == 0x54) {
-              int imm19 = (insn >> 5) & 0x7FFFF;
-              if (imm19 >= (1 << 18)) imm19 -= (1 << 19);
-              branch_target = pc + imm19 * 4;
-              int cond = insn & 0xF;
-              static const char *cnames[] = {"eq","ne","hs","lo","mi","pl","vs","vc",
-                                              "hi","ls","ge","lt","gt","le","al","nv"};
-              btype = cnames[cond];
-            }
-            /* Unconditional branch: b */
-            if ((insn >> 26) == 0x05) {
-              int imm26 = insn & 0x3FFFFFF;
-              if (imm26 >= (1 << 25)) imm26 -= (1 << 26);
-              branch_target = pc + imm26 * 4;
-              btype = "b";
-            }
-            /* Check if branch targets the critical region (fcell_addr through blr) */
-            if (btype && branch_target >= fcell_addr && branch_target <= lr) {
-              fprintf(dbgout, "  *** BRANCH to critical region: 0x%lx: b.%s -> 0x%lx",
-                      (unsigned long)pc, btype, (unsigned long)branch_target);
-              if (branch_target == fcell_addr) fprintf(dbgout, " (fcell-load!)");
-              else if (branch_target == ref_const_addr) fprintf(dbgout, " (ref-constant)");
-              else if (branch_target == reload_self_addr) fprintf(dbgout, " (reload-self)");
-              fprintf(dbgout, "\n");
-            }
-          }
-          fprintf(dbgout, "  Bug173 branch scan complete\n");
-        }
-      }
-    }
-    /* Bug 173: check if slot[11] was modified after W^X page flip */
-    if (bug173_flip_count > 0) {
-      LispObj slot11_now = *(LispObj *)(0x30200006dad0ULL);
-      fprintf(dbgout, "  Bug173: slot11 at W^X flip = 0x%lx, slot11 now = 0x%lx, CHANGED=%d, flips=%d\n",
-              (unsigned long)bug173_slot11_at_flip, (unsigned long)slot11_now,
-              bug173_slot11_at_flip != slot11_now, bug173_flip_count);
-    }
-    /* Bug 173: dump W^X ring buffer — look for page flips near the crash */
-    {
-      /* wx_ring, wx_idx, wx_total are file-scope globals */
-      fprintf(dbgout, "  Bug173 W^X: total=%d, last %d entries:\n",
-              wx_total, wx_total < 16 ? wx_total : 16);
-      for (int wi = (wx_total < 16 ? 0 : wx_total - 16); wi < wx_total; wi++) {
-        int ri = wi & 63;
-        fprintf(dbgout, "    [%d] fault=0x%lx pc=0x%lx %s\n",
-                wi, (unsigned long)wx_ring[ri].fault, (unsigned long)wx_ring[ri].pc,
-                wx_ring[ri].direction ? "EXEC" : "DATA");
-      }
-    }
+    /* Bug 173 diagnostics removed (Bug 176) */
     fflush(dbgout);
     signum = SIGBUS;
     if (tcr->valence != TCR_STATE_LISP) {
@@ -6617,87 +6373,6 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
               out_ts->__x[allocbase] = (LispObj)oldlimit;
               tcr->save_allocbase = (void *)oldlimit;
               out_ts->__pc = ts->__pc + 4;
-              /* Bug 173: alloc trap diagnostics removed */
-              /* Bug 173: check slot[11] at EVERY alloc trap to detect corruption */
-              {
-                LispObj slot11_chk = *(LispObj *)0x30200006dad0ULL;
-                if (slot11_chk != 0x63003020000678e8ULL) {
-                  fprintf(dbgout, "*** Bug173-ALLOC: slot[11] CORRUPTED at alloc trap! "
-                          "val=0x%lx pc=0x%lx lr=0x%lx fp=0x%lx\n",
-                          (unsigned long)slot11_chk, (unsigned long)ts->__pc,
-                          (unsigned long)ts->__lr, (unsigned long)ts->__fp);
-                  /* Walk frames to see call chain */
-                  natural wfp = (natural)ts->__fp;
-                  for (int wi = 0; wi < 8 && wfp > 0x100000000ULL && wfp < 0x200000000000ULL; wi++) {
-                    LispObj *wf = (LispObj *)wfp;
-                    fprintf(dbgout, "  frame[%d] fp=0x%lx lr=0x%lx fn=0x%lx\n",
-                            wi, (unsigned long)wfp, (unsigned long)wf[1], (unsigned long)wf[2]);
-                    wfp = (natural)wf[3];
-                  }
-                  fflush(dbgout);
-                }
-              }
-              /* Bug 173: verify register copy integrity */
-              if (out_ts->__x[10] != ts->__x[10]) {
-                fprintf(dbgout, "*** Bug173: x10 CORRUPTED by alloc copy! in=0x%lx out=0x%lx pc=0x%lx\n",
-                        (unsigned long)ts->__x[10], (unsigned long)out_ts->__x[10],
-                        (unsigned long)ts->__pc);
-                fflush(dbgout);
-              }
-              if (out_ts->__x[9] != ts->__x[9]) {
-                fprintf(dbgout, "*** Bug173: x9 CORRUPTED by alloc copy! in=0x%lx out=0x%lx pc=0x%lx\n",
-                        (unsigned long)ts->__x[9], (unsigned long)out_ts->__x[9],
-                        (unsigned long)ts->__pc);
-                fflush(dbgout);
-              }
-              if (out_ts->__fp != ts->__fp) {
-                fprintf(dbgout, "*** Bug173: fp CORRUPTED by alloc copy! in=0x%lx out=0x%lx pc=0x%lx\n",
-                        (unsigned long)ts->__fp, (unsigned long)out_ts->__fp,
-                        (unsigned long)ts->__pc);
-                fflush(dbgout);
-              }
-              /* Bug 166: check x29 validity at every alloc trap */
-              {
-                static int alloc_check_count = 0;
-                natural fp166 = (natural)ts->__fp;
-                alloc_check_count++;
-                /* Check if x29 has upper bits set (code area) or is invalid */
-                if (fp166 & 0xFFFFFF0000000000ULL) {
-                  fprintf(dbgout, "BUG166-ALLOC[%d]: x29=0x%lx INVALID at alloc trap! pc=0x%lx lr=0x%lx sp=0x%lx nfn=0x%lx\n",
-                          alloc_check_count, (unsigned long)fp166,
-                          (unsigned long)ts->__pc, (unsigned long)ts->__lr,
-                          (unsigned long)ts->__sp, (unsigned long)ts->__x[10]);
-                  /* Dump frame at the PREVIOUS valid fp if possible */
-                  LispObj *f = (LispObj *)fp166;
-                  /* Try reading — this might be in code area which is readable */
-                  if (fp166 > 0x200000000000ULL && fp166 < 0x400000000000ULL) {
-                    fprintf(dbgout, "  Data@x29(code): [+0]=0x%lx [+8]=0x%lx [+16]=0x%lx [+24]=0x%lx\n",
-                            (unsigned long)f[0], (unsigned long)f[1],
-                            (unsigned long)f[2], (unsigned long)f[3]);
-                  }
-                  fflush(dbgout);
-                }
-                /* Also check frame contents at valid fp */
-                if (fp166 > 0x100000000ULL && fp166 < 0x200000000ULL) {
-                  LispObj *f = (LispObj *)fp166;
-                  LispObj savefp = f[3];
-                  /* Check if savefp (slot 3) has code address (corruption) */
-                  if (savefp & 0xFFFFFF0000000000ULL) {
-                    static int frame_corrupt_count = 0;
-                    frame_corrupt_count++;
-                    if (frame_corrupt_count <= 10) {
-                      fprintf(dbgout, "BUG166-FRAME[%d]: savefp=0x%lx at alloc#%d! fp=0x%lx pc=0x%lx lr=0x%lx\n",
-                              frame_corrupt_count, (unsigned long)savefp,
-                              alloc_check_count, (unsigned long)fp166,
-                              (unsigned long)ts->__pc, (unsigned long)ts->__lr);
-                      fprintf(dbgout, "  frame: [+0]=0x%lx [+8]=0x%lx [+16]=0x%lx [+24]=0x%lx\n",
-                              (unsigned long)f[0], (unsigned long)f[1],
-                              (unsigned long)f[2], (unsigned long)f[3]);
-                      fflush(dbgout);
-                    }
-                  }
-                }
-              }
               kret = KERN_SUCCESS;
               goto done;
             }
@@ -6730,6 +6405,26 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
       out_ts->__sp = misaligned_sp & ~0xFULL;
       kret = KERN_SUCCESS;
       goto done;
+    }
+
+    /* Bug 177: require-char-code vinsn fires uuo-cerror-reg-not-xtype with
+       info=tag_character on every code-char call (the input is a fixnum, not
+       a character).  Handle directly in Mach handler to avoid the expensive
+       signal handler roundtrip.  Just advance PC past the HLT instruction. */
+    if (exception == EXC_BAD_INSTRUCTION && tcr->valence == TCR_STATE_LISP) {
+      opcode hlt_insn = *(opcode *)(natural)ts->__pc;
+      if ((hlt_insn & 0xFFE0001F) == 0xD4400000) { /* HLT instruction */
+        unsigned hlt_imm16 = (hlt_insn >> 5) & 0xFFFF;
+        unsigned hlt_fmt = hlt_imm16 & 7;
+        unsigned hlt_info = (hlt_imm16 >> 8) & 0xFF;
+        if (hlt_fmt == 4 && hlt_info == tag_character) {
+          /* This is require-char-code on a fixnum input.  Skip past HLT. */
+          *out_ts = *ts;
+          out_ts->__pc = ts->__pc + 4;
+          kret = KERN_SUCCESS;
+          goto done;
+        }
+      }
     }
 
     switch (exception) {

@@ -1443,9 +1443,14 @@ _spentry(fitvals)
 0:      __(ret)
 
 
+/* Bug 176: On ARM64, fixnumshift=0 but node_shift=3, so a fixnum index
+   n has raw value n, not n*node_size.  Must scale by node_shift before
+   using as a byte offset.  (ARM32/x86-64 have fixnumshift=node_shift,
+   so the fixnum already encodes the byte offset.) */
 _spentry(nthvalue)
         __(add imm0,vsp,nargs)
         __(ldr imm1,[imm0,#0])
+        __(lsl imm1,imm1,#node_shift)  /* Bug 176: scale fixnum index to byte offset */
         __(cmp imm1,nargs) /*  do unsigned compare:  if (n < 0) => nil.  */
         __(mov arg_z,rnil)
         __(neg imm1,imm1)

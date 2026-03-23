@@ -4051,13 +4051,20 @@
 
 ;;; Character / string operations
 
+;;; Bug 177: require-char-code must check that a FIXNUM is a valid character
+;;; code, not that it's already a character.  The input is a fixnum from
+;;; code-char; check tag=0x00 (positive fixnum) and value < char-code-limit.
 (define-arm64-vinsn require-char-code (()
                                         ((object :lisp))
                                         ((tag :u8)))
   (lsr tag object (:$ arm64::tag-shift))
-  (cmp tag (:$ arm64::tag-character))
+  (cmp tag (:$ 0))
+  (b.ne :bad)
+  (lsr tag object (:$ 21))
+  (cmp tag (:$ 0))
   (b.eq :ok)
-  (uuo-cerror-reg-not-xtype object (:$ arm64::tag-character))
+  :bad
+  (uuo-cerror-reg-not-xtype object (:$ arm64::xtype-char-code))
   :ok)
 
 (define-arm64-vinsn (code-char->char :predicatable) (((dest :lisp))
