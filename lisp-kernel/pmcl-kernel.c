@@ -2454,6 +2454,33 @@ main
     fflush(dbgout);
   }
 #endif
+  /* Bug 173: WORKAROUND — unconditionally skip the (when binding-index ...)
+     block in %FASL-NVINTERN.  Patch branch at 0x3000000bcd14 from
+     conditional (b.eq #0x50) to unconditional (b #0x50).
+     This avoids the crashing ref-constant at 0x3000000bcd50. */
+#if defined(ARM64) && defined(DARWIN)
+  if (readonly_area) {
+    unsigned int *patchC = (unsigned int *)0x3000000bcd14ULL;
+    natural page_C = ((natural)patchC) & ~(page_size - 1);
+
+    fprintf(dbgout, "Bug173-SKIP: addr=0x%lx insn=0x%08x\n",
+            (unsigned long)patchC, *patchC);
+
+    if (*patchC == 0x54000280) {
+      mprotect((void *)page_C, page_size, PROT_READ | PROT_WRITE);
+      *patchC = 0x14000014;  /* b #0x50 (unconditional) */
+      sys_icache_invalidate((void *)page_C, page_size);
+      mprotect((void *)page_C, page_size, PROT_READ | PROT_EXEC);
+
+      fprintf(dbgout, "Bug173-SKIP: PATCHED to 0x%08x (unconditional branch)\n",
+              *patchC);
+      fflush(dbgout);
+    } else {
+      fprintf(dbgout, "Bug173-SKIP: instruction mismatch, NOT patching.\n");
+      fflush(dbgout);
+    }
+  }
+#endif
   start_lisp(TCR_TO_TSD(tcr), 0);
   _exit(0);
 }

@@ -53,6 +53,7 @@ int wx_total = 0;
 /* Bug 173: snapshot of slot[11] when the constant page is flipped to RW */
 LispObj bug173_slot11_at_flip = 0;
 int bug173_flip_count = 0;
+/* Bug 173: (diagnostic globals removed — skip workaround in pmcl-kernel.c) */
 
 /* Bug 156: global scratch for SPgvector exit → SPgvset entry cross-check.
    These must be global (not TCR) because exception handling clobbers TCR fields. */
@@ -6632,59 +6633,7 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
        entirely. */
     if (exception == EXC_BAD_INSTRUCTION) {
       opcode insn = *(opcode *)(natural)ts->__pc;
-      /* Bug 173: emulate ref-constant via HLT #0x173 interception */
-      if (insn == 0xd4002e60) {
-        /* Emulate: ldr x9, [x10, #0x58] at the patched instruction */
-        native_thread_state_t *emu_ts = (native_thread_state_t *)in_state;
-        native_thread_state_t *emu_out = (native_thread_state_t *)out_state;
-        natural x10_val = emu_ts->__x[10];
-        natural x10_raw = x10_val & 0x00FFFFFFFFFFFFFFULL;
-        LispObj loaded_val = *(LispObj *)(x10_raw + 0x58);
-        static int emu_count = 0;
-        emu_count++;
-        {
-          /* Also check sptab[71] = TCR+0x3b8 */
-          natural rctx = emu_ts->__x[28];
-          LispObj sptab71 = *(LispObj *)(rctx + 0x3b8);
-          fprintf(dbgout, "Bug173-EMU[%d]: x10=0x%lx raw=0x%lx [+0x58]=0x%lx pc=0x%lx sptab[71]=0x%lx\n",
-                  emu_count, (unsigned long)x10_val, (unsigned long)x10_raw,
-                  (unsigned long)loaded_val, (unsigned long)emu_ts->__pc,
-                  (unsigned long)sptab71);
-          /* Also check the FULL call-known-symbol chain */
-          if ((loaded_val >> 56) == 0x63) { /* symbol tag */
-            natural sym_raw = loaded_val & 0x00FFFFFFFFFFFFFFULL;
-            LispObj fcell = *(LispObj *)(sym_raw + 0x10);
-            fprintf(dbgout, "  EMU: symbol.fcell = 0x%lx\n", (unsigned long)fcell);
-            if ((fcell >> 56) == 0x62) { /* function tag */
-              natural fn_raw = fcell & 0x00FFFFFFFFFFFFFFULL;
-              LispObj entrypoint = *(LispObj *)fn_raw;
-              fprintf(dbgout, "  EMU: function.entrypoint = 0x%lx\n", (unsigned long)entrypoint);
-              /* Check if entrypoint is in code area */
-              if (entrypoint >= 0x300000000000ULL && entrypoint < 0x3000001000000ULL) {
-                fprintf(dbgout, "  EMU: entrypoint looks VALID (code area)\n");
-              } else {
-                fprintf(dbgout, "  EMU: *** entrypoint NOT in code area! ***\n");
-              }
-            } else {
-              fprintf(dbgout, "  EMU: fcell NOT a function! tag=0x%02lx\n",
-                      (unsigned long)(fcell >> 56));
-            }
-          }
-          fflush(dbgout);
-        }
-        *emu_out = *emu_ts;
-        /* Bug 173: SKIP the entire call — set PC past the blr (pc+16),
-           set arg_z (x15) to nil (return value), and nfn to frame savefn.
-           This tests whether the EMU handler output is actually applied. */
-        emu_out->__pc = emu_ts->__pc + 16;  /* skip HLT + 3 insns to after blr */
-        emu_out->__x[15] = emu_ts->__x[6]; /* arg_z = nil */
-        emu_out->__x[10] = *(LispObj *)((natural)emu_ts->__fp + 0x10); /* reload nfn from frame */
-        fprintf(dbgout, "  EMU: SKIPPING call, setting pc=0x%lx nfn=0x%lx arg_z=nil\n",
-                (unsigned long)emu_out->__pc, (unsigned long)emu_out->__x[10]);
-        *out_state_count = in_state_count;
-        kret = KERN_SUCCESS;
-        goto done;
-      }
+      /* Bug 173: diagnostic trap handlers removed (workaround in pmcl-kernel.c) */
       if (IS_ALLOC_TRAP(insn)) {
         signed_natural disp = 0;
         opcode *pc = (opcode *)(natural)ts->__pc;
@@ -6746,6 +6695,7 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
               out_ts->__x[allocbase] = (LispObj)oldlimit;
               tcr->save_allocbase = (void *)oldlimit;
               out_ts->__pc = ts->__pc + 4;
+              /* Bug 173: alloc trap diagnostics removed */
               /* Bug 173: check slot[11] at EVERY alloc trap to detect corruption */
               {
                 LispObj slot11_chk = *(LispObj *)0x30200006dad0ULL;
