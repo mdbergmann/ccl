@@ -34,7 +34,8 @@ typedef enum {
   AREA_MANAGED_STATIC = 7<<fixnumshift, /* A resizable static area */
   AREA_STATIC = 8<<fixnumshift, /* A  static section: contains
                                  roots, but not GCed */
-  AREA_DYNAMIC = 9<<fixnumshift /* A heap. Only one such area is "the heap."*/
+  AREA_DYNAMIC = 9<<fixnumshift, /* A heap. Only one such area is "the heap."*/
+  AREA_CODE = 10<<fixnumshift   /* MAP_JIT code heap for ARM64 W^X */
 } area_code;
 
 typedef struct area {
@@ -179,5 +180,9 @@ extern BytePtr static_space_start, static_space_active, static_space_limit;
 extern area *find_readonly_area(void);
 extern BytePtr low_relocatable_address, high_relocatable_address,
   low_markable_address, high_markable_address, reserved_region_end;
+
+#ifdef ARM64
+extern BytePtr code_space_start, code_space_active, code_space_limit;
+#endif
 
 #endif /* __AREA_H__ */

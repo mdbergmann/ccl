@@ -222,6 +222,27 @@ MapMemoryForStack(natural nbytes)
 }
 
 
+#if defined(DARWIN) && defined(ARM64)
+/* Allocate memory with MAP_JIT for the code heap.
+   MAP_JIT + MAP_FIXED = EINVAL on macOS, so we must accept the
+   kernel-chosen address.  The region starts writable; use
+   pthread_jit_write_protect_np() for fast per-thread W<->X toggling. */
+LogicalAddress
+MapMemoryForCode(natural nbytes)
+{
+  LogicalAddress p;
+  p = mmap(NULL, nbytes, PROT_READ | PROT_WRITE | PROT_EXEC,
+           MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
+  if (p == MAP_FAILED) {
+    perror("MapMemoryForCode (MAP_JIT)");
+    return MAP_FAILED;
+  }
+  /* Start in writable mode so boot code can copy code vectors in */
+  pthread_jit_write_protect_np(false);
+  return p;
+}
+#endif
+
 /* Cause the mapped memory region at ADDR to become completely unmapped.
    ADDR should be an address returned by MapMemoryForStack() or MapMemory(),
    and NBYTES should be the size of the mapped region at that address. */

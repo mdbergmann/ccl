@@ -896,102 +896,54 @@ handle_protection_violation(ExceptionInformation *xp, siginfo_t *info,
   }
 
 #if defined(DARWIN) && defined(ARM64)
-  /* W^X page toggle for macOS ARM64.
-     Pages cannot be simultaneously writable and executable.
-     Heap pages start as RX (after make_heap_executable).
-     Write faults toggle individual pages to RW.
-     Execute faults toggle pages back to RX.
-     Note: use 'struct area' to avoid shadowing by local 'area' variable. */
+  /* W^X handling with MAP_JIT code heap (signal handler path).
+     - Static area: mprotect-based W^X toggle
+     - Dynamic area instruction fetch: lazy copy to code heap */
   {
     uint32_t esr = UC_MCONTEXT(xp)->__es.__esr;
     uint32_t ec = (esr >> 26) & 0x3F;
-    struct area *dyn = (struct area *)((struct area *)all_areas)->succ;
-    /* Bug 123 fix: strip TBI tag from addr before heap bounds check */
     natural addr_raw = (natural)addr & 0x00FFFFFFFFFFFFFFULL;
-    Boolean in_heap = ((addr_raw >= dyn->low && addr_raw < dyn->high) ||
-                       (addr_raw >= (natural)static_space_start &&
-                        addr_raw < (natural)static_space_limit));
+    Boolean in_static = (addr_raw >= (natural)static_space_start &&
+                         addr_raw < (natural)static_space_limit);
 
-    if (!in_heap) {
-      fprintf(dbgout, "W^X: addr=%p NOT in heap. dyn=[%p..%p) static=[%p..%p)\n",
-              addr, (void*)dyn->low, (void*)dyn->high,
-              (void*)(natural)static_space_start, (void*)(natural)static_space_limit);
-      {
-        struct area *adyn = (struct area *)((struct area *)all_areas)->succ;
-        fprintf(dbgout, "  active_dyn: low=%p active=%p high=%p\n",
-                (void*)adyn->low, (void*)adyn->active, (void*)adyn->high);
-      }
-      /* Dump code around faulting PC — extended range */
-      {
-        opcode *fpc = (opcode *)xpPC(xp);
-        if ((natural)fpc > 0x100000000ULL) {
-          int ci;
-          fprintf(dbgout, "  code@pc-128:\n");
-          for (ci=-32; ci<=16; ci++) {
-            if (ci == 0) fprintf(dbgout, " >>>");
-            fprintf(dbgout, " %08x", fpc[ci]);
-            if (ci == 0) fprintf(dbgout, "<<<");
-            if ((ci % 8) == 7) fprintf(dbgout, "\n");
-          }
-          fprintf(dbgout, "\n");
-        }
-      }
-      /* Dump registers and vector header for diagnosis */
-      {
-        natural x14_raw = xpGPR(xp, 14) & 0x00FFFFFFFFFFFFFFULL;
-        fprintf(dbgout, "  regs: x9=0x%lx x10=0x%lx x11=0x%lx x14=0x%lx x15=0x%lx x25=0x%lx\n",
-                (unsigned long)xpGPR(xp, 9), (unsigned long)xpGPR(xp, 10),
-                (unsigned long)xpGPR(xp, 11), (unsigned long)xpGPR(xp, 14),
-                (unsigned long)xpGPR(xp, 15), (unsigned long)xpGPR(xp, 25));
-        /* Dump hash vector overhead slots from x9 (the vector base in %hash-probe) */
-        {
-          natural x9_raw = xpGPR(xp, 9) & 0x00FFFFFFFFFFFFFFULL;
-          /* Check if x9 points to somewhere in the full heap (including tenured) */
-          natural heap_start = 0x302000000000ULL;  /* known dynamic area base */
-          natural heap_end = (natural)dyn->high;
-          if (x9_raw >= heap_start && x9_raw < heap_end) {
-            LispObj *vec = (LispObj *)x9_raw;
-            LispObj hdr = ((LispObj *)(x9_raw - 8))[0];
-            int vi;
-            fprintf(dbgout, "  hash-vector@0x%lx hdr=0x%lx (subtag=0x%lx count=%lu):\n",
-                    (unsigned long)x9_raw, (unsigned long)hdr,
-                    (unsigned long)(hdr >> 56),
-                    (unsigned long)(hdr & 0x00FFFFFFFFFFFFFFULL));
-            fprintf(dbgout, "  overhead slots [0..13]:");
-            for (vi = 0; vi < 14; vi++)
-              fprintf(dbgout, " [%d]=0x%lx", vi, (unsigned long)vec[vi]);
-            fprintf(dbgout, "\n");
-            fprintf(dbgout, "  entries(slot12)=%ld size-recip(slot13)=0x%lx\n",
-                    (long)vec[12], (unsigned long)vec[13]);
-          } else {
-            fprintf(dbgout, "  x9_raw=0x%lx NOT in heap [0x%lx..0x%lx)\n",
-                    (unsigned long)x9_raw, (unsigned long)heap_start, (unsigned long)heap_end);
-          }
-        }
-        /* Dump stack slots around vsp for context */
-        {
-          LispObj *vsp_ptr = (LispObj *)xpGPR(xp, 25);
-          int si;
-          fprintf(dbgout, "  vsp dump:");
-          for (si=0; si<16; si++)
-            fprintf(dbgout, " [%d]=0x%lx", si, (unsigned long)vsp_ptr[si]);
-          fprintf(dbgout, "\n");
-        }
-      }
-    }
-
-    if (in_heap) {
+    if (in_static) {
       natural page_start = truncate_to_power_of_2(addr_raw, log2_page_size);
 
       if (ec == 0x20 || ec == 0x21) {
-        /* Instruction Abort: page is RW, needs RX for code execution */
         sys_icache_invalidate((void *)page_start, page_size);
         mprotect((void *)page_start, page_size, PROT_READ | PROT_EXEC);
         return true;
       } else if ((ec == 0x24 || ec == 0x25) && (esr & (1 << 6))) {
-        /* Data Abort with WnR=1: write fault, page needs RW */
         mprotect((void *)page_start, page_size, PROT_READ | PROT_WRITE);
         return true;
+      }
+    }
+    /* Dynamic area instruction fetch: lazy copy to code heap.
+       (Most exec faults go through Mach handler, but handle here too.) */
+    if ((ec == 0x20 || ec == 0x21) && code_space_start) {
+      struct area *dyn = (struct area *)((struct area *)all_areas)->succ;
+      BytePtr hs = (BytePtr)(natural)lisp_global(HEAP_START);
+      if (addr_raw >= (natural)hs && addr_raw < (natural)dyn->high) {
+        natural nfn_val = xpGPR(xp, 10) & 0x00FFFFFFFFFFFFFFULL;
+        LispObj *fn_slots = (LispObj *)nfn_val;
+        LispObj fn_hdr = fn_slots[-1];
+        if (nfn_val >= (natural)hs && nfn_val < (natural)dyn->high &&
+            header_subtag(fn_hdr) == subtag_function) {
+          LispObj cv_tagged = fn_slots[1];
+          natural cv_untagged = untag(cv_tagged);
+          LispObj *cv_header = (LispObj *)(cv_untagged - node_size);
+          LispObj cv_hdr_val = *cv_header;
+          natural cv_total = (natural)skip_over_ivector((natural)cv_header, cv_hdr_val)
+                             - (natural)cv_header;
+          void *code_copy = copy_code_vector_to_code_heap(cv_header, cv_total);
+          if (code_copy) {
+            natural new_entry = (natural)code_copy + node_size;
+            natural pc_offset = addr_raw - cv_untagged;
+            fn_slots[0] = (LispObj)new_entry;
+            xpPC(xp) = (pc)(new_entry + pc_offset);
+            return true;
+          }
+        }
       }
     }
   }
@@ -5677,113 +5629,83 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
         }
       }
     }
-    /* W^X page toggle: handle protection faults directly in the Mach
-       exception handler without going through the signal machinery.
-       code[1] is the fault address on ARM64 macOS. */
+    /* W^X handling with MAP_JIT code heap (Mach exception handler path).
+       - Static area: mprotect-based W^X toggle (spjump table + kernel globals)
+       - Dynamic area instruction fetch: lazy copy to code heap
+       - Dynamic area stays permanently RW (no data write faults) */
     natural fault_addr = (natural)code[1] & 0x00FFFFFFFFFFFFFF;  /* strip TBI tag */
-    area *a = active_dynamic_area;
-    BytePtr heap_start = (BytePtr)(natural)lisp_global(HEAP_START);
-    Boolean in_heap = (a && heap_start &&
-                       (BytePtr)fault_addr >= heap_start &&
-                       (BytePtr)fault_addr < a->high);
+    natural pc_untagged = (natural)ts->__pc & 0x00FFFFFFFFFFFFFF;
     Boolean in_static = ((BytePtr)fault_addr >= static_space_start &&
                          (BytePtr)fault_addr < static_space_limit);
-    Boolean in_readonly = (readonly_area &&
-                           (BytePtr)fault_addr >= (BytePtr)readonly_area->low &&
-                           (BytePtr)fault_addr < (BytePtr)readonly_area->active);
+    area *a = active_dynamic_area;
+    BytePtr heap_start = (BytePtr)(natural)lisp_global(HEAP_START);
+    Boolean in_dynamic = (a && heap_start &&
+                          (BytePtr)fault_addr >= heap_start &&
+                          (BytePtr)fault_addr < a->high);
 
-    /* Bug 173: W^X exception ring buffer for debugging */
-    {
-      /* These are file-scope statics declared below; reference them here */
-      if (in_heap || in_static || in_readonly) {
-        natural ps = truncate_to_power_of_2(fault_addr, log2_page_size);
-        natural pcu = (natural)ts->__pc & 0x00FFFFFFFFFFFFFF;
-        int dir = (pcu >= ps && pcu < ps + page_size) ? 1 : 0; /* 1=exec, 0=data */
-        wx_ring[wx_idx & 63].fault = fault_addr;
-        wx_ring[wx_idx & 63].pc = (natural)ts->__pc;
-        wx_ring[wx_idx & 63].direction = dir;
-        wx_idx++;
-        wx_total++;
-        /* Check if W^X is flipping the readonly page containing the function constants.
-           %FASL-NVINTERN fn=0x30200006da78 slot[11] at fn+0x58=0x30200006dad0 */
-        natural slot_addr = 0x30200006dad0ULL;  /* address of slot[11] */
-        natural slot_page = truncate_to_power_of_2(slot_addr, log2_page_size);
-        if (ps == slot_page) {
-          bug173_slot11_at_flip = *(LispObj *)slot_addr;
-          bug173_flip_count++;
-          fprintf(dbgout, "*** W^X on FASL-NVINTERN constant page! fault=0x%lx pc=0x%lx dir=%s total=%d slot11=0x%lx\n",
-                  (unsigned long)fault_addr, (unsigned long)ts->__pc,
-                  dir ? "EXEC" : "DATA", wx_total,
-                  (unsigned long)bug173_slot11_at_flip);
-          /* Also dump all registers at this point — who's writing? */
-          fprintf(dbgout, "  W^X regs: pc=0x%lx lr=0x%lx x0=0x%lx x1=0x%lx x2=0x%lx x3=0x%lx\n",
-                  (unsigned long)ts->__pc, (unsigned long)ts->__lr,
-                  (unsigned long)ts->__x[0], (unsigned long)ts->__x[1],
-                  (unsigned long)ts->__x[2], (unsigned long)ts->__x[3]);
-          fprintf(dbgout, "  W^X regs: x9=0x%lx x10=0x%lx x25=0x%lx x28=0x%lx\n",
-                  (unsigned long)ts->__x[9], (unsigned long)ts->__x[10],
-                  (unsigned long)ts->__x[25], (unsigned long)ts->__x[28]);
-          fflush(dbgout);
-        }
-      }
-    }
-    if (in_heap || in_static || in_readonly) {
+    if (in_static) {
       natural page_start = truncate_to_power_of_2(fault_addr, log2_page_size);
-      natural pc_untagged = (natural)ts->__pc & 0x00FFFFFFFFFFFFFF;
 
-      /* Determine if this is an instruction fetch (exec fault) or data write.
-         For Mach exceptions, EXC_BAD_ACCESS with KERN_PROTECTION_FAILURE:
-         Check if PC is at the fault address (exec fault) or elsewhere (data fault).
-         Must strip TBI tag from PC before comparing to page address. */
       if (pc_untagged >= page_start &&
           pc_untagged < page_start + page_size) {
-        /* PC is on the faulting page: instruction fetch fault.
-           Page is RW, needs RX for code execution. */
+        /* Instruction fetch fault: RW→RX for spjump execution */
         sys_icache_invalidate((void *)page_start, page_size);
         mprotect((void *)page_start, page_size, PROT_READ | PROT_EXEC);
       } else {
-        /* Data write fault: page is RX, needs RW for data write. */
+        /* Data write fault: RX→RW for kernel global write */
         mprotect((void *)page_start, page_size, PROT_READ | PROT_WRITE);
       }
-      /* Copy input state to output state to resume the thread */
       *out_ts = *ts;
-      /* Bug 173: check slot[11] at every W^X flip */
-      {
-        LispObj slot11_wx = *(LispObj *)0x30200006dad0ULL;
-        if (slot11_wx != 0x63003020000678e8ULL) {
-          fprintf(dbgout, "*** Bug173-WX: slot[11] CORRUPTED after W^X flip! "
-                  "val=0x%lx fault=0x%lx pc=0x%lx\n",
-                  (unsigned long)slot11_wx, (unsigned long)fault_addr,
-                  (unsigned long)ts->__pc);
-          fflush(dbgout);
-        }
-      }
-      /* Bug 156: check if W^X toggle corrupted the lisp frame */
-      {
-        natural fp156 = (natural)ts->__fp;
-        if (fp156 > 0x100000000ULL && fp156 < 0x200000000ULL) {
-          LispObj savelr = ((LispObj *)fp156)[1];
-          LispObj savefn = ((LispObj *)fp156)[2];
-          if (savelr == 0 && savefn == 0) {
-            static int frame_zero_wxcount = 0;
-            if (frame_zero_wxcount == 0) {
-              frame_zero_wxcount++;
-              fprintf(dbgout, "BUG156-WX: frame zeroed after W^X! fp=0x%lx pc=0x%lx fault=0x%lx page=0x%lx %s\n",
-                      (unsigned long)fp156, (unsigned long)ts->__pc,
-                      (unsigned long)fault_addr, (unsigned long)page_start,
-                      (pc_untagged >= page_start && pc_untagged < page_start + page_size) ? "EXEC" : "DATA");
-              fflush(dbgout);
-            }
-          }
-        }
-      }
       kret = KERN_SUCCESS;
+    } else if (in_dynamic && pc_untagged == fault_addr && code_space_start) {
+      /* Instruction fetch fault in dynamic area: the function's code vector
+         hasn't been copied to the code heap yet (created by FASL loading via
+         Lisp-level %fix-fn-entrypoint which doesn't do code heap copy).
+         Use nfn (x10) to find the code vector, copy to code heap, patch
+         entrypoint, and redirect PC. */
+      natural nfn_val = ts->__x[10] & 0x00FFFFFFFFFFFFFFULL; /* untagged nfn */
+      LispObj *fn_slots = (LispObj *)nfn_val;
+      /* Verify nfn looks like a function (check header) */
+      LispObj fn_hdr = fn_slots[-1];
+      if (nfn_val >= (natural)heap_start && nfn_val < (natural)a->high &&
+          header_subtag(fn_hdr) == subtag_function) {
+        LispObj cv_tagged = fn_slots[1];  /* slot[1] = code vector (tagged) */
+        natural cv_untagged = untag(cv_tagged);  /* code data start */
+        LispObj *cv_header = (LispObj *)(cv_untagged - node_size);
+        LispObj cv_hdr_val = *cv_header;
+        natural cv_total = (natural)skip_over_ivector((natural)cv_header, cv_hdr_val)
+                           - (natural)cv_header;
+        void *code_copy = copy_code_vector_to_code_heap(cv_header, cv_total);
+        if (code_copy) {
+          natural new_entry = (natural)code_copy + node_size;
+          natural pc_offset = pc_untagged - cv_untagged;
+          /* Patch function entrypoint */
+          fn_slots[0] = (LispObj)new_entry;
+          /* Redirect PC to code heap */
+          out_ts->__pc = new_entry + pc_offset;
+          /* Copy rest of state */
+          *out_ts = *ts;
+          out_ts->__pc = new_entry + pc_offset;
+          kret = KERN_SUCCESS;
+        } else {
+          /* Code heap full — cannot recover */
+          fprintf(dbgout, "CODE HEAP FULL: cannot copy code vector for fn@0x%lx\n",
+                  (unsigned long)nfn_val);
+          fflush(dbgout);
+          kret = KERN_FAILURE;
+        }
+      } else {
+        /* nfn doesn't look like a valid function — can't do lazy copy */
+        fprintf(dbgout, "EXEC FAULT in dynamic area but nfn invalid: nfn=0x%lx pc=0x%lx fault=0x%lx\n",
+                (unsigned long)nfn_val, (unsigned long)pc_untagged, (unsigned long)fault_addr);
+        fflush(dbgout);
+        kret = KERN_FAILURE;
+      }
     } else {
-      /* Protection fault outside heap (e.g. vstack guard) — dispatch as SIGBUS */
       /* Dump function name from x10 (nfn) for debugging */
       {
         natural nfn_raw = ts->__x[10] & 0x00FFFFFFFFFFFFFFULL;
-        if (nfn_raw >= (natural)heap_start && nfn_raw < (natural)a->high) {
+        if (a && heap_start && nfn_raw >= (natural)heap_start && nfn_raw < (natural)a->high) {
           /* Function object: slot 0=entrypoint, slot 1=codevector, ... */
           /* Try to find lfun-info or name in the function's constants */
           LispObj *fn_slots = (LispObj *)nfn_raw;

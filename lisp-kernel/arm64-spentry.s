@@ -59,7 +59,27 @@ define(`jump_builtin',`
 _spentry(fix_nfn_entrypoint)
         __(ldr imm0,[nfn,#node_size])              /* load slot 1 = code vector (tagged) */
         __(and imm0,imm0,#0x00FFFFFFFFFFFFFF)      /* strip TBI tag for br/blr */
-        __(str imm0,[nfn,#_function.entrypoint])    /* store untagged into slot 0 */
+        /* MAP_JIT code heap: check if code vector is already in code heap.
+           If not, call C to copy it there before first execution. */
+        __(adrp imm1,_code_space_start@PAGE)
+        __(ldr imm1,[imm1,_code_space_start@PAGEOFF])
+        __(cbz imm1,9f)                            /* no code heap → use as-is */
+        __(cmp imm0,imm1)
+        __(b.lo 1f)                                /* below code heap → need copy */
+        __(adrp imm1,_code_space_limit@PAGE)
+        __(ldr imm1,[imm1,_code_space_limit@PAGEOFF])
+        __(cmp imm0,imm1)
+        __(b.lo 9f)                                /* in code heap → use directly */
+1:      /* Not in code heap — save live Lisp regs and call C */
+        __(stp x30,nfn,[sp,#-48]!)                /* save lr, nfn(x10) */
+        __(stp x5,x13,[sp,#16])                   /* save nargs, arg_x */
+        __(stp x14,x15,[sp,#32])                  /* save arg_y, arg_z */
+        __(bl _fix_entrypoint_copy_to_code_heap)   /* x0=untagged cv addr → x0=code heap addr */
+        __(ldp x14,x15,[sp,#32])                  /* restore arg_y, arg_z */
+        __(ldp x5,x13,[sp,#16])                   /* restore nargs, arg_x */
+        __(ldp x30,nfn,[sp],#48)                  /* restore lr, nfn */
+        /* x0=imm0 already has result from C function */
+9:      __(str imm0,[nfn,#_function.entrypoint])   /* store entrypoint in slot 0 */
         __(br imm0)                                 /* branch to code, nfn preserved */
 _endsubp(fix_nfn_entrypoint)
 

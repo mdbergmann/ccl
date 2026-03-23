@@ -138,5 +138,21 @@ exception_cleanup(void);
 
 void
 initialize_refidx_from_refbits(bitvector, bitvector, natural);
-  
+
+#if defined(DARWIN) && defined(ARM64)
+#include <pthread.h>
+
+static inline void code_heap_make_writable(void) {
+  pthread_jit_write_protect_np(false);
+}
+
+static inline void code_heap_make_executable(void) {
+  pthread_jit_write_protect_np(true);
+}
+
+LogicalAddress MapMemoryForCode(natural nbytes);
+void *allocate_code_vector(natural nbytes);
+void *copy_code_vector_to_code_heap(void *src_header, natural total_bytes);
+#endif
+
 #endif /* __memprotect_h__ */
