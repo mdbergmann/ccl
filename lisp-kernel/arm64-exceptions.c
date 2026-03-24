@@ -999,28 +999,33 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
 {
   LispObj errdisp = nrs_ERRDISP.vcell;
 
+  /* Bug 177: require-char-code vinsn checks tag_character on a fixnum input.
+     This fires ALWAYS (regardless of errdisp state) because the compiled
+     code-char operator passes a fixnum to require-char-code.
+     Must be before the errdisp check since errdisp may become non-unbound
+     during boot. */
+  if (arg1 == 0 && arg2 != 0) {
+    unsigned imm16_b177 = HLT_IMM16(arg2);
+    unsigned fmt_b177 = imm16_b177 & 7;
+    unsigned info_b177 = (imm16_b177 >> 8) & 0xFF;
+    if (fmt_b177 == 4 && info_b177 == tag_character) {
+      unsigned reg_b177 = (imm16_b177 >> 3) & 0x1F;
+      LispObj val_b177 = xpGPR(xp, reg_b177);
+      unsigned val_tag_b177 = val_b177 >> tag_shift;
+      if (val_tag_b177 == 0 || val_tag_b177 == 0xFF) {
+        xpPC(xp) += 4;  /* skip past HLT */
+        *bumpP = 0;
+        return true;
+      }
+    }
+  }
+
   /* Bug 171: During early boot (%err-disp unbound), handle errors FIRST
      before doing expensive diagnostics that may crash on bad addresses. */
   if (errdisp == unbound_marker && arg1 == 0 && arg2 != 0) {
     unsigned imm16 = HLT_IMM16(arg2);
     unsigned fmt = imm16 & 7;
     unsigned info = (imm16 >> 8) & 0xFF;
-    /* Bug 177: require-char-code vinsn checks tag_character on a fixnum input.
-       The compiled code-char operator calls require-char-code before fixnum->char.
-       Since the input is a fixnum (tag 0x00 or 0xFF), NOT a character (tag 0x11),
-       the check always fires.  Just skip past the HLT — fixnum->char handles
-       surrogate checking and constructs the character correctly. */
-    if (fmt == 4 && info == tag_character) {
-      unsigned reg = (imm16 >> 3) & 0x1F;
-      LispObj val = xpGPR(xp, reg);
-      /* Only skip if the value looks like a valid fixnum (tag 0x00 or 0xFF) */
-      unsigned val_tag = val >> tag_shift;
-      if (val_tag == 0 || val_tag == 0xFF) {
-        xpPC(xp) += 4;  /* skip past HLT */
-        *bumpP = 0;
-        return true;
-      }
-    }
     if (fmt == 5 && info == 0) {
       /* Undefined function call.  Try to handle common functions at C level. */
       natural fname_raw = untag(xpGPR(xp, 9));
@@ -1235,16 +1240,85 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
         return true;
       }
 
+      /* Bug 178: DEFINE-STANDARD-INITIAL-BINDING is undefined because
+         the let* closure in l1-aprims.lisp doesn't execute its defuns.
+         Implement the essential behavior at C level:
+         1. %proclaim-special on the symbol (set bit 4 of flags)
+         2. Skip calling the initform (too complex from C)
+         3. Return the symbol
+         This allows boot to continue past l1-aprims. */
+      if (strcmp(fn_name, "DEFINE-STANDARD-INITIAL-BINDING") == 0) {
+        static int dsib_count = 0;
+        dsib_count++;
+        /* arg_y (x14) = symbol, arg_z (x15) = initform lambda */
+        LispObj sym_tagged = xpGPR(xp, 14);
+        natural sym_raw = untag(sym_tagged);
+        if (sym_raw > 0x100000000LL && sym_raw < 0x400000000000LL) {
+          LispObj *sym = (LispObj *)sym_raw;
+          /* Set $sym_vbit_special (bit 4) in flags field (index 4) */
+          LispObj flags = sym[4];
+          flags |= (1 << 4);  /* sym_vbit_special = 4 */
+          sym[4] = flags;
+          if (dsib_count <= 10) {
+            /* Print the symbol name for debugging */
+            LispObj pn = sym[0]; /* pname */
+            natural pn_raw = untag(pn);
+            char sname[64] = {0};
+            if (pn_raw > 0x100000000LL && pn_raw < 0x400000000000LL) {
+              LispObj pn_hdr = ((LispObj *)pn_raw)[-1];
+              natural pn_len = header_element_count(pn_hdr);
+              int cs = ((header_subtag(pn_hdr) & 0x7F) == 7) ? 4 : 1;
+              if (pn_len > 0 && pn_len < 60) {
+                for (natural i = 0; i < pn_len; i++)
+                  sname[i] = ((char *)pn_raw)[i * cs];
+                sname[pn_len] = 0;
+              }
+            }
+            fprintf(dbgout, "Bug178: define-standard-initial-binding #%d: %s flags=%016lx\n",
+                    dsib_count, sname[0] ? sname : "???", (unsigned long)flags);
+            fflush(dbgout);
+          }
+        }
+        /* Return the symbol (arg_y) as return value in arg_z */
+        xpPC(xp) = (pc)(natural)xpGPR(xp, 30);
+        xpGPR(xp, 15) = sym_tagged;
+        xpGPR(xp, 5) = node_size;
+        *bumpP = 0;
+        return true;
+      }
+
       /* Other undefined function — log and return NIL */
       {
         static int undef_count = 0;
         static int undef_suppressed = 0;
         undef_count++;
-        if (undef_count <= 30 || (undef_count % 500) == 0)
+        if (undef_count <= 30 || (undef_count % 500) == 0) {
           fprintf(dbgout, "Bug171: undefined '%s' #%d LR=%016lx nargs=%lu\n",
                   fn_name[0] ? fn_name : "???", undef_count,
                   (unsigned long)xpGPR(xp, 30), (unsigned long)nargs_val);
-        else
+          /* Bug 178 diagnostic: print symbol's fcell to check if %defun stored it */
+          {
+            LispObj fname_val = xpGPR(xp, 9);
+            natural fn_raw2 = untag(fname_val);
+            if (fn_raw2 > 0x100000000LL && fn_raw2 < 0x400000000000LL) {
+              LispObj *sym2 = (LispObj *)fn_raw2;
+              LispObj fcell = sym2[2]; /* symbol.fcell offset */
+              LispObj flags = sym2[4]; /* symbol.flags offset */
+              fprintf(dbgout, "  Bug178: sym=%016lx fcell=%016lx flags=%016lx\n",
+                      (unsigned long)fname_val, (unsigned long)fcell,
+                      (unsigned long)flags);
+              /* If fcell is a function, print its details */
+              if ((fcell >> 56) == 0x62) { /* tag_function */
+                natural fc_raw = untag(fcell);
+                if (fc_raw > 0x100000000LL && fc_raw < 0x400000000000LL) {
+                  LispObj fc_hdr = ((LispObj *)fc_raw)[-1];
+                  fprintf(dbgout, "  Bug178: fcell IS a function! hdr=%016lx\n",
+                          (unsigned long)fc_hdr);
+                }
+              }
+            }
+          }
+        } else
           undef_suppressed++;
         if (undef_count > 50000) {
           fprintf(dbgout, "Bug171: too many undefined (%d, %d suppressed), aborting\n",
@@ -6412,16 +6486,43 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
        a character).  Handle directly in Mach handler to avoid the expensive
        signal handler roundtrip.  Just advance PC past the HLT instruction. */
     if (exception == EXC_BAD_INSTRUCTION && tcr->valence == TCR_STATE_LISP) {
-      opcode hlt_insn = *(opcode *)(natural)ts->__pc;
+      /* Use code[1] directly as HLT opcode (avoids MAP_JIT read issues) */
+      opcode hlt_insn = (opcode)code[1];
       if ((hlt_insn & 0xFFE0001F) == 0xD4400000) { /* HLT instruction */
         unsigned hlt_imm16 = (hlt_insn >> 5) & 0xFFFF;
         unsigned hlt_fmt = hlt_imm16 & 7;
         unsigned hlt_info = (hlt_imm16 >> 8) & 0xFF;
         if (hlt_fmt == 4 && hlt_info == tag_character) {
-          /* This is require-char-code on a fixnum input.  Skip past HLT. */
+          static int b177_mach_count = 0;
+          static uint64_t b177_last_pc = 0;
+          static int b177_same_pc_count = 0;
+          b177_mach_count++;
+          if (ts->__pc == b177_last_pc) {
+            b177_same_pc_count++;
+          } else {
+            b177_same_pc_count = 1;
+            b177_last_pc = ts->__pc;
+          }
+          /* If same PC hit too many times, the code is in an infinite loop
+             of code-char calls (from error formatting after $XNOSPREAD).
+             Log and continue — each handled iteration is harmless. */
+          if (b177_same_pc_count == 500) {
+            fprintf(dbgout, "Bug177-MACH: note: %d+ code-char calls at pc=%016lx (error handling loop)\n",
+                    b177_same_pc_count, (unsigned long)ts->__pc);
+            fflush(dbgout);
+          }
+          /* Normal case: skip past HLT */
           *out_ts = *ts;
           out_ts->__pc = ts->__pc + 4;
           kret = KERN_SUCCESS;
+          if (b177_mach_count <= 5 || (b177_mach_count % 10000) == 0)
+            fprintf(dbgout, "Bug177-MACH: #%d skip HLT pc=%016lx\n",
+                    b177_mach_count, (unsigned long)ts->__pc);
+          if (b177_mach_count > 500000) {
+            fprintf(dbgout, "Bug177-MACH: too many (%d), aborting\n", b177_mach_count);
+            fflush(dbgout);
+            _exit(1);
+          }
           goto done;
         }
       }

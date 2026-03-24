@@ -20,25 +20,27 @@
 (in-package "CCL")
 
 
-(let* ((standard-initial-bindings ())
-       (standard-initial-bindings-lock (make-read-write-lock)))
+;;; Bug 178: ARM64 closure defun inside let* fails silently.
+;;; Use top-level defvar + defun instead of closure-based encapsulation.
+(defvar *standard-initial-bindings* ())
+(defvar *standard-initial-bindings-lock* (make-read-write-lock))
 
-  (defun standard-initial-bindings ()
-    (with-read-lock (standard-initial-bindings-lock)
-      (copy-list standard-initial-bindings)))
+(defun standard-initial-bindings ()
+  (with-read-lock (*standard-initial-bindings-lock*)
+    (copy-list *standard-initial-bindings*)))
 
-  (defun define-standard-initial-binding (symbol initform)
-    (setq symbol (require-type symbol 'symbol))
-    (%proclaim-special symbol)
-    (unless (boundp symbol)
-      (set symbol (funcall initform)))
-    (with-write-lock (standard-initial-bindings-lock)
-      (let* ((pair (assoc symbol standard-initial-bindings)))
-	(if pair
-	  (setf (cdr pair) initform)
-	  (push (cons symbol initform) standard-initial-bindings))))
-    (record-source-file symbol 'variable)
-    symbol))
+(defun define-standard-initial-binding (symbol initform)
+  (setq symbol (require-type symbol 'symbol))
+  (%proclaim-special symbol)
+  (unless (boundp symbol)
+    (set symbol (funcall initform)))
+  (with-write-lock (*standard-initial-bindings-lock*)
+    (let* ((pair (assoc symbol *standard-initial-bindings*)))
+      (if pair
+        (setf (cdr pair) initform)
+        (push (cons symbol initform) *standard-initial-bindings*))))
+  (record-source-file symbol 'variable)
+  symbol)
 
 (defstatic *kernel-tcr-area-lock* (%make-lock (%null-ptr) "Kernel tcr-area-lock"))
 
@@ -53,7 +55,9 @@
     (%get-kernel-global-ptr exception-lock q)))
 
 (def-standard-initial-binding *package*)
-(def-standard-initial-binding *random-state* (initial-random-state))
+;;; Bug 179: random state initialization deferred — %mrg31k3p LAP not ready.
+;;; Just proclaim special; will be initialized later when random is needed.
+(%proclaim-special '*random-state*)
 (def-standard-initial-binding *error-print-length* 20)
 (def-standard-initial-binding *error-print-level* 8)
 (def-standard-initial-binding *error-print-string-length* :default)
