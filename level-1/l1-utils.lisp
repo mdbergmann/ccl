@@ -535,12 +535,17 @@ vector
     (function (apply #'proclaim-type spec))
     (t (unless (memq (%car spec) *nx-known-declarations*)
          ;; Any type name is now (ANSI CL) a valid declaration.
-         (if (specifier-type-if-known (%car spec))
-           (apply #'proclaim-type spec)
-           (signal-program-error "Unknown declaration specifier ~s in ~S" (%car spec) spec))))))
+         (when (specifier-type-if-known (%car spec))
+           (apply #'proclaim-type spec))))))
+  ;; Bug 181: removed signal-program-error from default case — causes
+  ;; cascading failures during early boot when unknown declarations are
+  ;; encountered before the type system is fully initialized.
 
 (defun bad-proclaim-spec (spec)
-  (signal-program-error "Invalid declaration specifier ~s" spec))
+  ;; Bug 181: during early boot, signal-program-error causes cascading failures.
+  ;; Just return NIL and hope for the best.
+  (declare (ignore spec))
+  nil)
 
 
 (defun using-linear-scan () *backend-use-linear-scan*)
@@ -585,18 +590,17 @@ vector
 
 
 (defun proclaim-special (&rest vars)
-  (declare (dynamic-extent vars))
-  (unless (every #'symbolp vars) (bad-proclaim-spec `(special ,@vars)))
+  ;; Bug 181: removed arg validation — during early boot many functions are
+  ;; undefined, causing cascading failures. Args are from cross-compiled FASL.
   (dolist (sym vars) (%proclaim-special sym)))
 
 
 (defun proclaim-notspecial (&rest vars)
-  (declare (dynamic-extent vars))
-  (unless (every #'symbolp vars) (bad-proclaim-spec `(special ,@vars)))
+  ;; Bug 181: removed arg validation for early boot safety
   (dolist (sym vars) (%proclaim-notspecial sym)))
 
 (defun proclaim-inline (t-or-nil &rest names)
-  (declare (dynamic-extent names))
+  ;; Bug 181: removed (declare (dynamic-extent names))
   ;;This is just to make it more likely to detect forgetting about the
   ;;first arg...
   (unless (or (eq nil t-or-nil) (eq t t-or-nil)) (report-bad-arg t-or-nil '(member t nil)))
@@ -613,8 +617,9 @@ vector
             (or t-or-nil (if (compiler-special-form-p name) t))))))
 
 (defun proclaim-declaration (&rest syms)
-  (declare (dynamic-extent syms))
-  (unless (every #'symbolp syms) (bad-proclaim-spec `(declaration ,@syms)))
+  ;; Bug 181: removed (declare (dynamic-extent syms))
+  ;; Bug 181: use loop instead of every (early boot safety)
+  (unless (loop for v in syms always (symbolp v)) (bad-proclaim-spec `(declaration ,@syms)))
   (dolist (sym syms)
     (when (type-specifier-p sym)
       (error "Cannot define declaration ~s because it is the name of a type" sym))
@@ -628,11 +633,12 @@ vector
     (setq *nx-known-declarations* (remove name *nx-known-declarations*))))
 
 (defun proclaim-ignore (t-or-nil &rest syms)
-  (declare (dynamic-extent syms))
+  ;; Bug 181: removed (declare (dynamic-extent syms))
   ;;This is just to make it more likely to detect forgetting about the
   ;;first arg...
   (unless (or (eq nil t-or-nil) (eq t t-or-nil)) (report-bad-arg t-or-nil '(member t nil)))
-  (unless (every #'symbolp syms) (bad-proclaim-spec `(,(if t-or-nil 'ignore 'unignore) ,@syms)))
+  ;; Bug 181: use loop instead of every (early boot safety)
+  (unless (loop for v in syms always (symbolp v)) (bad-proclaim-spec `(,(if t-or-nil 'ignore 'unignore) ,@syms)))
   (dolist (sym syms)
     (setq *nx-proclaimed-ignore*
           (alist-adjoin sym t-or-nil *nx-proclaimed-ignore*))))

@@ -75,6 +75,10 @@ _spentry(fix_nfn_entrypoint)
         __(stp x5,x13,[sp,#16])                   /* save nargs, arg_x */
         __(stp x14,x15,[sp,#32])                  /* save arg_y, arg_z */
         __(bl _fix_entrypoint_copy_to_code_heap)   /* x0=untagged cv addr → x0=code heap addr */
+        /* Bug 181: Trap if vsp (x25) was corrupted by C call */
+        __(cbnz vsp,8182f)
+        __(hlt #0x1811)  /* Bug 181: vsp=0 after C call in fix_nfn_entrypoint */
+8182:
         __(ldp x14,x15,[sp,#32])                  /* restore arg_y, arg_z */
         __(ldp x5,x13,[sp,#16])                   /* restore nargs, arg_x */
         __(ldp x30,nfn,[sp],#48)                  /* restore lr, nfn */
@@ -1850,7 +1854,7 @@ _spentry(spreadargz)
         __(mov arg_y,arg_z)  /*  save in case of error  */
         __(beq 2f)
 1:
-        __(cmp imm1,#tag_list)
+        __(cmp imm1,#tag_cons)
         __(bne 3f)
         __(_car(arg_x,arg_z))
         __(_cdr(arg_z,arg_z))
@@ -3323,6 +3327,10 @@ _spentry(eabi_ff_call)
         __(str imm2,[rcontext,#tcr.valence])
         __(ldr allocptr,[rcontext,#tcr.save_allocptr])
         __(ldr vsp,[rcontext,#tcr.save_vsp])
+        /* Bug 181: Trap if vsp is 0 after restore from TCR */
+        __(cbnz vsp,8181f)
+        __(hlt #0x1810)  /* Bug 181: vsp=0 after TCR restore in ff_call */
+8181:
         /* Restore saved values from vsp */
         __(ldp arg_y,arg_x,[vsp])
         __(ldp temp0,temp1,[vsp,#2*node_size])

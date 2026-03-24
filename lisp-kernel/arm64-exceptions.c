@@ -4032,6 +4032,58 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
       fflush(dbgout);
     }
   }
+  /* Bug 181: Log ALL exceptions to trace what leads to call-to-null */
+  {
+    static int all_exc_count = 0;
+    all_exc_count++;
+    native_thread_state_t *tts = (native_thread_state_t *)in_state;
+    /* Log the last N exceptions and the transition to call-to-null */
+    static natural last_pcs[8]; /* circular buffer of recent PCs */
+    static natural last_lrs[8];
+    static natural last_nfns[8];
+    static int last_idx = 0;
+    last_pcs[last_idx % 8] = (natural)tts->__pc;
+    last_lrs[last_idx % 8] = (natural)tts->__lr;
+    last_nfns[last_idx % 8] = (natural)tts->__x[10];
+    last_idx++;
+    /* When we detect a call-to-null (pc=0), dump the recent history */
+    if ((natural)tts->__pc == 0 && all_exc_count > 1) {
+      static int null_dump_done = 0;
+      if (!null_dump_done) {
+        null_dump_done = 1;
+        fprintf(dbgout, "=== BUG181: call-to-null at MEXC[%d] — recent exception history ===\n", all_exc_count);
+        int hi;
+        for (hi = 0; hi < 8 && hi < last_idx - 1; hi++) {
+          int idx = (last_idx - 2 - hi) % 8;
+          if (idx < 0) idx += 8;
+          fprintf(dbgout, "  [-%d]: pc=0x%lx lr=0x%lx nfn=0x%lx\n",
+                  hi + 1, (unsigned long)last_pcs[idx],
+                  (unsigned long)last_lrs[idx], (unsigned long)last_nfns[idx]);
+        }
+        /* Dump full thread state at crash */
+        fprintf(dbgout, "  CRASH STATE: sp=0x%lx vsp=0x%lx rnil=0x%lx rt=0x%lx allocptr=0x%lx\n",
+                (unsigned long)tts->__sp, (unsigned long)tts->__x[25],
+                (unsigned long)tts->__x[6], (unsigned long)tts->__x[7],
+                (unsigned long)tts->__x[26]);
+        fprintf(dbgout, "  x0-x15: ");
+        int ri;
+        for (ri = 0; ri < 16; ri++)
+          fprintf(dbgout, "x%d=0x%lx ", ri, (unsigned long)tts->__x[ri]);
+        fprintf(dbgout, "\n  x16-x28: ");
+        for (ri = 16; ri < 29; ri++)
+          fprintf(dbgout, "x%d=0x%lx ", ri, (unsigned long)tts->__x[ri]);
+        fprintf(dbgout, "\n");
+        fflush(dbgout);
+      }
+    }
+    if (all_exc_count <= 10 || ((natural)tts->__pc == 0 && all_exc_count <= 100)) {
+      fprintf(dbgout, "MEXC[%d]: exc=%d code0=%lld code1=0x%llx pc=0x%lx lr=0x%lx nfn=0x%lx valence=%d\n",
+              all_exc_count, exception, (long long)code0, (long long)code[1],
+              (unsigned long)tts->__pc, (unsigned long)tts->__lr,
+              (unsigned long)tts->__x[10], tcr->valence);
+      fflush(dbgout);
+    }
+  }
   /* Bug 173: stale hardcoded slot[11] diagnostics removed (Bug 176) */
   /* Bug 169 diagnostic: log non-alloc-trap, non-W^X exceptions */
   {
@@ -5720,6 +5772,40 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
         if (code_copy) {
           natural new_entry = (natural)code_copy + node_size;
           natural pc_offset = pc_untagged - cv_untagged;
+          /* Bug 181: Log last 5 W^X fixups with function name */
+          {
+            static int wx_count = 0;
+            wx_count++;
+            if (wx_count >= 55) {
+              /* Try to identify function name from slot[2] */
+              LispObj name_slot = fn_slots[2];
+              natural name_tag = name_slot >> 56;
+              fprintf(dbgout, "WX[%d]: fn=0x%lx pc_off=0x%lx cv_total=%lu vsp=0x%lx sp=0x%lx",
+                      wx_count, (unsigned long)nfn_val, (unsigned long)pc_offset,
+                      (unsigned long)cv_total, (unsigned long)ts->__x[25],
+                      (unsigned long)ts->__sp);
+              if (name_tag == 0x63) { /* symbol */
+                natural sym_raw = name_slot & 0x00FFFFFFFFFFFFFFULL;
+                LispObj *sym = (LispObj *)sym_raw;
+                LispObj pname = sym[0]; /* pname slot */
+                natural pname_raw = pname & 0x00FFFFFFFFFFFFFFULL;
+                if (pname_raw > 0x200000000ULL) {
+                  LispObj pname_hdr = ((LispObj *)(pname_raw - 8))[0];
+                  natural pn_len = pname_hdr & 0x00FFFFFFFFFFFFFFULL;
+                  if (pn_len > 60) pn_len = 60;
+                  unsigned int *chars = (unsigned int *)pname_raw;
+                  char buf[64];
+                  int k;
+                  for (k = 0; k < (int)pn_len; k++)
+                    buf[k] = (char)(chars[k] & 0x7F);
+                  buf[pn_len] = 0;
+                  fprintf(dbgout, " name='%s'", buf);
+                }
+              }
+              fprintf(dbgout, "\n");
+              fflush(dbgout);
+            }
+          }
           /* Patch function entrypoint */
           fn_slots[0] = (LispObj)new_entry;
           /* Redirect PC to code heap */
@@ -6094,70 +6180,143 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
           fflush(dbgout);
         }
       }
-      /* Bug 140: If PC itself is 0 (branch-to-null via blr to 0), we can't
-         read the instruction.  Resume at lr instead. */
+      /* Bug 140/181: If PC itself is 0 (branch-to-null via blr to 0), we can't
+         read the instruction. Try to recover from lr or stack frame. */
       if (fault_pc < 4096) {
         static int call_null_count = 0;
         call_null_count++;
-        if (call_null_count <= 5 || (call_null_count % 100) == 0) {
+        if (call_null_count <= 10) {
           natural lr_val = (natural)ts->__lr;
-          fprintf(dbgout, "call-to-null[%d]: pc=0x%lx lr=0x%lx x2=0x%lx x28=0x%lx\n",
-                  call_null_count,
-                  (unsigned long)fault_pc, (unsigned long)lr_val,
-                  (unsigned long)ts->__x[2], (unsigned long)ts->__x[28]);
-          /* Dump memory at x28+0x240 (sptab[24]) */
-          if (ts->__x[28] > 0x100000000ULL && ts->__x[28] < 0x200000000ULL) {
-            natural tcr_addr = ts->__x[28];
-            fprintf(dbgout, "  mem@x28+0x240=0x%lx mem@x28+0x238=0x%lx mem@x28+0x248=0x%lx\n",
-                    (unsigned long)((LispObj*)tcr_addr)[0x240/8],
-                    (unsigned long)((LispObj*)tcr_addr)[0x238/8],
-                    (unsigned long)((LispObj*)tcr_addr)[0x248/8]);
-          }
-          /* Dump instructions around lr */
-          if (lr_val > 0x200000000000ULL && lr_val < 0x400000000000ULL) {
-            opcode *lr_insns = (opcode *)lr_val;
-            fprintf(dbgout, "  insn@lr: [-4]=%08x [-3]=%08x [-2]=%08x [-1]=%08x [0]=%08x [1]=%08x [2]=%08x [3]=%08x\n",
-                    lr_insns[-4], lr_insns[-3], lr_insns[-2], lr_insns[-1],
-                    lr_insns[0], lr_insns[1], lr_insns[2], lr_insns[3]);
-          }
-          /* Dump nrs_CLOSURE_CODE from C and from rnil */
-          {
-            lispsymbol *cc_sym = &nrs_CLOSURE_CODE;
-            natural rnil_raw = ts->__x[6] & 0x00FFFFFFFFFFFFFFULL;
-            fprintf(dbgout, "  nrs_CLOSURE_CODE(C): hdr=0x%lx pname=0x%lx vcell=0x%lx (addr=%p)\n",
-                    (unsigned long)cc_sym->header, (unsigned long)cc_sym->pname,
-                    (unsigned long)cc_sym->vcell, (void*)cc_sym);
-            fprintf(dbgout, "  rnil=0x%lx (raw=0x%lx) nil_base=0x%lx sizeof(lispsymbol)=%lu\n",
-                    (unsigned long)ts->__x[6], (unsigned long)rnil_raw,
-                    (unsigned long)nil_base_address, (unsigned long)sizeof(lispsymbol));
-            /* What Lisp would load: rnil + nrs-offset + symbol.vcell
-               nrs-offset for pos=24 = (24-1)*symbol.size = 23*64 = 1472
-               symbol.vcell = 8
-               total = 1480 */
-            natural lisp_vcell_addr = rnil_raw + 1480;
-            fprintf(dbgout, "  Lisp vcell addr=0x%lx value=0x%lx\n",
-                    (unsigned long)lisp_vcell_addr,
-                    (unsigned long)*(LispObj*)lisp_vcell_addr);
-            /* Also dump NRS[0] (T) pname to verify alignment */
-            lispsymbol *t_sym = &nrs_T;
-            fprintf(dbgout, "  nrs_T(C): hdr=0x%lx pname=0x%lx (addr=%p)\n",
-                    (unsigned long)t_sym->header, (unsigned long)t_sym->pname, (void*)t_sym);
-            /* Dump function nfn's slot[0] and slot[1] headers */
-            natural nfn_raw = ts->__x[10] & 0x00FFFFFFFFFFFFFFULL;
-            if (nfn_raw > 0x100000000ULL) {
-              LispObj *fn = (LispObj *)nfn_raw;
-              fprintf(dbgout, "  nfn[0]=0x%lx nfn[1]=0x%lx\n",
-                      (unsigned long)fn[0], (unsigned long)fn[1]);
-              /* Check slot[1] - if it's a code-vector, dump its header */
-              natural s1_raw = fn[1] & 0x00FFFFFFFFFFFFFFULL;
-              if (s1_raw > 0x100000000ULL) {
-                LispObj s1_hdr = ((LispObj *)s1_raw)[-1];
-                fprintf(dbgout, "  nfn[1] hdr=0x%lx subtag=0x%02lx\n",
-                        (unsigned long)s1_hdr, (unsigned long)(s1_hdr >> 56));
-              }
+          natural sp_val = (natural)ts->__sp;
+          natural nfn_val = (natural)ts->__x[10];
+          natural vsp_val = (natural)ts->__x[15];
+          /* Dump TCR state */
+          fprintf(dbgout, "  TCR: save_vsp=0x%lx save_allocptr=0x%lx save_allocbase=0x%lx\n",
+                  (unsigned long)tcr->save_vsp, (unsigned long)tcr->save_allocptr,
+                  (unsigned long)tcr->save_allocbase);
+          fprintf(dbgout, "  TCR: last_lisp_frame=0x%lx catch_top=0x%lx db_link=0x%lx valence=%d\n",
+                  (unsigned long)tcr->last_lisp_frame, (unsigned long)tcr->catch_top,
+                  (unsigned long)tcr->db_link, tcr->valence);
+          /* Dump C stack around SP to find the C call stack */
+          if (sp_val > 0x100000000ULL && sp_val < 0x800000000000ULL) {
+            LispObj *stk = (LispObj *)sp_val;
+            fprintf(dbgout, "  C-stack from sp (32 words):\n");
+            int si;
+            for (si = -4; si < 32; si++) {
+              natural v = (natural)stk[si];
+              if (v > 0x100000000ULL)
+                fprintf(dbgout, "    [sp+0x%03x]=0x%lx\n", si*8, (unsigned long)v);
             }
           }
+          /* Also dump last_lisp_frame contents */
+          natural llf = (natural)tcr->last_lisp_frame;
+          if (llf > 0x100000000ULL && llf < 0x800000000000ULL) {
+            LispObj *lf = (LispObj *)llf;
+            fprintf(dbgout, "  last_lisp_frame contents: [0]=0x%lx [1]=0x%lx [2]=0x%lx [3]=0x%lx\n",
+                    (unsigned long)lf[0], (unsigned long)lf[1],
+                    (unsigned long)lf[2], (unsigned long)lf[3]);
+          }
+          /* Dump value stack from TCR.save_vsp */
+          natural svsp = (natural)tcr->save_vsp;
+          if (svsp > 0x100000000ULL && svsp < 0x800000000000ULL) {
+            LispObj *vs = (LispObj *)svsp;
+            fprintf(dbgout, "  save_vsp contents (32 words from 0x%lx):\n", (unsigned long)svsp);
+            int vi;
+            for (vi = 0; vi < 32; vi++) {
+              fprintf(dbgout, "    [save_vsp+0x%03x]=0x%lx\n", vi*8, (unsigned long)vs[vi]);
+            }
+          }
+          /* Also check what's at the actual cs_area boundaries */
+          area *cs = tcr->cs_area;
+          if (cs) {
+            fprintf(dbgout, "  cs_area: low=0x%lx active=0x%lx high=0x%lx softlimit=0x%lx\n",
+                    (unsigned long)cs->low, (unsigned long)cs->active,
+                    (unsigned long)cs->high, (unsigned long)cs->softlimit);
+          }
+          area *vs_area = tcr->vs_area;
+          if (vs_area) {
+            fprintf(dbgout, "  vs_area: low=0x%lx active=0x%lx high=0x%lx\n",
+                    (unsigned long)vs_area->low, (unsigned long)vs_area->active,
+                    (unsigned long)vs_area->high);
+          }
+          fprintf(dbgout, "call-to-null[%d]: pc=0x%lx lr=0x%lx sp=0x%lx nfn=0x%lx vsp=0x%lx nargs=0x%lx\n",
+                  call_null_count,
+                  (unsigned long)fault_pc, (unsigned long)lr_val,
+                  (unsigned long)sp_val, (unsigned long)nfn_val,
+                  (unsigned long)vsp_val, (unsigned long)ts->__x[11]);
+          /* Dump key arg registers */
+          fprintf(dbgout, "  arg_z(x0)=0x%lx arg_y(x1)=0x%lx arg_x(x2)=0x%lx temp0(x3)=0x%lx temp1(x4)=0x%lx\n",
+                  (unsigned long)ts->__x[0], (unsigned long)ts->__x[1],
+                  (unsigned long)ts->__x[2], (unsigned long)ts->__x[3],
+                  (unsigned long)ts->__x[4]);
+          fprintf(dbgout, "  temp2(x5)=0x%lx rnil(x6)=0x%lx rcontext(x28)=0x%lx fp(x29)=0x%lx\n",
+                  (unsigned long)ts->__x[5], (unsigned long)ts->__x[6],
+                  (unsigned long)ts->__x[28], (unsigned long)ts->__x[29]);
+          /* Dump lisp frame on SP if it looks valid */
+          if (sp_val > 0x100000000ULL && sp_val < 0x800000000000ULL) {
+            LispObj *frame = (LispObj *)sp_val;
+            fprintf(dbgout, "  stack frame: [sp+0]=0x%lx [sp+8]=0x%lx [sp+16]=0x%lx [sp+24]=0x%lx\n",
+                    (unsigned long)frame[0], (unsigned long)frame[1],
+                    (unsigned long)frame[2], (unsigned long)frame[3]);
+            /* frame layout: savevsp, savelr, savefn, savefp */
+            fprintf(dbgout, "  lisp_frame: savevsp=0x%lx savelr=0x%lx savefn=0x%lx savefp=0x%lx\n",
+                    (unsigned long)frame[0], (unsigned long)frame[1],
+                    (unsigned long)frame[2], (unsigned long)frame[3]);
+            /* Also dump next frame */
+            if (frame[3] > sp_val && frame[3] < sp_val + 0x100000) {
+              LispObj *frame2 = (LispObj *)frame[3];
+              fprintf(dbgout, "  outer_frame: savevsp=0x%lx savelr=0x%lx savefn=0x%lx savefp=0x%lx\n",
+                      (unsigned long)frame2[0], (unsigned long)frame2[1],
+                      (unsigned long)frame2[2], (unsigned long)frame2[3]);
+            }
+          }
+          /* Dump vsp (value stack) */
+          if (vsp_val > 0x100000000ULL && vsp_val < 0x800000000000ULL) {
+            LispObj *vs = (LispObj *)vsp_val;
+            fprintf(dbgout, "  vstack: [0]=0x%lx [1]=0x%lx [2]=0x%lx [3]=0x%lx\n",
+                    (unsigned long)vs[0], (unsigned long)vs[1],
+                    (unsigned long)vs[2], (unsigned long)vs[3]);
+          }
           fflush(dbgout);
+        }
+        /* Bug 181: When LR=0 and vsp=0, recover by restoring lisp state
+           from TCR and jumping to SPreset (which throws to toplevel catch). */
+        natural lr_recover = (natural)ts->__lr;
+        if (lr_recover < 4096 && (natural)ts->__x[25] == 0) {
+          static int vsp0_recovery_count = 0;
+          vsp0_recovery_count++;
+          if (vsp0_recovery_count <= 3) {
+            /* Restore all lisp registers from TCR and redirect to SPreset */
+            extern void SPreset(void);
+            natural reset_addr = (natural)&SPreset;
+            LispObj nil_val = lisp_nil;
+            LispObj t_val = nil_val + t_offset;
+            fprintf(dbgout, "Bug181-RECOVER[%d]: restoring lisp state from TCR, jumping to SPreset=0x%lx\n",
+                    vsp0_recovery_count, (unsigned long)reset_addr);
+            fprintf(dbgout, "  TCR: save_vsp=0x%lx save_allocptr=0x%lx\n",
+                    (unsigned long)tcr->save_vsp, (unsigned long)tcr->save_allocptr);
+            fflush(dbgout);
+            *out_ts = *ts;
+            /* Restore lisp registers */
+            out_ts->__x[25] = (natural)tcr->save_vsp;  /* vsp */
+            out_ts->__x[26] = (natural)tcr->save_allocptr;  /* allocptr */
+            out_ts->__x[6] = nil_val;  /* rnil */
+            out_ts->__x[7] = t_val;  /* rt = T */
+            out_ts->__x[0] = nil_val;  /* arg_z = nil */
+            out_ts->__x[10] = 0;  /* nfn = 0 */
+            out_ts->__pc = reset_addr;
+            /* Restore SP from cs_area.high (top of control stack) */
+            if (tcr->cs_area) {
+              out_ts->__sp = (natural)tcr->cs_area->high - 16*7; /* past saved regs */
+            }
+            kret = KERN_SUCCESS;
+            goto done;
+          }
+          if (vsp0_recovery_count > 10) {
+            fprintf(dbgout, "FATAL: %d Bug181 recovery attempts, aborting\n", vsp0_recovery_count);
+            fflush(dbgout);
+            _exit(1);
+          }
         }
         if (call_null_count > 1000) {
           fprintf(dbgout, "FATAL: %d call-to-null repeats, aborting\n", call_null_count);
@@ -6588,6 +6747,34 @@ done:
     *flavor = 0;
   } else {
     *out_state_count = NATIVE_THREAD_STATE_COUNT;
+    /* Bug 181: Check if we're about to resume with vsp=0 */
+    if (out_ts->__x[25] == 0 && tcr->valence == TCR_STATE_LISP) {
+      static int vsp0_out_count = 0;
+      vsp0_out_count++;
+      if (vsp0_out_count <= 5) {
+        fprintf(dbgout, "BUG181-OUT: handler returning with x25(vsp)=0! exc=%d code0=%lld pc_in=0x%lx pc_out=0x%lx\n",
+                exception, (long long)code0,
+                (unsigned long)ts->__pc, (unsigned long)out_ts->__pc);
+        fprintf(dbgout, "  in: x25=0x%lx x10=0x%lx lr=0x%lx sp=0x%lx\n",
+                (unsigned long)ts->__x[25], (unsigned long)ts->__x[10],
+                (unsigned long)ts->__lr, (unsigned long)ts->__sp);
+        fprintf(dbgout, "  out: x25=0x%lx x10=0x%lx lr=0x%lx sp=0x%lx\n",
+                (unsigned long)out_ts->__x[25], (unsigned long)out_ts->__x[10],
+                (unsigned long)out_ts->__lr, (unsigned long)out_ts->__sp);
+        fflush(dbgout);
+      }
+    }
+    /* Also check if input state already has vsp=0 (kernel bug) */
+    if (ts->__x[25] == 0 && tcr->valence == TCR_STATE_LISP && (natural)ts->__pc > 4096) {
+      static int vsp0_in_count = 0;
+      vsp0_in_count++;
+      if (vsp0_in_count <= 5) {
+        fprintf(dbgout, "BUG181-IN: exception received with x25(vsp)=0! exc=%d code0=%lld pc=0x%lx lr=0x%lx\n",
+                exception, (long long)code0,
+                (unsigned long)ts->__pc, (unsigned long)ts->__lr);
+        fflush(dbgout);
+      }
+    }
   }
   return kret;
 }

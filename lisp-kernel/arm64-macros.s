@@ -382,6 +382,11 @@ define(`build_lisp_frame',`
 ')
 
 define(`restore_lisp_frame',`
+        /* Bug 181: check savevsp before restore */
+        __(ldr imm2,[sp,#lisp_frame.savevsp])
+        __(cbnz imm2,8183f)
+        __(hlt #0x1812)  /* Bug 181: savevsp=0 in lisp frame */
+8183:
         __(ldp nfn,x29,[sp,#lisp_frame.savefn])
         __(ldp vsp,lr,[sp],#lisp_frame.size)
         ')
@@ -440,12 +445,18 @@ macro_label(ok):
    Use temp1 (x11) for the branch target to preserve nfn (x10). */
 define(`jump_nfn',`
         __(ldr temp1,[nfn,#_function.entrypoint])
+        __(cbnz temp1,1181f)
+        __(hlt #0x181)  /* Bug 181: null entrypoint in jump_nfn */
+1181:
         __(br temp1)
 ')
 
 /* "call" the function in nfn, preserving nfn (x10). */
 define(`call_nfn',`
         __(ldr temp1,[nfn,#_function.entrypoint])
+        __(cbnz temp1,1182f)
+        __(hlt #0x182)  /* Bug 181: null entrypoint in call_nfn */
+1182:
         __(blr temp1)
 ')
 	
