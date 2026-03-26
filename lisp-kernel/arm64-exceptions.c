@@ -4160,6 +4160,50 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
               all_exc_count, exception, (long long)code0, (long long)code[1],
               (unsigned long)tts->__pc, (unsigned long)tts->__lr,
               (unsigned long)tts->__x[10], (unsigned long)tts->__x[25], tcr->valence);
+      /* Bug 183 diagnostic: dump nfn function slots and all regs on non-alloc exceptions */
+      if (exception != EXC_BAD_INSTRUCTION || !IS_ALLOC_TRAP(
+            (natural)tts->__pc > 0x1000 ? *(opcode *)(natural)tts->__pc : 0)) {
+        natural nfn_raw = tts->__x[10] & 0x00FFFFFFFFFFFFFFULL;
+        fprintf(dbgout, "  Bug183: nfn_raw=0x%lx sp=0x%lx fp=0x%lx\n",
+                (unsigned long)nfn_raw, (unsigned long)tts->__sp, (unsigned long)tts->__fp);
+        /* Dump nfn function object slots if address looks valid */
+        if (nfn_raw >= 0x300000000ULL && nfn_raw < 0x400000000000ULL) {
+          LispObj *fn_slots = (LispObj *)nfn_raw;
+          LispObj fn_header = fn_slots[-1];  /* header is before the tagged address */
+          fprintf(dbgout, "  Bug183-fn: header=0x%lx entrypoint=0x%lx code-vector=0x%lx\n",
+                  (unsigned long)fn_header, (unsigned long)fn_slots[0],
+                  (unsigned long)fn_slots[1]);
+          natural fn_count = header_element_count(fn_header);
+          fprintf(dbgout, "  Bug183-fn: element_count=%lu slots:", (unsigned long)fn_count);
+          natural max_dump = fn_count < 8 ? fn_count : 8;
+          for (natural i = 0; i < max_dump; i++)
+            fprintf(dbgout, " [%lu]=0x%lx", (unsigned long)i, (unsigned long)fn_slots[i]);
+          fprintf(dbgout, "\n");
+        }
+        /* Dump all general registers */
+        fprintf(dbgout, "  Bug183-regs: ");
+        for (int ri = 0; ri < 29; ri++)
+          fprintf(dbgout, "x%d=0x%lx ", ri, (unsigned long)tts->__x[ri]);
+        fprintf(dbgout, "\n");
+        /* Dump vstack top entries */
+        natural vsp_val = tts->__x[25];
+        if (vsp_val > 0x100000000ULL && vsp_val < 0x200000000000ULL) {
+          LispObj *vsp_ptr = (LispObj *)vsp_val;
+          fprintf(dbgout, "  Bug183-vstack:");
+          for (int vi = 0; vi < 8; vi++)
+            fprintf(dbgout, " [%d]=0x%lx", vi, (unsigned long)vsp_ptr[vi]);
+          fprintf(dbgout, "\n");
+        }
+        /* Dump control stack (lisp frames) */
+        natural sp_val = tts->__sp;
+        if (sp_val > 0x100000000ULL && sp_val < 0x200000000000ULL) {
+          LispObj *sp_ptr = (LispObj *)sp_val;
+          fprintf(dbgout, "  Bug183-cstack:");
+          for (int si = 0; si < 16; si++)
+            fprintf(dbgout, " [%d]=0x%lx", si, (unsigned long)sp_ptr[si]);
+          fprintf(dbgout, "\n");
+        }
+      }
       fflush(dbgout);
     }
   }
@@ -4188,6 +4232,43 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
           exception, (long long)code0,
           (unsigned long)((native_thread_state_t *)in_state)->__pc, tcr);
 #endif
+
+  /* Bug 183: RW→RX code area fixup.  If PC is in the code area's RW range
+     (not executable), convert to the RX mirror address and resume.
+     This handles %fix-fn-entrypoint and closure creation setting entrypoints
+     to RW addresses instead of RX addresses in the dual-mapped code area. */
+  if (exception == EXC_BAD_ACCESS && code0 == KERN_PROTECTION_FAILURE &&
+      code_area && code_area_rx_base && code_rw_rx_bias != 0) {
+    native_thread_state_t *fix_ts = (native_thread_state_t *)in_state;
+    natural pc = (natural)fix_ts->__pc;
+    if (pc >= (natural)code_area->low && pc < (natural)code_area->high) {
+      /* PC is in RW code area — redirect to RX mirror */
+      natural rx_pc = code_rw_to_rx(pc);
+      static int rw_rx_fix_count = 0;
+      rw_rx_fix_count++;
+      if (rw_rx_fix_count <= 5)
+        fprintf(dbgout, "  Bug183-RW->RX[%d]: pc=0x%lx -> 0x%lx nfn=0x%lx\n",
+                rw_rx_fix_count, (unsigned long)pc, (unsigned long)rx_pc,
+                (unsigned long)fix_ts->__x[10]);
+      /* Fix the function's entrypoint if nfn points to a function */
+      natural nfn_raw = fix_ts->__x[10] & 0x00FFFFFFFFFFFFFFULL;
+      if (nfn_raw >= (natural)active_dynamic_area->low &&
+          nfn_raw < (natural)active_dynamic_area->active) {
+        LispObj *fn_slots = (LispObj *)nfn_raw;
+        LispObj fn_header = fn_slots[-1];
+        if (header_subtag(fn_header) == subtag_function) {
+          natural ep = fn_slots[0];
+          if (ep >= (natural)code_area->low && ep < (natural)code_area->high) {
+            fn_slots[0] = code_rw_to_rx(ep);
+          }
+        }
+      }
+      /* Update PC and resume */
+      fix_ts->__pc = rx_pc;
+      *((native_thread_state_t *)out_state) = *fix_ts;
+      return KERN_SUCCESS;
+    }
+  }
 
   native_thread_state_t
     *ts = (native_thread_state_t *)in_state,
@@ -4237,7 +4318,7 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
                 (unsigned long)ts->__x[10], (unsigned long)ts->__x[15],
                 (unsigned long)ts->__sp);
         /* Bug 143 debug: if PC is in static area (bad entrypoint), dump fn at x10 */
-        if ((natural)ts->__pc >= 0x200010000ULL && (natural)ts->__pc < 0x200012000ULL) {
+        if ((natural)ts->__pc >= 0x300010000ULL && (natural)ts->__pc < 0x300012000ULL) {
           natural nfn_tagged = ts->__x[10];
           natural nfn_raw = nfn_tagged & 0x00FFFFFFFFFFFFFFULL;
           fprintf(dbgout, "\n  BAD-EP: pc=0x%lx nfn=0x%lx lr=0x%lx",

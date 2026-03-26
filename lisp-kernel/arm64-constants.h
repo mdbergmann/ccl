@@ -384,13 +384,13 @@ define_gvector(simple_vector,31)
    T is the first nil-relative symbol, one dnode past nil-base.
    ================================================================ */
 
-#define nil_base_address  0x200011000LL
+#define nil_base_address  0x300011000LL
 #define nil_value  (((LispObj)tag_nil << tag_shift) | (nil_base_address + node_size))
 /* lisp_nil is a C global variable, not a macro — see pmcl-kernel.c */
 #define t_offset   dnode_size                   /* = 16 */
 #define t_value    (nil_value + t_offset)
 
-#define STATIC_BASE_ADDRESS 0x200010000LL
+#define STATIC_BASE_ADDRESS 0x300010000LL
 
 /* ================================================================
    Section 9: Type structures

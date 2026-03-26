@@ -207,8 +207,7 @@ alloc_code_vector(natural element_count)
     return 0;
   }
 
-  /* Toggle to writable for the header write */
-  code_area_make_writable();
+  /* RW mapping is always writable — no toggle needed with dual mapping */
 
   /* Write the ivector header */
   *((LispObj *)result) = make_header(subtag_xcode_vector, element_count);
@@ -218,9 +217,8 @@ alloc_code_vector(natural element_count)
   code_area->active = result + total;
   lisp_global(CODE_HEAP_ACTIVE) = (LispObj)(result + total);
 
-  /* Leave writable — caller will write instructions then toggle back */
-
-  /* Return untagged address of data (past header) */
+  /* Return untagged RW address of data (past header).
+     Caller writes instructions here, then calls make_code_vector_executable. */
   return (natural)(result + node_size);
 }
 
@@ -234,8 +232,15 @@ make_code_vector_executable(natural addr)
   natural element_count = header_element_count(header);
   natural nbytes = element_count << 2;
 
-  code_area_make_executable();
+  /* With dual mapping, the RW pages are always writable and the RX pages
+     are always executable.  Just flush icache so the RX view picks up
+     the new instructions. */
   sys_icache_invalidate((void *)addr, nbytes);
+  /* Also flush the RX mirror address range */
+  if (code_area_rx_base) {
+    natural rx_addr = code_rw_to_rx(addr);
+    sys_icache_invalidate((void *)rx_addr, nbytes);
+  }
 }
 #endif
 
@@ -1571,9 +1576,11 @@ remap_spjump()
   int disp;
   
   if (old != (pc)SPJUMP_TARGET_ADDRESS) {
+    /* macOS ARM64 W^X: mmap with RW (no EXEC), write spjump entries,
+       then mprotect to RX.  Simultaneous RWX is rejected (EINVAL). */
     new = mmap((pc) SPJUMP_TARGET_ADDRESS,
-               0x1000,
-               PROT_READ | PROT_WRITE | PROT_EXEC,
+               0x4000,
+               PROT_READ | PROT_WRITE,
                MAP_PRIVATE | MAP_ANON | MAP_FIXED,
                -1,
                0);
@@ -1581,7 +1588,7 @@ remap_spjump()
       perror("remap spjump");
       _exit(1);
     }
-    
+
     for (work = new; old < limit; work++, old++) {
       instr = *old;
       disp = instr & ((1<<26)-1);
@@ -1590,7 +1597,11 @@ remap_spjump()
       *work = ((instr >> 26) << 26) | disp;
     }
     xMakeDataExecutable((void *)new, (natural)work-(natural)new);
-    ProtectMemory(new, 0x1000);
+    /* Switch from RW to RX — W^X toggle for spjump page */
+    if (mprotect(new, 0x4000, PROT_READ | PROT_EXEC)) {
+      perror("remap spjump mprotect");
+      _exit(1);
+    }
   }
 }
 #endif
@@ -2259,23 +2270,14 @@ main
      The cross-compiler creates function objects with slot 0 = 0 (entrypoint
      unset) and slot 1 = code-vector.  We fix all entrypoints here in the kernel. */
 #if defined(DARWIN)
-  /* Allocate MAP_JIT code area for ARM64 W^X.
-     Code vectors will be allocated here in future phases.
-     For now, just allocate the region and register it. */
-  {
+  /* Allocate MAP_JIT code area for ARM64 W^X — unless image.c already did it. */
+  if (code_area == NULL) {
     LogicalAddress code_mem = MapMemoryForCode(CODE_AREA_INITIAL_SIZE);
     if (code_mem != MAP_FAILED) {
       code_area = new_area((BytePtr)code_mem,
                            (BytePtr)code_mem + CODE_AREA_INITIAL_SIZE,
                            AREA_CODE);
-      add_area_holding_area_lock(code_area);
-      /* Toggle to executable — code area starts empty but executable */
       code_area_make_executable();
-
-      lisp_global(CODE_HEAP_START) = (LispObj)code_mem;
-      lisp_global(CODE_HEAP_ACTIVE) = (LispObj)code_mem;
-      lisp_global(CODE_HEAP_LIMIT) = (LispObj)((BytePtr)code_mem + CODE_AREA_INITIAL_SIZE);
-
       fprintf(dbgout, "AREA_CODE: MAP_JIT code area at %p - %p (%lu MB)\n",
               code_mem, (BytePtr)code_mem + CODE_AREA_INITIAL_SIZE,
               (unsigned long)(CODE_AREA_INITIAL_SIZE / (1024*1024)));
@@ -2284,6 +2286,14 @@ main
       fprintf(dbgout, "AREA_CODE: MAP_JIT allocation failed!\n");
       fflush(dbgout);
     }
+  }
+  /* Don't add code_area to the area list — AREA_CODE (10) > AREA_DYNAMIC (9)
+     would make it reserved_area->succ, breaking the active_dynamic_area macro.
+     GC uses the code_area global directly (arm64-gc.c). */
+  if (code_area != NULL) {
+    lisp_global(CODE_HEAP_START) = (LispObj)code_area->low;
+    lisp_global(CODE_HEAP_ACTIVE) = (LispObj)code_area->active;
+    lisp_global(CODE_HEAP_LIMIT) = (LispObj)code_area->high;
   }
 #endif
   /* Fix function entrypoints: slot 0 = untagged code vector address.
@@ -2304,8 +2314,8 @@ main
       } else if (nodeheader_tag_p(subtag)) {
         natural count = header_element_count(w0);
         if (subtag == subtag_function && count >= 2) {
-          /* Entrypoint = untagged code vector (strip TBI tag) */
-          start[1] = untag(start[2]);
+          /* Entrypoint = untagged code vector, converted to RX address */
+          start[1] = code_rw_to_rx(untag(start[2]));
           fixed++;
         }
         start += 1 + count;
@@ -2331,7 +2341,7 @@ main
           } else if (nodeheader_tag_p(subtag)) {
             natural count = header_element_count(w0);
             if (subtag == subtag_function && count >= 2) {
-              rostart[1] = untag(rostart[2]);
+              rostart[1] = code_rw_to_rx(untag(rostart[2]));
               fixed++;
             }
             rostart += 1 + count;

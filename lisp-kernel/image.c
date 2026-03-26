@@ -106,24 +106,11 @@ relocate_area_contents(area *a, LispObj bias)
          code address that won't be relocated by the normal tag-based
          relocator.  Relocate it explicitly, like ARM32. */
       if (header_subtag(w0) == subtag_function) {
+        /* Entrypoint relocation — handled by CODE relocation block below
+           for separate code space.  Still needed for inline-code case. */
         w1 = start[1];
         if ((w1 >= low) && (w1 < high)) {
           start[1]=(w1+bias);
-          static int ep_reloc_count = 0;
-          if (ep_reloc_count < 3) {
-            fprintf(dbgout, "  ep-reloc[%d]: fn=%p old=0x%lx new=0x%lx cv=0x%lx\n",
-                    ep_reloc_count, (void*)start, (unsigned long)w1,
-                    (unsigned long)start[1], (unsigned long)start[2]);
-          }
-          ep_reloc_count++;
-        } else {
-          static int ep_skip_count = 0;
-          if (ep_skip_count < 3) {
-            fprintf(dbgout, "  ep-SKIP[%d]: fn=%p ep=0x%lx low=0x%lx high=0x%lx cv=0x%lx\n",
-                    ep_skip_count, (void*)start, (unsigned long)w1,
-                    (unsigned long)low, (unsigned long)high, (unsigned long)start[2]);
-          }
-          ep_skip_count++;
         }
         start+=2;
         w0 = *start;
@@ -389,8 +376,28 @@ load_image_section(int fd, openmcl_image_section_header *sect)
 #ifdef ARM64
   case AREA_CODE:
     fprintf(dbgout, "  CODE: size=%ld\n", (long)mem_size);
-    /* Code area is allocated at boot (MAP_JIT) by pmcl-kernel.c.
-       Read the saved code data into the already-allocated code area. */
+    /* Allocate the MAP_JIT code area on demand if not yet initialized. */
+    if (code_area == NULL && mem_size > 0) {
+#if defined(DARWIN)
+      natural code_size = align_to_power_of_2(mem_size, log2_page_size);
+      if (code_size < 128 * 1024 * 1024) code_size = 128 * 1024 * 1024;
+      LogicalAddress code_mem = MapMemoryForCode(code_size);
+      if (code_mem != MAP_FAILED) {
+        code_area = new_area((BytePtr)code_mem,
+                             (BytePtr)code_mem + code_size,
+                             AREA_CODE);
+        /* Don't add to area list here — AREA_CODE (10) > AREA_DYNAMIC (9),
+           so it would become reserved_area->succ and break active_dynamic_area.
+           pmcl-kernel.c adds it after dynamic area is established. */
+        code_area_make_executable();
+        fprintf(dbgout, "  CODE: allocated MAP_JIT %lu MB at %p\n",
+                (unsigned long)(code_size / (1024*1024)), code_mem);
+      } else {
+        fprintf(dbgout, "  CODE: MAP_JIT allocation failed\n");
+      }
+#endif
+    }
+    /* Read the saved code data into the code area. */
     if (code_area != NULL && mem_size > 0) {
       natural aligned_size = align_to_power_of_2(mem_size, log2_page_size);
       if (aligned_size > (natural)((BytePtr)code_area->high - (BytePtr)code_area->low)) {
@@ -401,21 +408,32 @@ load_image_section(int fd, openmcl_image_section_header *sect)
       }
       /* Toggle to writable for the data copy */
       code_area_make_writable();
-      /* Read code data directly into the MAP_JIT code area */
+      /* Read code data via temp buffer — read() can't write to MAP_JIT directly */
       {
         off_t saved_pos = LSEEK(fd, 0, SEEK_CUR);
         LSEEK(fd, pos, SEEK_SET);
+#define CODE_READ_CHUNK (64 * 1024)
+        char *tmpbuf = (char *)malloc(CODE_READ_CHUNK);
+        if (!tmpbuf) {
+          fprintf(dbgout, "  CODE: malloc for temp buffer failed\n");
+          return;
+        }
         natural total_read = 0;
         while (total_read < mem_size) {
-          ssize_t n = read(fd, (BytePtr)code_area->low + total_read,
-                           mem_size - total_read);
+          natural want = mem_size - total_read;
+          if (want > CODE_READ_CHUNK) want = CODE_READ_CHUNK;
+          ssize_t n = read(fd, tmpbuf, want);
           if (n <= 0) {
             fprintf(dbgout, "  CODE: read failed at offset %lu\n",
                     (unsigned long)total_read);
+            free(tmpbuf);
             return;
           }
+          memcpy((BytePtr)code_area->low + total_read, tmpbuf, n);
           total_read += n;
         }
+        free(tmpbuf);
+#undef CODE_READ_CHUNK
         LSEEK(fd, saved_pos, SEEK_SET);
       }
       code_area->active = (BytePtr)code_area->low + mem_size;
@@ -587,45 +605,164 @@ load_openmcl_image(int fd, openmcl_image_file_header *h)
       }
       if (old_code_base && code_area && code_area->low) {
         LispObj code_bias = (LispObj)((natural)code_area->low - old_code_base);
+        /* Entrypoint bias: relocate to RX mirror address for execution */
+        LispObj ep_bias = code_bias + (LispObj)code_rw_rx_bias;
         if (code_bias != 0) {
           natural code_lo = old_code_base;
           natural code_hi = old_code_base + sect->memory_size;
           int relocated = 0;
-          fprintf(dbgout, "  CODE relocation: old_base=0x%lx new_base=%p bias=0x%lx\n",
-                  (unsigned long)old_code_base, code_area->low, (unsigned long)code_bias);
-          /* Walk dynamic area functions */
+          fprintf(dbgout, "  CODE relocation: old_base=0x%lx RW=%p RX=%p code_bias=0x%lx ep_bias=0x%lx\n",
+                  (unsigned long)old_code_base, code_area->low,
+                  code_area_rx_base ? (void*)code_area_rx_base : code_area->low,
+                  (unsigned long)code_bias, (unsigned long)ep_bias);
+          /* Walk an area relocating code-vector pointers in functions.
+             Entrypoints (slot 0, untagged) → RX address (ep_bias).
+             Code-vectors (slot 1, tagged)  → RW address (code_bias). */
+#define RELOCATE_CODE_IN_AREA(area_low, area_active, area_name) do { \
+            LispObj *_start = (LispObj *)(area_low); \
+            LispObj *_end = (LispObj *)(area_active); \
+            int _fn_count = 0; \
+            while (_start < _end) { \
+              LispObj _w0 = *_start; \
+              natural _subtag = header_subtag(_w0); \
+              if (immheader_tag_p(_subtag)) { \
+                _start = (LispObj *)skip_over_ivector((natural)_start, _w0); \
+              } else if (nodeheader_tag_p(_subtag)) { \
+                natural _count = header_element_count(_w0); \
+                if (_subtag == subtag_function && _count >= 2) { \
+                  _fn_count++; \
+                  natural _ep = _start[1]; \
+                  if (_ep >= code_lo && _ep < code_hi) { \
+                    _start[1] = _ep + ep_bias; \
+                    relocated++; \
+                  } \
+                  natural _cv_addr = addr_of(_start[2]); \
+                  if (_cv_addr >= code_lo && _cv_addr < code_hi) { \
+                    _start[2] = _start[2] + code_bias; \
+                    relocated++; \
+                  } \
+                } \
+                _start += 1 + _count; \
+                if (((natural)_start) & (dnode_size - 1)) _start++; \
+              } else { \
+                _start += 2; \
+              } \
+            } \
+            fprintf(dbgout, "  CODE walk %s: %d functions\n", area_name, _fn_count); \
+          } while(0)
+          RELOCATE_CODE_IN_AREA(active_dynamic_area->low, active_dynamic_area->active, "dynamic");
+          if (readonly_area && readonly_area->low < readonly_area->active) {
+            RELOCATE_CODE_IN_AREA(readonly_area->low, readonly_area->active, "readonly");
+          }
+#undef RELOCATE_CODE_IN_AREA
+          /* Bug 183: Relocate code-space refs in static symbols.
+             %macro-code% and %closure-code% store code vectors in their
+             vcell (value cell), which the function-only walk above misses.
+             These are used as execution targets (closure/macro entrypoints),
+             so use ep_bias to get RX addresses. */
           {
-            LispObj *start = (LispObj *)active_dynamic_area->low;
-            LispObj *end = (LispObj *)active_dynamic_area->active;
-            while (start < end) {
-              LispObj w0 = *start;
-              natural subtag = header_subtag(w0);
-              if (immheader_tag_p(subtag)) {
-                start = (LispObj *)skip_over_ivector((natural)start, w0);
-              } else if (nodeheader_tag_p(subtag)) {
-                natural count = header_element_count(w0);
-                if (subtag == subtag_function && count >= 2) {
-                  /* Slot 0 = entrypoint (untagged, start[1]) */
-                  natural ep = start[1];
-                  if (ep >= code_lo && ep < code_hi) {
-                    start[1] = ep + code_bias;
-                    relocated++;
-                  }
-                  /* Slot 1 = code-vector (tagged, start[2]) */
-                  natural cv_addr = addr_of(start[2]);
-                  if (cv_addr >= code_lo && cv_addr < code_hi) {
-                    start[2] = start[2] + code_bias;
-                    relocated++;
-                  }
-                }
-                start += 1 + count;
-                if (((natural)start) & (dnode_size - 1)) start++;
-              } else {
-                start += 2;
+            lispsymbol *sym = (lispsymbol *)(nil_base_address + dnode_size);
+            int si;
+            for (si = 0; si < num_nilreg_symbols; si++, sym++) {
+              /* Check vcell (value cell) */
+              natural vcell_addr = sym->vcell & 0x00FFFFFFFFFFFFFFULL;
+              if (vcell_addr >= code_lo && vcell_addr < code_hi) {
+                fprintf(dbgout, "  CODE reloc sym[%d] vcell: 0x%lx -> 0x%lx (RX)\n",
+                        si, (unsigned long)sym->vcell, (unsigned long)(sym->vcell + ep_bias));
+                sym->vcell += ep_bias;
+                relocated++;
+              }
+              /* Check fcell (function cell) — unlikely but be safe */
+              natural fcell_addr = sym->fcell & 0x00FFFFFFFFFFFFFFULL;
+              if (fcell_addr >= code_lo && fcell_addr < code_hi) {
+                fprintf(dbgout, "  CODE reloc sym[%d] fcell: 0x%lx -> 0x%lx (RX)\n",
+                        si, (unsigned long)sym->fcell, (unsigned long)(sym->fcell + ep_bias));
+                sym->fcell += ep_bias;
+                relocated++;
               }
             }
           }
+          /* Bug 183: Brute-force scan for remaining code-space refs in
+             dynamic area (e.g. code-vector refs in function constant pools
+             for %closure-code% and %macro-code%).  Use ep_bias since these
+             are execution targets (used to derive entrypoints). */
+          {
+            LispObj *s = (LispObj *)active_dynamic_area->low;
+            LispObj *e = (LispObj *)active_dynamic_area->active;
+            int extra = 0;
+            while (s < e) {
+              natural v = *s;
+              natural v_addr = v & 0x00FFFFFFFFFFFFFFULL;
+              if (v_addr >= code_lo && v_addr < code_hi) {
+                if (extra < 10)
+                  fprintf(dbgout, "  CODE reloc extra @%p: 0x%lx -> 0x%lx (RX)\n",
+                          (void*)s, (unsigned long)v, (unsigned long)(v + ep_bias));
+                *s = v + ep_bias;
+                relocated++;
+                extra++;
+              }
+              s++;
+            }
+            if (extra > 0)
+              fprintf(dbgout, "  CODE relocation: %d extra refs in dynamic area\n", extra);
+          }
           fprintf(dbgout, "  CODE relocation: %d pointers adjusted\n", relocated);
+          /* Bug 183: Scan for any remaining unrelocated code addresses */
+          {
+            int stale_count = 0;
+            /* Check static area (symbols only — known safe range) */
+            {
+              LispObj *s = (LispObj *)(nil_base_address + dnode_size);
+              LispObj *e = (LispObj *)((BytePtr)s + num_nilreg_symbols * sizeof(lispsymbol));
+              while (s < e) {
+                natural v = *s;
+                natural v_addr = v & 0x00FFFFFFFFFFFFFFULL;
+                if (v_addr >= code_lo && v_addr < code_hi) {
+                  if (stale_count < 10)
+                    fprintf(dbgout, "  Bug183-STALE static @%p: 0x%lx (off=+0x%lx)\n",
+                            (void*)s, (unsigned long)v,
+                            (unsigned long)((BytePtr)s - (BytePtr)STATIC_BASE_ADDRESS));
+                  stale_count++;
+                }
+                s++;
+              }
+            }
+            /* Check lisp globals (negative indices from nil_base_address) */
+            {
+              LispObj *gbase = (LispObj *)nil_base_address;
+              int gi;
+              for (gi = -1; gi >= MIN_KERNEL_GLOBAL; gi--) {
+                natural v = gbase[gi];
+                natural v_addr = v & 0x00FFFFFFFFFFFFFFULL;
+                if (v_addr >= code_lo && v_addr < code_hi) {
+                  if (stale_count < 10)
+                    fprintf(dbgout, "  Bug183-STALE global[%d] @%p: 0x%lx\n", gi, (void*)&gbase[gi], (unsigned long)v);
+                  stale_count++;
+                }
+              }
+            }
+            /* Scan dynamic area for ANY word matching old code range */
+            {
+              LispObj *s = (LispObj *)active_dynamic_area->low;
+              LispObj *e = (LispObj *)active_dynamic_area->active;
+              while (s < e) {
+                natural v = *s;
+                natural v_addr = v & 0x00FFFFFFFFFFFFFFULL;
+                if (v_addr >= code_lo && v_addr < code_hi) {
+                  if (stale_count < 20)
+                    fprintf(dbgout, "  Bug183-STALE dynamic @%p: 0x%lx (offset +0x%lx)\n",
+                            (void*)s, (unsigned long)v,
+                            (unsigned long)((BytePtr)s - (BytePtr)active_dynamic_area->low));
+                  stale_count++;
+                }
+                s++;
+              }
+            }
+            if (stale_count > 0)
+              fprintf(dbgout, "  Bug183: %d stale code addresses found!\n", stale_count);
+            else
+              fprintf(dbgout, "  Bug183: no stale code addresses found\n");
+          }
         }
       }
     }

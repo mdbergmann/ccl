@@ -22,8 +22,13 @@
 ;;; TBI only applies to data accesses (ldr/str), NOT to instruction
 ;;; fetches (br/blr).  Strip the TBI tag byte before storing.
 (defarm64lapfunction %fix-fn-entrypoint ((func arg_z))
-  (ldr temp0 (:@ func (:$ arm64::node-size)))    ; element 1 = code vector (tagged)
-  (and temp0 temp0 (:$ #x00FFFFFFFFFFFFFF))      ; strip TBI tag for branch target
+  (ldr temp0 (:@ func (:$ arm64::node-size)))    ; element 1 = code vector (tagged, RW)
+  (and temp0 temp0 (:$ #x00FFFFFFFFFFFFFF))      ; strip TBI tag → RW address
+  ;; Convert RW → RX for dual-mapped code area.  The bias (rx-rw) is
+  ;; stored in the C global code_rw_rx_bias.  If 0, no conversion needed.
+  (adrp imm0 (:external "_code_rw_rx_bias"))
+  (ldr imm0 (:@ imm0 (:external "_code_rw_rx_bias")))
+  (add temp0 temp0 imm0)                         ; RW + bias = RX address
   (str temp0 (:@ func (:$ arm64::function.entrypoint)))
   (ret))
 
@@ -59,12 +64,13 @@
   (mov fp sp)
   (str rnil (:@ sp (:$ 16)))
   ;; element-count is already unboxed (fixnumshift=0)
-  ;; Load C function address: kernel-imports[alloc-code-vector]
-  (ref-global imm0 kernel-imports)
-  (ldr imm0 (:@ imm0 (:$ arm64::kernel-import-alloc-code-vector)))
+  ;; Load C function address into imm2 (x2) — NOT imm0 (x0), since x0
+  ;; is also the first C argument register and would be clobbered.
+  (ref-global imm2 kernel-imports)
+  (ldr imm2 (:@ imm2 (:$ arm64::kernel-import-alloc-code-vector)))
   ;; Call C: x0 = element_count, returns untagged data address in x0
   (mov x0 arg_z)
-  (blr imm0)
+  (blr imm2)
   ;; Apply TBI tag: result = untagged_addr | (fulltag_misc << 56)
   ;; fulltag_misc = uvector_ref = 0x40
   (movk x0 (:$ #x4000) (:lsl 48))
@@ -83,12 +89,13 @@
   (stp fp lr (:@! sp (:$ -32)))
   (mov fp sp)
   (str rnil (:@ sp (:$ 16)))
-  ;; Strip TBI tag to get untagged address for C
+  ;; Strip TBI tag to get untagged address for C → x0 (first C arg)
   (and x0 arg_z (:$ #x00FFFFFFFFFFFFFF))
-  ;; Load C function address
-  (ref-global imm0 kernel-imports)
-  (ldr imm0 (:@ imm0 (:$ arm64::kernel-import-make-code-vector-executable)))
-  (blr imm0)
+  ;; Load C function address into imm2 (x2) — NOT imm0 (x0), since
+  ;; x0 already holds the C argument and would be clobbered.
+  (ref-global imm2 kernel-imports)
+  (ldr imm2 (:@ imm2 (:$ arm64::kernel-import-make-code-vector-executable)))
+  (blr imm2)
   ;; Restore rnil, return nil
   (ldr rnil (:@ sp (:$ 16)))
   (mov arg_z rnil)

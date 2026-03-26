@@ -56,15 +56,18 @@ define(`jump_builtin',`
    Bug 128: Must strip TBI tag — br/blr do NOT honor TBI on macOS ARM64.
    Bug 152: temp2=nfn=x10 on ARM64 — must use a different register (imm0)
    to avoid clobbering nfn and corrupting the code vector. */
-/* MAP_JIT dynamic area: SPfix_nfn_entrypoint is simplified.
-   Code vectors live in the MAP_JIT dynamic area at their birth address.
-   Just untag the code vector, store as entrypoint, and branch.
-   No code copying, no address translation needed. */
+/* Dual-mapped code area: code-vectors use the RW address (for writes),
+   but entrypoints must use the RX mirror address (for execution).
+   Load the RW->RX bias from a C global and add it to the untagged address.
+   If bias is 0 (no dual mapping), this is equivalent to simple untag. */
 _spentry(fix_nfn_entrypoint)
-        __(ldr imm0,[nfn,#node_size])              /* load slot 1 = code vector (tagged) */
-        __(and imm0,imm0,#0x00FFFFFFFFFFFFFF)      /* strip TBI tag for br/blr */
-        __(str imm0,[nfn,#_function.entrypoint])   /* store entrypoint in slot 0 */
-        __(br imm0)                                 /* branch to code, nfn preserved */
+        __(ldr imm0,[nfn,#node_size])              /* load slot 1 = code vector (tagged, RW) */
+        __(and imm0,imm0,#0x00FFFFFFFFFFFFFF)      /* strip TBI tag -> RW address */
+        __(adrp imm1,_code_rw_rx_bias@PAGE)
+        __(ldr imm1,[imm1,_code_rw_rx_bias@PAGEOFF]) /* load bias (rx - rw) */
+        __(add imm0,imm0,imm1)                     /* RW + bias = RX address */
+        __(str imm0,[nfn,#_function.entrypoint])   /* store RX entrypoint in slot 0 */
+        __(br imm0)                                 /* branch to RX code */
 _endsubp(fix_nfn_entrypoint)
 
 

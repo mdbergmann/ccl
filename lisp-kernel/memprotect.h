@@ -148,22 +148,34 @@ initialize_refidx_from_refbits(bitvector, bitvector, natural);
 #include <pthread.h>
 #include <sys/mman.h>
 #include <libkern/OSCacheControl.h>
+#include <mach/mach.h>
 
-/* Separate code area (AREA_CODE) with MAP_JIT for ARM64 W^X.
-   Code vectors live in AREA_CODE (MAP_JIT, toggled RW/RX).
-   Data objects live in AREA_DYNAMIC (always RW, never executable).
-   Use these helpers when writing/executing code in the code area. */
+/* Separate code area (AREA_CODE) with dual mapping for ARM64 W^X.
+   The code area has two virtual addresses for the same physical pages:
+   - RW mapping (code_area->low): always writable, used for allocation & data writes
+   - RX mapping (code_area_rx_base): always executable, used for function entrypoints
+   This avoids MAP_JIT's per-thread W^X toggle, which makes the calling
+   code non-executable when toggled to writable. */
 
-static inline void code_area_make_writable(void) {
-  pthread_jit_write_protect_np(false);
-}
+extern BytePtr code_area_rx_base;   /* RX mirror base address */
+extern natural code_rw_rx_bias;     /* rx_base - rw_base, for assembly */
 
-static inline void code_area_make_executable(void) {
-  pthread_jit_write_protect_np(true);
-}
+/* No-op toggles — dual mapping means RW and RX are always available */
+static inline void code_area_make_writable(void) { }
+static inline void code_area_make_executable(void) { }
 
 static inline void code_area_flush_icache(void *addr, natural nbytes) {
   sys_icache_invalidate(addr, nbytes);
+}
+
+/* Convert RW address to RX address and vice versa.
+   Uses the precomputed bias (rx_base - rw_base). */
+static inline natural code_rw_to_rx(natural rw_addr) {
+  return rw_addr + code_rw_rx_bias;
+}
+
+static inline natural code_rx_to_rw(natural rx_addr) {
+  return rx_addr - code_rw_rx_bias;
 }
 
 /* Code vector allocator — called from Lisp via kernel import */

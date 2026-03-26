@@ -551,7 +551,7 @@ TCR_FLAG_BIT_FOREIGN_EXCEPTION = 6
 TCR_FLAG_BIT_PENDING_SUSPEND = 7        
 
 
-nil_value = (tag_nil << tag_shift) | (0x200011000+node_size)
+nil_value = (tag_nil << tag_shift) | (0x300011000+node_size)
         	
 define(`RESERVATION_DISCHARGE',(0x2008+(LOWMEM_BIAS)))
 

@@ -23,6 +23,9 @@
 #include <stdlib.h>
 #include <stddef.h>
 #include <string.h>
+#if defined(DARWIN) && defined(ARM64)
+#include <mach/mach_vm.h>
+#endif
 #include <stdarg.h>
 #include <errno.h>
 #include <stdio.h>
@@ -223,23 +226,65 @@ MapMemoryForStack(natural nbytes)
 
 
 #if defined(DARWIN) && defined(ARM64)
-/* Allocate MAP_JIT memory for the separate code area (AREA_CODE).
-   Code vectors live here; data stays in AREA_DYNAMIC (plain RW).
-   MAP_JIT + MAP_FIXED = EINVAL on macOS, so we accept the kernel-chosen
-   address.  Use pthread_jit_write_protect_np() for per-thread W<->X toggling. */
+BytePtr code_area_rx_base = NULL;
+natural code_rw_rx_bias = 0;  /* rx_base - rw_base, for SPfix_nfn_entrypoint */
+
+/* Allocate dual-mapped code area for ARM64 W^X:
+   - RW mapping: returned address, always writable for allocation & writes
+   - RX mapping: code_area_rx_base, always executable for function entrypoints
+   Both map the same physical pages via mach_vm_remap.
+   This avoids MAP_JIT's per-thread toggle which makes calling code
+   non-executable when toggled to writable. */
 LogicalAddress
 MapMemoryForCode(natural nbytes)
 {
-  LogicalAddress p;
-  p = mmap(NULL, nbytes, PROT_READ | PROT_WRITE | PROT_EXEC,
-           MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
-  if (p == MAP_FAILED) {
-    perror("MapMemoryForCode (MAP_JIT)");
+  /* Step 1: Allocate RW memory (regular anonymous, not MAP_JIT) */
+  LogicalAddress rw = mmap(NULL, nbytes, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANON, -1, 0);
+  if (rw == MAP_FAILED) {
+    perror("MapMemoryForCode: RW mmap failed");
     return MAP_FAILED;
   }
-  /* Start in writable mode for data copy */
-  pthread_jit_write_protect_np(false);
-  return p;
+
+  /* Step 2: Create RX mirror via mach_vm_remap */
+  mach_vm_address_t rx_addr = 0;
+  vm_prot_t cur_prot, max_prot;
+  kern_return_t kr = mach_vm_remap(
+    mach_task_self(),
+    &rx_addr,
+    (mach_vm_size_t)nbytes,
+    0,                          /* alignment mask — page aligned */
+    VM_FLAGS_ANYWHERE,          /* kernel picks address */
+    mach_task_self(),
+    (mach_vm_address_t)rw,      /* source = RW mapping */
+    FALSE,                      /* copy = FALSE → share physical pages */
+    &cur_prot,
+    &max_prot,
+    VM_INHERIT_NONE);
+
+  if (kr != KERN_SUCCESS) {
+    fprintf(dbgout, "MapMemoryForCode: mach_vm_remap failed: %d\n", kr);
+    munmap(rw, nbytes);
+    return MAP_FAILED;
+  }
+
+  /* Step 3: Set RX protection on the mirror */
+  kr = mach_vm_protect(mach_task_self(), rx_addr, nbytes, FALSE,
+                       VM_PROT_READ | VM_PROT_EXECUTE);
+  if (kr != KERN_SUCCESS) {
+    fprintf(dbgout, "MapMemoryForCode: mach_vm_protect RX failed: %d\n", kr);
+    mach_vm_deallocate(mach_task_self(), rx_addr, nbytes);
+    munmap(rw, nbytes);
+    return MAP_FAILED;
+  }
+
+  code_area_rx_base = (BytePtr)rx_addr;
+  code_rw_rx_bias = (natural)rx_addr - (natural)rw;
+  fprintf(dbgout, "  CODE dual-map: RW=%p RX=%p bias=0x%lx size=%lu MB\n",
+          rw, (void*)rx_addr, (unsigned long)code_rw_rx_bias,
+          (unsigned long)(nbytes / (1024*1024)));
+
+  return rw;  /* Return RW address for allocation/writes */
 }
 #endif
 

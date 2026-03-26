@@ -180,11 +180,12 @@
           (arch::target-char-code-limit arch))
     (setq *xload-target-tbi-p*
           (= (arch::target-ntagbits arch) 8))
-    ;; ARM64 code space: use address well above other spaces.
-    ;; The kernel will relocate to the actual MAP_JIT address.
+    ;; ARM64 code space: virtual address for xload, well away from other spaces.
+    ;; The kernel will relocate to the actual MAP_JIT address at boot.
+    ;; Must not overlap static space (#x300010000) or image base (#x300012000).
     ;; Must be after *xload-target-tbi-p* is set.
     (when *xload-target-tbi-p*
-      (setq *xload-code-space-address* #x300000000))))
+      (setq *xload-code-space-address* #x280000000))))
 
 
 
