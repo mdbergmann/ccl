@@ -2356,6 +2356,60 @@ main
   }
 #endif
 #if defined(DARWIN) && defined(ARM64)
+  /* Bug 183: Patch %fix-fn-entrypoint in the code area to add code_rw_rx_bias.
+     The image's %fix-fn-entrypoint was cross-compiled without RW→RX awareness,
+     so it sets entrypoint = untag(code-vector) which gives an RW address.
+     We patch it at runtime to add the bias, making newly created functions
+     get RX entrypoints directly.
+
+     Old code (4 instructions):
+       ldr x12, [x15, #8]       ; 0xf94005ec  load code vector
+       and x12, x12, #mask      ; 0x9240dd8c  strip TBI tag → RW
+       str x12, [x15, #0]       ; 0xf90001ec  store entrypoint (RW!)
+       ret                      ; 0xd65f03c0
+
+     New code (6 instructions + 8 bytes data, fits in 4-instr + 2-word padding):
+       ldr x12, [x15, #8]       ; 0xf94005ec  load code vector
+       and x12, x12, #mask      ; 0x9240dd8c  strip TBI tag → RW
+       ldr x0, +16              ; 0x58000080  literal load bias from data after ret
+       add x12, x12, x0         ; 0x8b00018c  RW + bias = RX
+       str x12, [x15, #0]       ; 0xf90001ec  store entrypoint (RX!)
+       ret                      ; 0xd65f03c0
+       .quad <code_rw_rx_bias>  ; 8 bytes in alignment padding
+  */
+  if (code_area && code_rw_rx_bias != 0) {
+    opcode old_pattern[] = { 0xf94005ec, 0x9240dd8c, 0xf90001ec, 0xd65f03c0 };
+    opcode *scan = (opcode *)code_area->low;
+    opcode *scan_end = (opcode *)code_area->active;
+    int patched = 0;
+    while (scan + 8 <= scan_end) {
+      if (scan[0] == old_pattern[0] && scan[1] == old_pattern[1] &&
+          scan[2] == old_pattern[2] && scan[3] == old_pattern[3]) {
+        /* Found %fix-fn-entrypoint — patch it */
+        scan[0] = 0xf94005ec;  /* ldr x12, [x15, #8]       */
+        scan[1] = 0x9240dd8c;  /* and x12, x12, #mask      */
+        scan[2] = 0x58000080;  /* ldr x0, +16 (literal)    */
+        scan[3] = 0x8b00018c;  /* add x12, x12, x0         */
+        scan[4] = 0xf90001ec;  /* str x12, [x15, #0]       */
+        scan[5] = 0xd65f03c0;  /* ret                      */
+        /* Store bias value in the 8-byte padding after the 6 instructions */
+        *(natural *)(scan + 6) = (natural)code_rw_rx_bias;
+        /* Flush icache for both RW and RX addresses */
+        natural rw_addr = (natural)scan;
+        natural rx_addr = code_rw_to_rx(rw_addr);
+        sys_icache_invalidate((void *)rw_addr, 32);
+        sys_icache_invalidate((void *)rx_addr, 32);
+        fprintf(dbgout, "Bug183: patched %%fix-fn-entrypoint at RW=0x%lx RX=0x%lx bias=0x%lx\n",
+                rw_addr, rx_addr, (unsigned long)code_rw_rx_bias);
+        patched++;
+        break;
+      }
+      scan++;
+    }
+    if (!patched) {
+      fprintf(dbgout, "Bug183: WARNING — could not find %%fix-fn-entrypoint to patch!\n");
+    }
+  }
   /* macOS ARM64 W^X finalization:
      - Static area: flush icache for spjump table
      - Readonly area: mprotect to RX (never written after boot)

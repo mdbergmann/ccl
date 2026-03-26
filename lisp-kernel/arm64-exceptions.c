@@ -6781,6 +6781,8 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
       if (IS_ALLOC_TRAP(insn)) {
         signed_natural disp = 0;
         opcode *pc = (opcode *)(natural)ts->__pc;
+        static int alloc_trap_count = 0;
+        alloc_trap_count++;
         /* Check pc[-3] and pc[-4] for the SUB instruction.
            Standard: sub, cmp, b.hi, hlt → sub at [-3].
            TCR-loaded allocbase: sub, ldr, cmp, b.hi, hlt → sub at [-4]. */
@@ -6796,7 +6798,6 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
             disp = -((signed_natural)ts->__x[rm]);
           }
         }
-
         if (disp) {
           natural cur_allocptr = ts->__x[allocptr];
           natural bytes_needed = (-disp) + node_size;
