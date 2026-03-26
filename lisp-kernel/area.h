@@ -182,7 +182,7 @@ extern BytePtr low_relocatable_address, high_relocatable_address,
   low_markable_address, high_markable_address, reserved_region_end;
 
 #ifdef ARM64
-extern BytePtr code_space_start, code_space_active, code_space_limit;
+extern area *code_area;
 #endif
 
 #endif /* __AREA_H__ */

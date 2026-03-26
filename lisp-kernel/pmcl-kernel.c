@@ -173,11 +173,12 @@ extern LispObj import_ptrs_base;
 /* The highest heap address that's (probably) been written to. */
 BytePtr heap_dirty_limit = NULL;
 
-#if defined(DARWIN) && defined(ARM64)
-/* Code heap: MAP_JIT region for ARM64 W^X.
-   Code vectors are copied here so the dynamic area can stay permanently RW. */
-BytePtr code_space_start = NULL, code_space_active = NULL, code_space_limit = NULL;
-#define CODE_HEAP_SIZE (64 * 1024 * 1024)  /* 64 MB initial */
+#if defined(ARM64)
+/* Separate MAP_JIT code area for ARM64 W^X.
+   Code vectors live here; data objects stay in AREA_DYNAMIC. */
+area *code_area = NULL;
+
+#define CODE_AREA_INITIAL_SIZE (128 * 1024 * 1024)  /* 128 MB */
 #endif
 
 
@@ -2198,36 +2199,43 @@ main
 #if defined(ARM64)
   /* ARM64: Fix function entrypoints after image loading.
      The cross-compiler creates function objects with slot 0 = 0 (entrypoint
-     unset) and slot 1 = code-vector.  We fix all entrypoints here in the kernel.
-
-     On macOS ARM64 with code heap: also copy each code vector to the MAP_JIT
-     code heap so the dynamic area can stay permanently RW (no W^X ping-pong). */
+     unset) and slot 1 = code-vector.  We fix all entrypoints here in the kernel. */
 #if defined(DARWIN)
-  /* Initialize code heap before entrypoint fixup */
+  /* Allocate MAP_JIT code area for ARM64 W^X.
+     Code vectors will be allocated here in future phases.
+     For now, just allocate the region and register it. */
   {
-    LogicalAddress code_mem = MapMemoryForCode(CODE_HEAP_SIZE);
-    if (code_mem == MAP_FAILED) {
-      Fatal("Failed to allocate MAP_JIT code heap", "");
+    LogicalAddress code_mem = MapMemoryForCode(CODE_AREA_INITIAL_SIZE);
+    if (code_mem != MAP_FAILED) {
+      code_area = new_area((BytePtr)code_mem,
+                           (BytePtr)code_mem + CODE_AREA_INITIAL_SIZE,
+                           AREA_CODE);
+      add_area_holding_area_lock(code_area);
+      /* Toggle to executable — code area starts empty but executable */
+      code_area_make_executable();
+
+      lisp_global(CODE_HEAP_START) = (LispObj)code_mem;
+      lisp_global(CODE_HEAP_ACTIVE) = (LispObj)code_mem;
+      lisp_global(CODE_HEAP_LIMIT) = (LispObj)((BytePtr)code_mem + CODE_AREA_INITIAL_SIZE);
+
+      fprintf(dbgout, "AREA_CODE: MAP_JIT code area at %p - %p (%lu MB)\n",
+              code_mem, (BytePtr)code_mem + CODE_AREA_INITIAL_SIZE,
+              (unsigned long)(CODE_AREA_INITIAL_SIZE / (1024*1024)));
+      fflush(dbgout);
+    } else {
+      fprintf(dbgout, "AREA_CODE: MAP_JIT allocation failed!\n");
+      fflush(dbgout);
     }
-    code_space_start = (BytePtr)code_mem;
-    code_space_active = code_space_start;
-    code_space_limit = code_space_start + CODE_HEAP_SIZE;
-    fprintf(dbgout, "Code heap: %p - %p (%lu MB, MAP_JIT)\n",
-            code_space_start, code_space_limit,
-            (unsigned long)(CODE_HEAP_SIZE / (1024 * 1024)));
   }
-  /* Bug 173: ensure-binding-index skip is now in source (nfasload.lisp)
-     via (not *early-boot*) guard. No binary patch needed. */
 #endif
+  /* Fix function entrypoints: slot 0 = untagged code vector address.
+     On all platforms: strip TBI tag from code vector (slot 1) to get entrypoint.
+     With MAP_JIT: code is already at its birth address, no copying needed. */
   {
     BytePtr heap_start = (BytePtr)(natural)lisp_global(HEAP_START);
     LispObj *start = (LispObj *)heap_start;
     LispObj *end = (LispObj *)active_dynamic_area->active;
     int fixed = 0;
-#if defined(DARWIN)
-    int copied = 0;
-    natural code_bytes_total = 0;
-#endif
 
     while (start < end) {
       LispObj w0 = *start;
@@ -2238,27 +2246,8 @@ main
       } else if (nodeheader_tag_p(subtag)) {
         natural count = header_element_count(w0);
         if (subtag == subtag_function && count >= 2) {
-          LispObj code_vec_tagged = start[2];  /* slot 1 = code vector (tagged) */
-#if defined(DARWIN)
-          /* Copy the code vector to MAP_JIT code heap */
-          natural cv_untagged = untag(code_vec_tagged);
-          LispObj *cv_header = (LispObj *)(cv_untagged - node_size);
-          LispObj cv_hdr_val = *cv_header;
-          natural cv_total = (natural)skip_over_ivector((natural)cv_header, cv_hdr_val) - (natural)cv_header;
-          void *code_copy = copy_code_vector_to_code_heap(cv_header, cv_total);
-          if (code_copy) {
-            /* Entrypoint = first instruction = past header in code heap */
-            start[1] = (natural)code_copy + node_size;
-            copied++;
-            code_bytes_total += cv_total;
-          } else {
-            /* Code heap full — fall back to data heap address */
-            start[1] = untag(code_vec_tagged);
-          }
-#else
-          /* Non-macOS: just strip TBI tag */
-          start[1] = untag(code_vec_tagged);
-#endif
+          /* Entrypoint = untagged code vector (strip TBI tag) */
+          start[1] = untag(start[2]);
           fixed++;
         }
         start += 1 + count;
@@ -2284,23 +2273,7 @@ main
           } else if (nodeheader_tag_p(subtag)) {
             natural count = header_element_count(w0);
             if (subtag == subtag_function && count >= 2) {
-#if defined(DARWIN)
-              LispObj code_vec_tagged = rostart[2];
-              natural cv_untagged = untag(code_vec_tagged);
-              LispObj *cv_header = (LispObj *)(cv_untagged - node_size);
-              LispObj cv_hdr_val = *cv_header;
-              natural cv_total = (natural)skip_over_ivector((natural)cv_header, cv_hdr_val) - (natural)cv_header;
-              void *code_copy = copy_code_vector_to_code_heap(cv_header, cv_total);
-              if (code_copy) {
-                rostart[1] = (natural)code_copy + node_size;
-                copied++;
-                code_bytes_total += cv_total;
-              } else {
-                rostart[1] = untag(code_vec_tagged);
-              }
-#else
               rostart[1] = untag(rostart[2]);
-#endif
               fixed++;
             }
             rostart += 1 + count;
@@ -2311,18 +2284,14 @@ main
         }
       }
     }
-#if defined(DARWIN)
-    fprintf(dbgout, "Entrypoint fixup: %d functions, %d code vectors copied to code heap (%lu KB)\n",
-            fixed, copied, (unsigned long)(code_bytes_total / 1024));
-#endif
+    fprintf(dbgout, "Entrypoint fixup: %d functions\n", fixed);
   }
 #endif
 #if defined(DARWIN) && defined(ARM64)
-  /* macOS ARM64 W^X with MAP_JIT code heap:
-     - Dynamic area stays permanently RW (no mprotect to RX, no page flipping).
-     - Code vectors have been copied to the MAP_JIT code heap above.
-     - Static area stays RW (spjump table flipping handled by exception handler).
-     - Readonly area: mprotect to RX (never written after boot). */
+  /* macOS ARM64 W^X finalization:
+     - Static area: flush icache for spjump table
+     - Readonly area: mprotect to RX (never written after boot)
+     - Dynamic area (MAP_JIT): toggle to executable for Lisp entry */
   {
     /* Flush icache for static area (spjump table) */
     if (static_space_start && static_space_active > static_space_start) {
@@ -2342,8 +2311,8 @@ main
         }
       }
     }
-    /* Switch code heap to executable mode for Lisp entry */
-    code_heap_make_executable();
+    /* Code area (MAP_JIT) was already toggled to executable during allocation.
+       Dynamic area is plain RW memory — no W^X toggling needed. */
   }
 #endif
 #ifdef ARM
@@ -2546,63 +2515,97 @@ xMakeDataExecutable(BytePtr start, natural nbytes)
 }
 
 #if defined(DARWIN) && defined(ARM64)
-/* Bump-allocate nbytes in the code heap.  Returns NULL if full. */
-void *
-allocate_code_vector(natural nbytes)
-{
-  natural aligned = (nbytes + dnode_size - 1) & ~(dnode_size - 1);
-  if (code_space_active + aligned > code_space_limit) {
-    fprintf(dbgout, "Code heap full! active=%p need=%lu limit=%p\n",
-            code_space_active, (unsigned long)aligned, code_space_limit);
-    return NULL;
-  }
-  void *result = code_space_active;
-  code_space_active += aligned;
-  return result;
+/* ARM64 TBI pointer helpers (same as in image.c) */
+#ifndef addr_of
+#define addr_of(w) ((w) & 0x00FFFFFFFFFFFFFFULL)
+#define is_relocatable_tag(t) \
+  ((t) == tag_nil || (t) == tag_cons || (((t) & uvector_mask) == uvector_ref))
+#endif
+
+/* TBI-safe relocation: add bias to the address part (low 56 bits) only,
+   preserving the TBI tag byte (high 8 bits).  This is needed because the
+   MAP_JIT address can be far from the original dynamic area address,
+   causing carries to corrupt the TBI tag if we add bias to the full word. */
+LispObj relocate_tagged(LispObj val, LispObj bias) {
+  LispObj tag_byte = val & 0xFF00000000000000ULL;
+  LispObj new_addr = (addr_of(val) + bias) & 0x00FFFFFFFFFFFFFFULL;
+  return tag_byte | new_addr;
 }
 
-/* Copy an ivector (header + data) to the code heap.
-   src_header points to the ivector header word.
-   total_bytes is the dnode-aligned total size (header + data + padding).
-   Returns the code heap header address, or NULL on failure. */
-void *
-copy_code_vector_to_code_heap(void *src_header, natural total_bytes)
+/* Relocate pointers in an area that target the old dynamic area range.
+   Walks all objects in [scan_low, scan_active), adjusting any tagged pointer
+   whose untagged address falls in [old_low, old_high) by adding bias.
+   Also adjusts untagged function entrypoints (slot 0). */
+void
+relocate_pointers_for_dynamic_move(BytePtr scan_low, BytePtr scan_active,
+                                   natural old_low, natural old_high,
+                                   LispObj bias)
 {
-  void *dest = allocate_code_vector(total_bytes);
-  if (!dest) return NULL;
+  LispObj *start = (LispObj *)scan_low;
+  LispObj *end = (LispObj *)scan_active;
+  LispObj w0, w1;
+  int fulltag;
+  Boolean fixnum_after_header_is_link = false;
 
-  code_heap_make_writable();
-  memcpy(dest, src_header, total_bytes);
-  code_heap_make_executable();
-  sys_icache_invalidate(dest, total_bytes);
-  return dest;
+  while (start < end) {
+    w0 = *start;
+    fulltag = fulltag_of(w0);
+    if (immheader_tag_p(fulltag)) {
+      start = (LispObj *)skip_over_ivector((natural)start, w0);
+    } else {
+      /* Function entrypoint (slot 0 = start[1]) is an untagged code address */
+      if (header_subtag(w0) == subtag_function) {
+        w1 = start[1];
+        if (w1 >= old_low && w1 < old_high) {
+          start[1] = w1 + bias;  /* untagged, no TBI concern */
+        }
+        start += 2;
+        w0 = *start;
+        fulltag = fulltag_of(w0);
+      }
+      /* Header subtag checks for special handling */
+      if (header_subtag(w0) == subtag_weak) {
+        fixnum_after_header_is_link = true;
+      }
+      if (header_subtag(w0) == subtag_hash_vector) {
+        hash_table_vector_header *hashp = (hash_table_vector_header *)start;
+        if (hashp->flags & nhash_track_keys_mask) {
+          hashp->flags |= nhash_key_moved_mask;
+        }
+        fixnum_after_header_is_link = true;
+      }
+      /* Relocate tagged pointer in even slot (TBI-safe) */
+      if ((addr_of(w0) >= old_low) && (addr_of(w0) < old_high) &&
+          is_relocatable_tag(fulltag)) {
+        *start = relocate_tagged(w0, bias);
+      }
+      /* Relocate tagged pointer in odd slot (TBI-safe) */
+      w1 = *++start;
+      fulltag = fulltag_of(w1);
+      if ((addr_of(w1) >= old_low) && (addr_of(w1) < old_high) &&
+          (fixnum_after_header_is_link || is_relocatable_tag(fulltag))) {
+        *start = relocate_tagged(w1, bias);
+      }
+      fixnum_after_header_is_link = false;
+      ++start;
+    }
+  }
 }
 
-/* Called from SPfix_nfn_entrypoint (assembly) for runtime code vectors.
-   Takes the untagged code vector address (points past header, to first
-   instruction).  If not already in code heap, copies the code vector there.
-   Returns the code heap entrypoint address (past header). */
-natural
-fix_entrypoint_copy_to_code_heap(natural cv_untagged)
+/* Relocate lisp globals (stored at nil_base_address) that point into
+   the old dynamic area.  Uses TBI-safe relocation for tagged pointers. */
+void
+relocate_globals_for_dynamic_move(natural old_low, natural old_high, LispObj bias)
 {
-  /* Already in code heap? */
-  if ((BytePtr)cv_untagged >= code_space_start &&
-      (BytePtr)cv_untagged < code_space_limit) {
-    return cv_untagged;
+  int i;
+  for (i = MIN_KERNEL_GLOBAL; i < 0; i++) {
+    LispObj val = lisp_global(i);
+    natural addr = addr_of(val);
+    int tag = fulltag_of(val);
+    if (addr >= old_low && addr < old_high && is_relocatable_tag(tag)) {
+      lisp_global(i) = relocate_tagged(val, bias);
+    }
   }
-  /* No code heap available? */
-  if (!code_space_start) return cv_untagged;
-
-  /* Header is one node before the data */
-  LispObj *cv_header = (LispObj *)(cv_untagged - node_size);
-  LispObj cv_hdr_val = *cv_header;
-  natural cv_total = (natural)skip_over_ivector((natural)cv_header, cv_hdr_val)
-                     - (natural)cv_header;
-  void *code_copy = copy_code_vector_to_code_heap(cv_header, cv_total);
-  if (code_copy) {
-    return (natural)code_copy + node_size;
-  }
-  return cv_untagged;  /* fallback if code heap full */
 }
 #endif
 

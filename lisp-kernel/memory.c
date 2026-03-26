@@ -223,10 +223,10 @@ MapMemoryForStack(natural nbytes)
 
 
 #if defined(DARWIN) && defined(ARM64)
-/* Allocate memory with MAP_JIT for the code heap.
-   MAP_JIT + MAP_FIXED = EINVAL on macOS, so we must accept the
-   kernel-chosen address.  The region starts writable; use
-   pthread_jit_write_protect_np() for fast per-thread W<->X toggling. */
+/* MAP_JIT dynamic area: allocate memory with MAP_JIT for the dynamic area
+   relocation.  MAP_JIT + MAP_FIXED = EINVAL on macOS, so we must accept
+   the kernel-chosen address.  Use pthread_jit_write_protect_np() for
+   fast per-thread W<->X toggling (single SPRR MSR instruction). */
 LogicalAddress
 MapMemoryForCode(natural nbytes)
 {
@@ -237,7 +237,7 @@ MapMemoryForCode(natural nbytes)
     perror("MapMemoryForCode (MAP_JIT)");
     return MAP_FAILED;
   }
-  /* Start in writable mode so boot code can copy code vectors in */
+  /* Start in writable mode for data copy */
   pthread_jit_write_protect_np(false);
   return p;
 }
@@ -567,7 +567,7 @@ new_area(BytePtr lowaddr, BytePtr highaddr, area_code code)
     natural ndnodes = area_dnode(highaddr, lowaddr);
     a->low = lowaddr;
     a->high = highaddr;
-    a->active = (code == AREA_DYNAMIC) ? lowaddr : highaddr;
+    a->active = (code == AREA_DYNAMIC || code == AREA_CODE) ? lowaddr : highaddr;
     a->code = code;
     a->ndnodes = ndnodes;
     /* Caller must allocate markbits when allocating heap ! */

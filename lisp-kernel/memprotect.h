@@ -74,6 +74,11 @@ MapMemory(LogicalAddress addr, natural nbytes, int protection);
 LogicalAddress
 MapMemoryForStack(natural nbytes);
 
+#if defined(DARWIN) && defined(ARM64)
+LogicalAddress
+MapMemoryForCode(natural nbytes);
+#endif
+
 int
 UnMapMemory(LogicalAddress addr, natural nbytes);
 
@@ -141,18 +146,26 @@ initialize_refidx_from_refbits(bitvector, bitvector, natural);
 
 #if defined(DARWIN) && defined(ARM64)
 #include <pthread.h>
+#include <sys/mman.h>
+#include <libkern/OSCacheControl.h>
 
-static inline void code_heap_make_writable(void) {
+/* Separate code area (AREA_CODE) with MAP_JIT for ARM64 W^X.
+   Code vectors live in AREA_CODE (MAP_JIT, toggled RW/RX).
+   Data objects live in AREA_DYNAMIC (always RW, never executable).
+   Use these helpers when writing/executing code in the code area. */
+
+static inline void code_area_make_writable(void) {
   pthread_jit_write_protect_np(false);
 }
 
-static inline void code_heap_make_executable(void) {
+static inline void code_area_make_executable(void) {
   pthread_jit_write_protect_np(true);
 }
 
-LogicalAddress MapMemoryForCode(natural nbytes);
-void *allocate_code_vector(natural nbytes);
-void *copy_code_vector_to_code_heap(void *src_header, natural total_bytes);
+static inline void code_area_flush_icache(void *addr, natural nbytes) {
+  sys_icache_invalidate(addr, nbytes);
+}
+
 #endif
 
 #endif /* __memprotect_h__ */

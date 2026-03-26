@@ -78,8 +78,14 @@ extern LispObj lisp_nil;
 #define MANAGED_STATIC_DNODES (-51) /* ndnodes in managed_static_area */
 #define EPHEMERAL_REFIDX      (-52) /* compressed refmap to ephmeral space */
 #define MANAGED_STATIC_REFIDX (-53) /* compressed refmap from managed static to dynamic */
-
+#ifdef ARM64
+#define CODE_HEAP_START       (-54) /* start of MAP_JIT code area */
+#define CODE_HEAP_ACTIVE      (-55) /* allocation pointer in code area */
+#define CODE_HEAP_LIMIT       (-56) /* end of MAP_JIT code area */
+#define MIN_KERNEL_GLOBAL CODE_HEAP_LIMIT
+#else
 #define MIN_KERNEL_GLOBAL MANAGED_STATIC_REFIDX
+#endif
 
 /* These are only non-zero when an image is being saved or loaded */
 
