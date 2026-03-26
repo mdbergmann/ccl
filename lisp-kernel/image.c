@@ -386,9 +386,58 @@ load_image_section(int fd, openmcl_image_section_header *sect)
     */
     break;
 
+#ifdef ARM64
+  case AREA_CODE:
+    fprintf(dbgout, "  CODE: size=%ld\n", (long)mem_size);
+    /* Code area is allocated at boot (MAP_JIT) by pmcl-kernel.c.
+       Read the saved code data into the already-allocated code area. */
+    if (code_area != NULL && mem_size > 0) {
+      natural aligned_size = align_to_power_of_2(mem_size, log2_page_size);
+      if (aligned_size > (natural)((BytePtr)code_area->high - (BytePtr)code_area->low)) {
+        fprintf(dbgout, "  CODE: saved size %lu exceeds code area %lu\n",
+                (unsigned long)aligned_size,
+                (unsigned long)((BytePtr)code_area->high - (BytePtr)code_area->low));
+        return;
+      }
+      /* Toggle to writable for the data copy */
+      code_area_make_writable();
+      /* Read code data directly into the MAP_JIT code area */
+      {
+        off_t saved_pos = LSEEK(fd, 0, SEEK_CUR);
+        LSEEK(fd, pos, SEEK_SET);
+        natural total_read = 0;
+        while (total_read < mem_size) {
+          ssize_t n = read(fd, (BytePtr)code_area->low + total_read,
+                           mem_size - total_read);
+          if (n <= 0) {
+            fprintf(dbgout, "  CODE: read failed at offset %lu\n",
+                    (unsigned long)total_read);
+            return;
+          }
+          total_read += n;
+        }
+        LSEEK(fd, saved_pos, SEEK_SET);
+      }
+      code_area->active = (BytePtr)code_area->low + mem_size;
+      code_area->ndnodes = area_dnode(code_area->active, code_area->low);
+      lisp_global(CODE_HEAP_ACTIVE) = (LispObj)code_area->active;
+      /* Toggle to executable and flush icache */
+      code_area_make_executable();
+      code_area_flush_icache(code_area->low,
+                             code_area->active - (BytePtr)code_area->low);
+      fprintf(dbgout, "  CODE: loaded %lu bytes at %p\n",
+              (unsigned long)mem_size, code_area->low);
+    } else if (mem_size > 0) {
+      fprintf(dbgout, "  CODE: code area not initialized, skipping\n");
+    }
+    /* AREA_CODE is already in the area list from boot init */
+    sect->area = code_area;
+    break;
+#endif
+
   default:
     return;
-    
+
   }
   LSEEK(fd, pos+advance, SEEK_SET);
 }
@@ -522,6 +571,65 @@ load_openmcl_image(int fd, openmcl_image_file_header *h)
 	break;
       }
     }
+#ifdef ARM64
+    /* Relocate code-vector pointers in function objects.
+       When code vectors live in AREA_CODE, the code area address changes
+       between save and load (MAP_JIT chooses the address).  Function slots
+       0 (entrypoint, untagged) and 1 (code-vector, tagged) need adjustment.
+       This is only needed when the image has a code area section. */
+    {
+      natural old_code_base = 0;
+      for (i = 0, sect = sections; i < nsections; i++, sect++) {
+        if (sect->code == AREA_CODE && sect->memory_size > 0) {
+          old_code_base = sect->static_dnodes;  /* saved base address */
+          break;
+        }
+      }
+      if (old_code_base && code_area && code_area->low) {
+        LispObj code_bias = (LispObj)((natural)code_area->low - old_code_base);
+        if (code_bias != 0) {
+          natural code_lo = old_code_base;
+          natural code_hi = old_code_base + sect->memory_size;
+          int relocated = 0;
+          fprintf(dbgout, "  CODE relocation: old_base=0x%lx new_base=%p bias=0x%lx\n",
+                  (unsigned long)old_code_base, code_area->low, (unsigned long)code_bias);
+          /* Walk dynamic area functions */
+          {
+            LispObj *start = (LispObj *)active_dynamic_area->low;
+            LispObj *end = (LispObj *)active_dynamic_area->active;
+            while (start < end) {
+              LispObj w0 = *start;
+              natural subtag = header_subtag(w0);
+              if (immheader_tag_p(subtag)) {
+                start = (LispObj *)skip_over_ivector((natural)start, w0);
+              } else if (nodeheader_tag_p(subtag)) {
+                natural count = header_element_count(w0);
+                if (subtag == subtag_function && count >= 2) {
+                  /* Slot 0 = entrypoint (untagged, start[1]) */
+                  natural ep = start[1];
+                  if (ep >= code_lo && ep < code_hi) {
+                    start[1] = ep + code_bias;
+                    relocated++;
+                  }
+                  /* Slot 1 = code-vector (tagged, start[2]) */
+                  natural cv_addr = addr_of(start[2]);
+                  if (cv_addr >= code_lo && cv_addr < code_hi) {
+                    start[2] = start[2] + code_bias;
+                    relocated++;
+                  }
+                }
+                start += 1 + count;
+                if (((natural)start) & (dnode_size - 1)) start++;
+              } else {
+                start += 2;
+              }
+            }
+          }
+          fprintf(dbgout, "  CODE relocation: %d pointers adjusted\n", relocated);
+        }
+      }
+    }
+#endif
   }
   /* Bug 124: TLB binding-index scaling REMOVED.
      On ARM64 with fixnumshift=0, l0-symbol.lisp increments binding-index by 8
@@ -737,11 +845,22 @@ save_application_internal(unsigned fd, Boolean egc_was_enabled)
     tenured_area->static_dnodes -= area_dnode(static_cons_area->high, static_cons_area->low);
   }
 
-  areas[0] = nilreg_area; 
+  areas[0] = nilreg_area;
   areas[1] = readonly_area;
   areas[2] = active_dynamic_area;
   areas[3] = managed_static_area;
   areas[4] = static_cons_area;
+#ifdef ARM64
+  if (code_area) {
+    areas[5] = code_area;
+  } else {
+    /* No code area — create a dummy empty section */
+    static area empty_code_area_placeholder;
+    empty_code_area_placeholder.code = AREA_CODE;
+    empty_code_area_placeholder.low = empty_code_area_placeholder.active = NULL;
+    areas[5] = &empty_code_area_placeholder;
+  }
+#endif
   for (i = 0; i < NUM_IMAGE_SECTIONS; i++) {
     a = areas[i];
     sections[i].code = a->code;
@@ -749,6 +868,11 @@ save_application_internal(unsigned fd, Boolean egc_was_enabled)
     sections[i].memory_size  = a->active - a->low;
     if (a == active_dynamic_area) {
       sections[i].static_dnodes = tenured_area->static_dnodes;
+#ifdef ARM64
+    } else if (a->code == AREA_CODE && a->low != NULL) {
+      /* Store code area base address for relocation on load */
+      sections[i].static_dnodes = (natural)a->low;
+#endif
     } else {
       sections[i].static_dnodes = 0;
     }

@@ -100,4 +100,8 @@ set_nil(LispObj);
 
 
 
+#ifdef ARM64
+#define NUM_IMAGE_SECTIONS 6    /* +1 for AREA_CODE (MAP_JIT code heap) */
+#else
 #define NUM_IMAGE_SECTIONS 5    /* used to be 3 */
+#endif
