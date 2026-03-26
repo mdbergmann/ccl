@@ -1482,15 +1482,11 @@ purify_range(LispObj *start, LispObj *end, BytePtr low, BytePtr high, area *to)
           copy_ivector_reference(start, low, high, to);
         }
         start++;
-        subtag = header_subtag(header);
-        if (subtag == subtag_function) {
-          /* Entrypoint in slot 1 is a fixnum-tagged locative.
-             On ARM64 we treat it like a regular node for purification
-             since there are no separate code vectors to purify. */
-          copy_ivector_reference(start, low, high, to);
-        } else {
-          copy_ivector_reference(start, low, high, to);
-        }
+        /* For function objects: slot 0 (entrypoint) and slot 1 (code-vector)
+           point into AREA_CODE.  copy_ivector_reference skips them because
+           entrypoints are untagged (tag 0x00) and code-vector pointers have
+           ivector ref tag (0x48) — neither is a node fulltag. */
+        copy_ivector_reference(start, low, high, to);
         start++;
       }
     }
@@ -1593,6 +1589,7 @@ purify_areas(BytePtr low, BytePtr high, area *target)
       break;
 
     default:
+      /* AREA_CODE intentionally skipped — code vectors stay in MAP_JIT area */
       break;
     }
   }
@@ -1681,13 +1678,9 @@ impurify_range(LispObj *start, LispObj *end, LispObj low, LispObj high, int delt
         impurify_noderef(start, low, high, delta);
       }
       start++;
-      subtag = header_subtag(header);
-      if (subtag == subtag_function) {
-        /* Entrypoint is a fixnum-tagged locative — treat as noderef */
-        impurify_noderef(start, low, high, delta);
-      } else {
-        impurify_noderef(start, low, high, delta);
-      }
+      /* For function objects: entrypoints (untagged) and code-vector pointers
+         (ivector ref tag) are not node fulltags — impurify_noderef skips them. */
+      impurify_noderef(start, low, high, delta);
       start++;
     }
   }
@@ -1777,6 +1770,7 @@ impurify_areas(LispObj low, LispObj high, int delta)
       break;
 
     default:
+      /* AREA_CODE intentionally skipped — code vectors stay in MAP_JIT area */
       break;
     }
   }
