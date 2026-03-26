@@ -51,6 +51,48 @@
 /* area_dnode override for ARM64 is now in gc.h */
 
 /* ================================================================
+   AREA_CODE (MAP_JIT) — separate code heap for ARM64 W^X.
+
+   Code vectors (xcode-vector) live in AREA_CODE, data objects in
+   AREA_DYNAMIC.  The code area is NON-COMPACTING: code vectors never
+   move during GC.  This means:
+
+   - mark_root/rmark: code-area pointers have dnode >= GCndnodes_in_area,
+     so they're treated as external and not followed.  This is correct
+     because xcode-vectors are ivectors with no node references.
+
+   - node_forwarding_address/locative_forwarding_address: code-area
+     pointers have dnode >= GCndynamic_dnodes_in_area, so they're
+     returned unchanged.  Function entrypoints and code-vector pointers
+     are stable across GC.
+
+   - forward_range: function slot 0 (entrypoint) goes through
+     update_locref -> unchanged.  Slot 1 (code-vector) goes through
+     update_noderef -> unchanged.  No special handling needed.
+
+   - compact_dynamic_heap: same — code-area pointers copied as-is.
+
+   Future: dead code vector sweeping can be added by walking AREA_CODE
+   after GC and reclaiming unmarked vectors.
+   ================================================================ */
+
+/* Check if an untagged address falls within the code area */
+static inline Boolean
+in_code_area(natural addr)
+{
+  return (code_area != NULL &&
+          addr >= (natural)code_area->low &&
+          addr < (natural)code_area->active);
+}
+
+/* Check if a tagged LispObj points into the code area */
+static inline Boolean
+is_code_area_obj(LispObj n)
+{
+  return in_code_area(untag(n));
+}
+
+/* ================================================================
    Heap sanity checking
    ================================================================ */
 
