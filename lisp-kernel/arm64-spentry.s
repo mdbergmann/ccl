@@ -1698,14 +1698,20 @@ _spentry(stack_cons_rest_arg)
         __(add imm1,imm1,imm1)
         __(add imm1,imm1,#node_size)
         __(dnode_align(imm0,imm1,node_size))
+        /* Bug 185: fix element count in header for correct SPdiscard_stack_object.
+           imm1 = byte_count = rest_bytes * 2 + 8.  SPdiscard_stack_object for
+           subtag_u64_vector (64-bit elements) computes: size = align16(count * 8 + 23).
+           For this to match the allocation align16(byte_count + 23), the header
+           must store element_count = byte_count / 8.  Shift BEFORE setting subtag.
+           Also: do NOT override with subtag_simple_vector (the old strb) — keep
+           u64_vector so SPdiscard_stack_object uses the 64-bit element path. */
+        __(lsr imm1,imm1,#node_shift)
         __(movk imm1,#(subtag_u64_vector << 8),lsl #48)
         __(sub arg_x,sp,imm0)
         __(ldr arg_y,[rcontext,#tcr.cs_limit])
         __(cmp arg_x,arg_y)
         __(blo 3f)
         __(stack_allocate_zeroed_ivector(imm1,imm0))
-        __(mov imm0,#subtag_simple_vector)
-        __(strb gpr32(imm0),[sp,#7])
         __(add imm0,sp,#dnode_size)
         __(orr imm0,imm0,#(fulltag_cons << tag_shift))
 1:

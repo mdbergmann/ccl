@@ -4073,88 +4073,11 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
       fflush(dbgout);
     }
   }
-  /* Bug 181: Log ALL exceptions to trace what leads to call-to-null */
+  /* Bug 181: Log first N exceptions for diagnostics */
   {
     static int all_exc_count = 0;
     all_exc_count++;
     native_thread_state_t *tts = (native_thread_state_t *)in_state;
-    /* Log the last N exceptions and the transition to call-to-null */
-    static natural last_pcs[8]; /* circular buffer of recent PCs */
-    static natural last_lrs[8];
-    static natural last_nfns[8];
-    static int last_idx = 0;
-    last_pcs[last_idx % 8] = (natural)tts->__pc;
-    last_lrs[last_idx % 8] = (natural)tts->__lr;
-    last_nfns[last_idx % 8] = (natural)tts->__x[10];
-    last_idx++;
-    /* When we detect a call-to-null (pc=0), dump the recent history */
-    if ((natural)tts->__pc == 0 && all_exc_count > 1) {
-      static int null_dump_done = 0;
-      if (!null_dump_done) {
-        null_dump_done = 1;
-        fprintf(dbgout, "=== BUG181: call-to-null at MEXC[%d] — recent exception history ===\n", all_exc_count);
-        int hi;
-        for (hi = 0; hi < 8 && hi < last_idx - 1; hi++) {
-          int idx = (last_idx - 2 - hi) % 8;
-          if (idx < 0) idx += 8;
-          fprintf(dbgout, "  [-%d]: pc=0x%lx lr=0x%lx nfn=0x%lx\n",
-                  hi + 1, (unsigned long)last_pcs[idx],
-                  (unsigned long)last_lrs[idx], (unsigned long)last_nfns[idx]);
-        }
-        /* MAP_JIT W^X toggle count */
-        fprintf(dbgout, "  WX toggle count: %d\n", g_wx_count);
-        /* Bug 181 diag: check UDF trampoline entrypoint and key symbols */
-        {
-          /* UDF trampoline = first function in dynamic area */
-          LispObj *udf_fn_raw = (LispObj *)0x302000000008ULL;
-          LispObj udf_entry = udf_fn_raw[0];
-          LispObj udf_cv = udf_fn_raw[1];
-          fprintf(dbgout, "  UDF-TRAMP: entry=0x%lx cv=0x%lx (entry_tag=0x%02lx)\n",
-                  (unsigned long)udf_entry, (unsigned long)udf_cv,
-                  (unsigned long)(udf_entry >> 56));
-          /* Check if entry is in dynamic area */
-          {
-            area *da_chk = active_dynamic_area;
-            if (da_chk && udf_entry >= (natural)da_chk->low && udf_entry < (natural)da_chk->active)
-              fprintf(dbgout, "  UDF-TRAMP: entry IN dynamic area\n");
-            else if (udf_entry == 0)
-              fprintf(dbgout, "  UDF-TRAMP: entry=0 *** CORRUPTED ***\n");
-            else
-              fprintf(dbgout, "  UDF-TRAMP: entry=0x%lx (outside dynamic area)\n",
-                      (unsigned long)udf_entry);
-          }
-          /* Check TCR spjump table entries around offset 0x3A8 */
-          {
-            natural tcr_base = tts->__x[28]; /* rcontext = x28 */
-            fprintf(dbgout, "  TCR-SPTAB: tcr_base=0x%lx\n", (unsigned long)tcr_base);
-            /* Dump sptab entries around index 69 (SPreq-stack-rest-arg, offset 0x3A8) */
-            int si;
-            for (si = 67; si <= 75; si++) {
-              natural offset = 0x180 + si * 8;
-              natural val = *(natural *)(tcr_base + offset);
-              fprintf(dbgout, "  SPTAB[%d] @+0x%lx = 0x%lx%s\n",
-                      si, (unsigned long)offset, (unsigned long)val,
-                      val == 0 ? " *** NULL ***" : "");
-            }
-          }
-          fflush(dbgout);
-        }
-        /* Dump full thread state at crash */
-        fprintf(dbgout, "  CRASH STATE: sp=0x%lx vsp=0x%lx rnil=0x%lx rt=0x%lx allocptr=0x%lx\n",
-                (unsigned long)tts->__sp, (unsigned long)tts->__x[25],
-                (unsigned long)tts->__x[6], (unsigned long)tts->__x[7],
-                (unsigned long)tts->__x[26]);
-        fprintf(dbgout, "  x0-x15: ");
-        int ri;
-        for (ri = 0; ri < 16; ri++)
-          fprintf(dbgout, "x%d=0x%lx ", ri, (unsigned long)tts->__x[ri]);
-        fprintf(dbgout, "\n  x16-x28: ");
-        for (ri = 16; ri < 29; ri++)
-          fprintf(dbgout, "x%d=0x%lx ", ri, (unsigned long)tts->__x[ri]);
-        fprintf(dbgout, "\n");
-        fflush(dbgout);
-      }
-    }
     if (all_exc_count <= 10 || ((natural)tts->__pc == 0 && all_exc_count <= 100)) {
       fprintf(dbgout, "MEXC[%d]: exc=%d code0=%lld code1=0x%llx pc=0x%lx lr=0x%lx nfn=0x%lx vsp=0x%lx valence=%d\n",
               all_exc_count, exception, (long long)code0, (long long)code[1],
@@ -6290,40 +6213,11 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
                   call_null_count,
                   (unsigned long)fault_pc, (unsigned long)lr_val,
                   (unsigned long)sp_val, (unsigned long)nfn_val,
-                  (unsigned long)vsp_val, (unsigned long)ts->__x[11]);
-          /* Dump key arg registers */
-          fprintf(dbgout, "  arg_z(x0)=0x%lx arg_y(x1)=0x%lx arg_x(x2)=0x%lx temp0(x3)=0x%lx temp1(x4)=0x%lx\n",
-                  (unsigned long)ts->__x[0], (unsigned long)ts->__x[1],
-                  (unsigned long)ts->__x[2], (unsigned long)ts->__x[3],
-                  (unsigned long)ts->__x[4]);
-          fprintf(dbgout, "  temp2(x5)=0x%lx rnil(x6)=0x%lx rcontext(x28)=0x%lx fp(x29)=0x%lx\n",
-                  (unsigned long)ts->__x[5], (unsigned long)ts->__x[6],
-                  (unsigned long)ts->__x[28], (unsigned long)ts->__x[29]);
-          /* Dump lisp frame on SP if it looks valid */
-          if (sp_val > 0x100000000ULL && sp_val < 0x800000000000ULL) {
-            LispObj *frame = (LispObj *)sp_val;
-            fprintf(dbgout, "  stack frame: [sp+0]=0x%lx [sp+8]=0x%lx [sp+16]=0x%lx [sp+24]=0x%lx\n",
-                    (unsigned long)frame[0], (unsigned long)frame[1],
-                    (unsigned long)frame[2], (unsigned long)frame[3]);
-            /* frame layout: savevsp, savelr, savefn, savefp */
-            fprintf(dbgout, "  lisp_frame: savevsp=0x%lx savelr=0x%lx savefn=0x%lx savefp=0x%lx\n",
-                    (unsigned long)frame[0], (unsigned long)frame[1],
-                    (unsigned long)frame[2], (unsigned long)frame[3]);
-            /* Also dump next frame */
-            if (frame[3] > sp_val && frame[3] < sp_val + 0x100000) {
-              LispObj *frame2 = (LispObj *)frame[3];
-              fprintf(dbgout, "  outer_frame: savevsp=0x%lx savelr=0x%lx savefn=0x%lx savefp=0x%lx\n",
-                      (unsigned long)frame2[0], (unsigned long)frame2[1],
-                      (unsigned long)frame2[2], (unsigned long)frame2[3]);
-            }
-          }
-          /* Dump vsp (value stack) */
-          if (vsp_val > 0x100000000ULL && vsp_val < 0x800000000000ULL) {
-            LispObj *vs = (LispObj *)vsp_val;
-            fprintf(dbgout, "  vstack: [0]=0x%lx [1]=0x%lx [2]=0x%lx [3]=0x%lx\n",
-                    (unsigned long)vs[0], (unsigned long)vs[1],
-                    (unsigned long)vs[2], (unsigned long)vs[3]);
-          }
+                  (unsigned long)ts->__x[25], (unsigned long)ts->__x[5]);
+          fprintf(dbgout, "  arg_z(x15)=0x%lx arg_y(x14)=0x%lx arg_x(x13)=0x%lx nfn(x10)=0x%lx fp(x29)=0x%lx\n",
+                  (unsigned long)ts->__x[15], (unsigned long)ts->__x[14],
+                  (unsigned long)ts->__x[13], (unsigned long)ts->__x[10],
+                  (unsigned long)ts->__x[29]);
           fflush(dbgout);
         }
         /* Bug 181: When LR=0 and vsp=0, recover by restoring lisp state
