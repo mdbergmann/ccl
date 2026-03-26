@@ -111,11 +111,14 @@
                               target::subtag-function)))
          (i 0))
     (declare (fixnum i constants-size))
-    (let* ((code-vector (%alloc-misc
-                         code-vector-size
-                         (if cross-compiling
-                           target::subtag-xcode-vector
-                           arm64::subtag-code-vector))))
+    (let* ((code-vector (if cross-compiling
+                         (%alloc-misc code-vector-size
+                                      target::subtag-xcode-vector)
+                         #+arm64-target
+                         (%alloc-code-vector code-vector-size)
+                         #-arm64-target
+                         (%alloc-misc code-vector-size
+                                      arm64::subtag-code-vector))))
       (do-dll-nodes (insn seg)
         (when (typep insn 'arm64::lap-instruction)
           (unless (eql (arm64::instruction-element-size insn) 0)
@@ -131,6 +134,8 @@
             (uvref constants-vector 0) 0)
       #+arm64-target (progn
                        (%fix-fn-entrypoint constants-vector)
+                       (%make-code-vector-executable code-vector))
+      #-arm64-target (when (not cross-compiling)
                        (%make-code-executable code-vector))
       constants-vector)))
 

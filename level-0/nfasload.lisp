@@ -751,10 +751,16 @@
 (deffaslop $fasl-code-vector (s)
   (let* ((element-count (%fasl-read-count s))
          (size-in-bytes (* 4 element-count))
+         #+arm64-target
+         (vector (%alloc-code-vector element-count))
+         #-arm64-target
          (vector (allocate-typed-vector :code-vector element-count)))
     (declare (fixnum element-count size-in-bytes))
     (%epushval s vector)
     (%fasl-read-n-bytes s vector 0 size-in-bytes)
+    #+arm64-target
+    (%make-code-vector-executable vector)
+    #-arm64-target
     (%make-code-executable vector)
     vector))
 

@@ -42,25 +42,58 @@
 
 ;;; Allocate an xcode-vector in the MAP_JIT code area (AREA_CODE).
 ;;; element-count is a fixnum (= raw count since fixnumshift=0).
-;;; Returns a macptr whose address is the untagged data address of
-;;; the new code vector in the code area.  The code area is left
-;;; WRITABLE — caller must write instruction data then call
-;;; %make-code-vector-executable.
+;;; Returns a tagged Lisp ivector (xcode-vector) whose data lives in
+;;; the code area.  The code area is left WRITABLE — caller must write
+;;; instruction data then call %make-code-vector-executable.
 ;;;
-;;; To get a tagged Lisp ivector reference for storing in function
-;;; slots, use %code-vector-macptr-to-tagged.
-(defun %alloc-code-vector (element-count)
-  (let* ((addr (ff-call (%kernel-import arm64::kernel-import-alloc-code-vector)
-                        :unsigned-doubleword element-count
-                        :address)))
-    addr))
+;;; The C function alloc_code_vector returns the untagged data address.
+;;; We apply the TBI tag (fulltag_misc = 0x40) to make it a proper
+;;; tagged Lisp ivector reference.
+;;;
+;;; C calling convention: x0-x18 are caller-saved (clobbered).
+;;; We save rnil (x6) since we don't use other Lisp regs after the call.
+(defarm64lapfunction %alloc-code-vector ((element-count arg_z))
+  (check-nargs 1)
+  ;; Save fp, lr, and rnil (x6) for after the C call
+  (stp fp lr (:@! sp -32))
+  (mov fp sp)
+  (str rnil (:@ sp (:$ 16)))
+  ;; element-count is already unboxed (fixnumshift=0)
+  ;; Load C function address: kernel-imports[alloc-code-vector]
+  (ref-global imm0 kernel-imports)
+  (ldr imm0 (:@ imm0 (:$ arm64::kernel-import-alloc-code-vector)))
+  ;; Call C: x0 = element_count, returns untagged data address in x0
+  (mov x0 arg_z)
+  (blr imm0)
+  ;; Apply TBI tag: result = untagged_addr | (fulltag_misc << 56)
+  ;; fulltag_misc = uvector_ref = 0x40
+  (movk x0 (:$ #x4000) (:lsl 48))
+  (mov arg_z x0)
+  ;; Restore rnil, frame, return
+  (ldr rnil (:@ sp (:$ 16)))
+  (ldp fp lr (:@+ sp 32))
+  (ret))
 
-;;; Toggle the code area back to executable and flush icache.
-;;; addr is a macptr (or fixnum address) pointing to the code vector data.
-(defun %make-code-vector-executable (addr)
-  (ff-call (%kernel-import arm64::kernel-import-make-code-vector-executable)
-           :address addr
-           :void))
+;;; Toggle the code area back to executable and flush icache for
+;;; the given code vector.  code-vector is a tagged xcode-vector
+;;; (as returned by %alloc-code-vector).
+(defarm64lapfunction %make-code-vector-executable ((code-vector arg_z))
+  (check-nargs 1)
+  ;; Save fp, lr, and rnil
+  (stp fp lr (:@! sp -32))
+  (mov fp sp)
+  (str rnil (:@ sp (:$ 16)))
+  ;; Strip TBI tag to get untagged address for C
+  (and x0 arg_z (:$ #x00FFFFFFFFFFFFFF))
+  ;; Load C function address
+  (ref-global imm0 kernel-imports)
+  (ldr imm0 (:@ imm0 (:$ arm64::kernel-import-make-code-vector-executable)))
+  (blr imm0)
+  ;; Restore rnil, return nil
+  (ldr rnil (:@ sp (:$ 16)))
+  (mov arg_z rnil)
+  (ldp fp lr (:@+ sp 32))
+  (ret))
 
 ;;; ARM64: rnil holds the nil value.  Kernel globals are at negative
 ;;; offsets from rnil.  The offset arg is a fixnum byte offset.
