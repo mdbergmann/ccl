@@ -155,7 +155,13 @@
           (image-write-natural 0 f)
           (let* ((size (xload-space-lowptr sect)))
             (image-write-natural size f)
-            (image-write-natural 0 f))) ; static dnodes.
+            ;; For AREA_CODE sections, write the base virtual address
+            ;; as static_dnodes so the kernel can compute relocation bias.
+            (image-write-natural
+             (if (eql (xload-space-code sect) $xload-area-code)
+               (xload-space-vaddr sect)
+               0)
+             f)))
         (dolist (sect spaces)
           (image-align-output-position f)
           (stream-write-ivector f

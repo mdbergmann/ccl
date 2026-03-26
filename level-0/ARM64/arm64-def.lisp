@@ -55,7 +55,7 @@
 (defarm64lapfunction %alloc-code-vector ((element-count arg_z))
   (check-nargs 1)
   ;; Save fp, lr, and rnil (x6) for after the C call
-  (stp fp lr (:@! sp -32))
+  (stp fp lr (:@! sp (:$ -32)))
   (mov fp sp)
   (str rnil (:@ sp (:$ 16)))
   ;; element-count is already unboxed (fixnumshift=0)
@@ -71,7 +71,7 @@
   (mov arg_z x0)
   ;; Restore rnil, frame, return
   (ldr rnil (:@ sp (:$ 16)))
-  (ldp fp lr (:@+ sp 32))
+  (ldp fp lr (:@+ sp (:$ 32)))
   (ret))
 
 ;;; Toggle the code area back to executable and flush icache for
@@ -80,7 +80,7 @@
 (defarm64lapfunction %make-code-vector-executable ((code-vector arg_z))
   (check-nargs 1)
   ;; Save fp, lr, and rnil
-  (stp fp lr (:@! sp -32))
+  (stp fp lr (:@! sp (:$ -32)))
   (mov fp sp)
   (str rnil (:@ sp (:$ 16)))
   ;; Strip TBI tag to get untagged address for C
@@ -92,7 +92,7 @@
   ;; Restore rnil, return nil
   (ldr rnil (:@ sp (:$ 16)))
   (mov arg_z rnil)
-  (ldp fp lr (:@+ sp 32))
+  (ldp fp lr (:@+ sp (:$ 32)))
   (ret))
 
 ;;; ARM64: rnil holds the nil value.  Kernel globals are at negative

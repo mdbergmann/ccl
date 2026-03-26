@@ -88,6 +88,15 @@
 (defparameter *xload-static-cons-space-address* nil)
 (defparameter *xload-static-cons-space-size* 0)
 
+;;; Separate code area for ARM64 W^X (MAP_JIT).
+;;; Code vectors are allocated here; data stays in dynamic/readonly space.
+;;; The area code value 10 matches AREA_CODE = 10<<fixnumshift in area.h.
+;;; (Cannot use defenum symbol 'area-code' — name conflicts with arch macro.)
+(defconstant $xload-area-code 10)
+(defparameter *xload-code-space-address* nil)
+(defparameter *xload-code-space-size* (ash 1 18))  ; 256KB initial
+(defparameter *xload-code-space* nil)
+
 (defstruct backend-xload-info
   name
   macro-apply-code-function
@@ -170,7 +179,12 @@
     (setq *xload-target-char-code-limit*
           (arch::target-char-code-limit arch))
     (setq *xload-target-tbi-p*
-          (= (arch::target-ntagbits arch) 8))))
+          (= (arch::target-ntagbits arch) 8))
+    ;; ARM64 code space: use address well above other spaces.
+    ;; The kernel will relocate to the actual MAP_JIT address.
+    ;; Must be after *xload-target-tbi-p* is set.
+    (when *xload-target-tbi-p*
+      (setq *xload-code-space-address* #x300000000))))
 
 
 
@@ -1064,10 +1078,12 @@
                                                    *target-backend*)))
          (n (+ (length prefix) vlen)))
     (declare (fixnum n))
-    (let* ((vector (xload-make-ivector 
-                    (if read-only-p
-                      *xload-readonly-space*
-                      *xload-dynamic-space*)
+    (let* ((vector (xload-make-ivector
+                    (if *xload-code-space*
+                      *xload-code-space*
+                      (if read-only-p
+                        *xload-readonly-space*
+                        *xload-dynamic-space*))
                     :code-vector
                     n))
            (j -1))
@@ -1109,6 +1125,8 @@
 	 (*xload-static-space* (init-xload-space *xload-static-space-address* *xload-static-space-size* area-static))
          (*xload-managed-static-space* (init-xload-space *xload-managed-static-space-address* *xload-managed-static-space-size* area-managed-static))
          (*xload-static-cons-space* (init-xload-space *xload-static-cons-space-address* *xload-static-cons-space-size* area-static-cons))
+         (*xload-code-space* (when (and *xload-target-tbi-p* *xload-code-space-address*)
+                               (init-xload-space *xload-code-space-address* *xload-code-space-size* $xload-area-code)))
 						 
          (*xload-package-alist* (xload-clone-packages (xload-initial-packages)))
          (*xload-cold-load-functions* nil)
@@ -1243,11 +1261,13 @@
   (declare (ftype (function (t t list)) write-image-file))
   (write-image-file output-file
 		    heap-start
-		    (list *xload-static-space*
-			  *xload-readonly-space*
-			  *xload-dynamic-space*
-                          *xload-managed-static-space*
-                          *xload-static-cons-space*)))
+		    (append (list *xload-static-space*
+                                  *xload-readonly-space*
+                                  *xload-dynamic-space*
+                                  *xload-managed-static-space*
+                                  *xload-static-cons-space*)
+                            (when *xload-code-space*
+                              (list *xload-code-space*)))))
 		    
 
 
@@ -1679,9 +1699,11 @@
          (subtag (xload-target-subtype :code-vector)))
     (multiple-value-bind (vector v o)
                          (xload-make-ivector
-                          (if (not *xload-pure-code-p*)
-                            *xload-dynamic-space*
-                            *xload-readonly-space*)
+                          (if *xload-code-space*
+                            *xload-code-space*
+                            (if (not *xload-pure-code-p*)
+                              *xload-dynamic-space*
+                              *xload-readonly-space*))
                           subtag
                           element-count)
       (%epushval s vector)
@@ -2059,7 +2081,8 @@
             (*xload-target-char-code-limit* *xload-target-char-code-limit*)
             (*xload-purespace-reserve* *xload-purespace-reserve*)
             (*xload-static-space-address* *xload-static-space-address*)
-            (*xload-target-tbi-p* *xload-target-tbi-p*))
+            (*xload-target-tbi-p* *xload-target-tbi-p*)
+            (*xload-code-space-address* *xload-code-space-address*))
        (setup-xload-target-parameters)
        (let* ((*load-verbose* t)
               (compiler-backend (find-backend
