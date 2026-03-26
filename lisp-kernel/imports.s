@@ -107,7 +107,9 @@ import_ptrs_start:
         defimport(jvm_init)
         defimport(lisp_lstat)
         defimport(lisp_realpath)
-   
+        defimport(alloc_code_vector)
+        defimport(make_code_vector_executable)
+
         .globl C(import_ptrs_base)
 C(import_ptrs_base):
 	PTR(import_ptrs_start)

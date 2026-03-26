@@ -166,6 +166,10 @@ static inline void code_area_flush_icache(void *addr, natural nbytes) {
   sys_icache_invalidate(addr, nbytes);
 }
 
+/* Code vector allocator — called from Lisp via kernel import */
+natural alloc_code_vector(natural element_count);
+void make_code_vector_executable(natural addr);
+
 #endif
 
 #endif /* __memprotect_h__ */

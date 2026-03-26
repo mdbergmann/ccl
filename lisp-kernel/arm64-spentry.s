@@ -56,34 +56,14 @@ define(`jump_builtin',`
    Bug 128: Must strip TBI tag — br/blr do NOT honor TBI on macOS ARM64.
    Bug 152: temp2=nfn=x10 on ARM64 — must use a different register (imm0)
    to avoid clobbering nfn and corrupting the code vector. */
+/* MAP_JIT dynamic area: SPfix_nfn_entrypoint is simplified.
+   Code vectors live in the MAP_JIT dynamic area at their birth address.
+   Just untag the code vector, store as entrypoint, and branch.
+   No code copying, no address translation needed. */
 _spentry(fix_nfn_entrypoint)
         __(ldr imm0,[nfn,#node_size])              /* load slot 1 = code vector (tagged) */
         __(and imm0,imm0,#0x00FFFFFFFFFFFFFF)      /* strip TBI tag for br/blr */
-        /* MAP_JIT code heap: check if code vector is already in code heap.
-           If not, call C to copy it there before first execution. */
-        __(adrp imm1,_code_space_start@PAGE)
-        __(ldr imm1,[imm1,_code_space_start@PAGEOFF])
-        __(cbz imm1,9f)                            /* no code heap → use as-is */
-        __(cmp imm0,imm1)
-        __(b.lo 1f)                                /* below code heap → need copy */
-        __(adrp imm1,_code_space_limit@PAGE)
-        __(ldr imm1,[imm1,_code_space_limit@PAGEOFF])
-        __(cmp imm0,imm1)
-        __(b.lo 9f)                                /* in code heap → use directly */
-1:      /* Not in code heap — save live Lisp regs and call C */
-        __(stp x30,nfn,[sp,#-48]!)                /* save lr, nfn(x10) */
-        __(stp x5,x13,[sp,#16])                   /* save nargs, arg_x */
-        __(stp x14,x15,[sp,#32])                  /* save arg_y, arg_z */
-        __(bl _fix_entrypoint_copy_to_code_heap)   /* x0=untagged cv addr → x0=code heap addr */
-        /* Bug 181: Trap if vsp (x25) was corrupted by C call */
-        __(cbnz vsp,8182f)
-        __(hlt #0x1811)  /* Bug 181: vsp=0 after C call in fix_nfn_entrypoint */
-8182:
-        __(ldp x14,x15,[sp,#32])                  /* restore arg_y, arg_z */
-        __(ldp x5,x13,[sp,#16])                   /* restore nargs, arg_x */
-        __(ldp x30,nfn,[sp],#48)                  /* restore lr, nfn */
-        /* x0=imm0 already has result from C function */
-9:      __(str imm0,[nfn,#_function.entrypoint])   /* store entrypoint in slot 0 */
+        __(str imm0,[nfn,#_function.entrypoint])   /* store entrypoint in slot 0 */
         __(br imm0)                                 /* branch to code, nfn preserved */
 _endsubp(fix_nfn_entrypoint)
 
@@ -4293,7 +4273,76 @@ local_label(done):
         __(ret)
 _endfn
 
-                                
+/* MAP_JIT W^X toggle trampolines.
+   These run in the text segment (always executable) and toggle the per-thread
+   MAP_JIT write-protect state via pthread_jit_write_protect_np().
+
+   wp_true_trampoline: called by Mach handler when an execute fault occurs
+     on a MAP_JIT page (dynamic area code needs to run).
+     Toggles WP to executable, ISB, then jumps to target PC in x0.
+
+   wp_false_trampoline: called by Mach handler when a write fault occurs
+     on a MAP_JIT page (dynamic area data needs to be written).
+     Toggles WP to writable, then retries the faulting instruction at x0.
+
+   Both preserve all registers except x16 (IP0, scratch). */
+        .globl C(wp_true_trampoline)
+C(wp_true_trampoline):
+        /* Toggle MAP_JIT to executable (WP=true) and jump to resume PC.
+           The Mach handler pushed the resume PC onto the stack (at [sp]).
+           All Lisp registers are preserved.  We save caller-saved regs around
+           the C call to pthread_jit_write_protect_np. */
+        stp     x0, x30, [sp, #-96]!     /* save x0, lr (nested frame) */
+        stp     x5, x6, [sp, #16]        /* nargs, rnil */
+        stp     x7, x8, [sp, #32]        /* rt, temp0 */
+        stp     x9, x10, [sp, #48]       /* temp1, nfn */
+        stp     x13, x14, [sp, #64]      /* arg_x, arg_y */
+        str     x15, [sp, #80]           /* arg_z */
+        mov     x0, #1
+        bl      _pthread_jit_write_protect_np
+        ldr     x15, [sp, #80]
+        ldp     x13, x14, [sp, #64]
+        ldp     x9, x10, [sp, #48]
+        ldp     x7, x8, [sp, #32]
+        ldp     x5, x6, [sp, #16]
+        ldp     x0, x30, [sp], #96       /* restore x0, lr */
+        isb     sy
+        /* Pop the resume PC (pushed by Mach handler) and branch to it */
+        ldr     x16, [sp]
+        add     sp, sp, #16
+        br      x16
+
+        .globl C(wp_false_trampoline)
+C(wp_false_trampoline):
+        /* Toggle MAP_JIT to writable (WP=false) and retry the faulting instruction.
+           Resume PC is on the stack (pushed by Mach handler). */
+        stp     x0, x30, [sp, #-96]!
+        stp     x5, x6, [sp, #16]
+        stp     x7, x8, [sp, #32]
+        stp     x9, x10, [sp, #48]
+        stp     x13, x14, [sp, #64]
+        str     x15, [sp, #80]
+        mov     x0, #0
+        bl      _pthread_jit_write_protect_np
+        ldr     x15, [sp, #80]
+        ldp     x13, x14, [sp, #64]
+        ldp     x9, x10, [sp, #48]
+        ldp     x7, x8, [sp, #32]
+        ldp     x5, x6, [sp, #16]
+        ldp     x0, x30, [sp], #96
+        /* Pop resume PC and branch */
+        ldr     x16, [sp]
+        add     sp, sp, #16
+        br      x16
+
+/* Legacy icache barrier trampoline (kept for static area W^X) */
+        .globl C(icache_barrier_trampoline)
+C(icache_barrier_trampoline):
+        dsb     sy
+        isb
+        br      x0
+
+
         .data
         .globl C(sptab)
         .globl C(sptab_end)

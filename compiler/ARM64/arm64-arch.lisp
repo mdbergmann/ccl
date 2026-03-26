@@ -1262,6 +1262,8 @@
   jvm-init
   lisp-lstat
   lisp-realpath
+  alloc-code-vector
+  make-code-vector-executable
   ;; Dummy sentinel entry — must be last
   last-kernel-import
 )

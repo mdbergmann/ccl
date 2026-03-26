@@ -179,6 +179,64 @@ BytePtr heap_dirty_limit = NULL;
 area *code_area = NULL;
 
 #define CODE_AREA_INITIAL_SIZE (128 * 1024 * 1024)  /* 128 MB */
+
+/* Allocate an xcode-vector in the MAP_JIT code area.
+   element_count = number of 32-bit elements.
+   Returns the UNTAGGED address of the data (just past the header).
+   The caller must:
+   1. Write instruction data to the returned address
+   2. Call make_code_vector_executable() when done
+   To get a tagged Lisp reference, the caller applies the TBI tag. */
+natural
+alloc_code_vector(natural element_count)
+{
+  natural nbytes = element_count << 2;  /* 32-bit elements */
+  natural total = (nbytes + node_size + (dnode_size - 1)) & ~(dnode_size - 1);
+  BytePtr result;
+
+  if (code_area == NULL) {
+    Bug(NULL, "alloc_code_vector: code area not initialized");
+    return 0;
+  }
+
+  result = code_area->active;
+  if (result + total > (BytePtr)code_area->high) {
+    Bug(NULL, "alloc_code_vector: code area exhausted (need %lu, have %lu)",
+        (unsigned long)total,
+        (unsigned long)((BytePtr)code_area->high - result));
+    return 0;
+  }
+
+  /* Toggle to writable for the header write */
+  code_area_make_writable();
+
+  /* Write the ivector header */
+  *((LispObj *)result) = make_header(subtag_xcode_vector, element_count);
+  /* Zero the data */
+  memset(result + node_size, 0, total - node_size);
+
+  code_area->active = result + total;
+  lisp_global(CODE_HEAP_ACTIVE) = (LispObj)(result + total);
+
+  /* Leave writable — caller will write instructions then toggle back */
+
+  /* Return untagged address of data (past header) */
+  return (natural)(result + node_size);
+}
+
+/* Make a code vector in AREA_CODE executable and flush icache.
+   addr = untagged address of the code vector data (as returned by
+   alloc_code_vector).  Call after writing all instruction data. */
+void
+make_code_vector_executable(natural addr)
+{
+  LispObj header = ((LispObj *)addr)[-1];
+  natural element_count = header_element_count(header);
+  natural nbytes = element_count << 2;
+
+  code_area_make_executable();
+  sys_icache_invalidate((void *)addr, nbytes);
+}
 #endif
 
 

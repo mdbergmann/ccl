@@ -40,6 +40,28 @@
                :unsigned-doubleword nbytes
                :void))))
 
+;;; Allocate an xcode-vector in the MAP_JIT code area (AREA_CODE).
+;;; element-count is a fixnum (= raw count since fixnumshift=0).
+;;; Returns a macptr whose address is the untagged data address of
+;;; the new code vector in the code area.  The code area is left
+;;; WRITABLE — caller must write instruction data then call
+;;; %make-code-vector-executable.
+;;;
+;;; To get a tagged Lisp ivector reference for storing in function
+;;; slots, use %code-vector-macptr-to-tagged.
+(defun %alloc-code-vector (element-count)
+  (let* ((addr (ff-call (%kernel-import arm64::kernel-import-alloc-code-vector)
+                        :unsigned-doubleword element-count
+                        :address)))
+    addr))
+
+;;; Toggle the code area back to executable and flush icache.
+;;; addr is a macptr (or fixnum address) pointing to the code vector data.
+(defun %make-code-vector-executable (addr)
+  (ff-call (%kernel-import arm64::kernel-import-make-code-vector-executable)
+           :address addr
+           :void))
+
 ;;; ARM64: rnil holds the nil value.  Kernel globals are at negative
 ;;; offsets from rnil.  The offset arg is a fixnum byte offset.
 ;;; With fixnumshift=0, the offset IS the byte offset.
