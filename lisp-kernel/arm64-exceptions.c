@@ -891,9 +891,9 @@ handle_protection_violation(ExceptionInformation *xp, siginfo_t *info,
   }
 
 #if defined(DARWIN) && defined(ARM64)
-  /* W^X handling with MAP_JIT code heap (signal handler path).
-     - Static area: mprotect-based W^X toggle
-     - Dynamic area instruction fetch: lazy copy to code heap */
+  /* W^X handling (signal handler path).
+     Static area: mprotect-based W^X toggle for spjump table + kernel globals.
+     Code area (MAP_JIT) is always RX; dynamic area is always RW. */
   {
     uint32_t esr = UC_MCONTEXT(xp)->__es.__esr;
     uint32_t ec = (esr >> 26) & 0x3F;
@@ -913,8 +913,8 @@ handle_protection_violation(ExceptionInformation *xp, siginfo_t *info,
         return true;
       }
     }
-    /* With separate AREA_CODE (MAP_JIT): execute faults on the dynamic area
-       are genuine bugs — dynamic area is never executable. */
+    /* Code area (MAP_JIT) is always RX; dynamic area is always RW.
+       Protection faults outside the static area are genuine bugs. */
   }
 #endif
 
@@ -5842,23 +5842,16 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
         }
       }
     }
-    /* W^X handling: MAP_JIT dynamic area + mprotect static area.
-       - Static area: mprotect-based W^X toggle (spjump table + kernel globals)
-       - Dynamic area (MAP_JIT): WP toggle via trampolines
-         Execute fault → wp_true_trampoline (toggle to RX, resume)
-         Write fault   → wp_false_trampoline (toggle to RW, retry) */
+    /* W^X handling: mprotect-based toggle for static area only.
+       Code lives in AREA_CODE (MAP_JIT, always RX during normal execution).
+       Dynamic area is plain RW memory — never executable. */
     natural fault_addr = (natural)code[1] & 0x00FFFFFFFFFFFFFF;  /* strip TBI tag */
     natural pc_untagged = (natural)ts->__pc & 0x00FFFFFFFFFFFFFF;
     Boolean in_static = ((BytePtr)fault_addr >= static_space_start &&
                          (BytePtr)fault_addr < static_space_limit);
-    area *a = active_dynamic_area;
-    BytePtr heap_start = (BytePtr)(natural)lisp_global(HEAP_START);
-    Boolean in_dynamic = (a && heap_start &&
-                          (BytePtr)fault_addr >= heap_start &&
-                          (BytePtr)fault_addr < a->high);
 
     if (in_static) {
-      /* Static area: mprotect-based W^X toggle (unchanged) */
+      /* Static area: mprotect-based W^X toggle (spjump table + kernel globals) */
       natural page_start = truncate_to_power_of_2(fault_addr, log2_page_size);
       if (pc_untagged >= page_start &&
           pc_untagged < page_start + page_size) {
@@ -5872,9 +5865,7 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
       *out_ts = *ts;
       kret = KERN_SUCCESS;
     } else {
-      /* With separate AREA_CODE (MAP_JIT): dynamic area is never executable.
-         Protection faults in the dynamic area are genuine errors. */
-      /* Unhandled protection violation — set up signal frame */
+      /* Not in static area — protection faults elsewhere are genuine errors. */
       signum = SIGBUS;
       if (tcr->valence != TCR_STATE_LISP) {
         fprintf(dbgout, "FATAL: protection fault (valence=%d addr=0x%llx pc=0x%lx)\n",
@@ -6038,9 +6029,10 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
             branch_target = (natural)outer_branch + (imm19 * 4);
             /* Patch to always branch */
             unsigned int new_insn = (ob_insn & 0xFFFFFFF0) | 0x0E;
-            /* Dynamic area is RW — write directly.
-               When code moves to AREA_CODE, use code_area_make_writable(). */
+            /* Code is in AREA_CODE (MAP_JIT) — toggle W^X to write the patch */
+            code_area_make_writable();
             *outer_branch = new_insn;
+            code_area_make_executable();
             sys_icache_invalidate(outer_branch, 4);
             fprintf(dbgout, "Bug181-PATCH: patched B.cond at 0x%lx: 0x%08x → 0x%08x (target=0x%lx)\n",
                     (unsigned long)outer_branch, ob_insn, new_insn,

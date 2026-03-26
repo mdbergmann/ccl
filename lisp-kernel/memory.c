@@ -223,10 +223,10 @@ MapMemoryForStack(natural nbytes)
 
 
 #if defined(DARWIN) && defined(ARM64)
-/* MAP_JIT dynamic area: allocate memory with MAP_JIT for the dynamic area
-   relocation.  MAP_JIT + MAP_FIXED = EINVAL on macOS, so we must accept
-   the kernel-chosen address.  Use pthread_jit_write_protect_np() for
-   fast per-thread W<->X toggling (single SPRR MSR instruction). */
+/* Allocate MAP_JIT memory for the separate code area (AREA_CODE).
+   Code vectors live here; data stays in AREA_DYNAMIC (plain RW).
+   MAP_JIT + MAP_FIXED = EINVAL on macOS, so we accept the kernel-chosen
+   address.  Use pthread_jit_write_protect_np() for per-thread W<->X toggling. */
 LogicalAddress
 MapMemoryForCode(natural nbytes)
 {

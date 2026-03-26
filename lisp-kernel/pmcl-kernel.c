@@ -2349,7 +2349,7 @@ main
   /* macOS ARM64 W^X finalization:
      - Static area: flush icache for spjump table
      - Readonly area: mprotect to RX (never written after boot)
-     - Dynamic area (MAP_JIT): toggle to executable for Lisp entry */
+     - Code area (MAP_JIT): already toggled to executable during allocation */
   {
     /* Flush icache for static area (spjump table) */
     if (static_space_start && static_space_active > static_space_start) {
@@ -2582,8 +2582,8 @@ xMakeDataExecutable(BytePtr start, natural nbytes)
 
 /* TBI-safe relocation: add bias to the address part (low 56 bits) only,
    preserving the TBI tag byte (high 8 bits).  This is needed because the
-   MAP_JIT address can be far from the original dynamic area address,
-   causing carries to corrupt the TBI tag if we add bias to the full word. */
+   code area address can be far from the saved address, causing carries to
+   corrupt the TBI tag if we add bias to the full word. */
 LispObj relocate_tagged(LispObj val, LispObj bias) {
   LispObj tag_byte = val & 0xFF00000000000000ULL;
   LispObj new_addr = (addr_of(val) + bias) & 0x00FFFFFFFFFFFFFFULL;
