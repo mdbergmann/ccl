@@ -1273,9 +1273,11 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
           fflush(dbgout);
           _exit(1);
         }
-        /* First occurrence: just return NIL to caller */
+        /* First occurrence: return arg_z to caller.
+           Bug 186b: returning arg_z instead of NIL helps when ERROR is called
+           from validate-function-name's buggy report-bad-arg path. */
         xpPC(xp) = (pc)(natural)this_lr;
-        xpGPR(xp, 15) = lisp_nil;
+        xpGPR(xp, 15) = xpGPR(xp, arg_z);
         xpGPR(xp, 5) = node_size;
         *bumpP = 0;
         return true;
@@ -2340,29 +2342,127 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
               fprintf(dbgout, "Bug171: set-package — package not found\n");
             }
 
-            /* Unknown undefined function — log and try returning NIL.
+            /* Unknown undefined function — log and try to recover.
                Don't do complex diagnostics that might crash. */
             {
               static int undef_count = 0;
               undef_count++;
-              fprintf(dbgout, "early-boot-err #%d: undefined function '%s' LR=%016lx\n",
+              fprintf(dbgout, "early-boot-err #%d: undefined function '%s' LR=%016lx nargs=%lu\n",
                       undef_count, fn_name[0] ? fn_name : "???",
-                      (unsigned long)xpGPR(xp, 30));
+                      (unsigned long)xpGPR(xp, 30),
+                      (unsigned long)nargs_val);
               fflush(dbgout);
               if (undef_count > 100) {
                 fprintf(dbgout, "early-boot-err: too many undefined functions, aborting\n");
                 fflush(dbgout);
                 _exit(1);
               }
-              /* Return NIL and hope the caller can handle it */
+              /* Bug 186b: For error-signaling functions like ERROR and
+                 REPORT-BAD-ARG, return arg_z (the last arg) instead of NIL.
+                 When called from validate-function-name's buggy code path,
+                 arg_z contains the original object (the function name symbol)
+                 which is the correct return value.  This lets the caller
+                 receive the right value through normal frame unwinding. */
               xpPC(xp) = (pc)(natural)xpGPR(xp, 30);
-              xpGPR(xp, 15) = lisp_nil;
+              xpGPR(xp, 15) = xpGPR(xp, arg_z); /* return arg_z, not NIL */
               xpGPR(xp, 5) = node_size;
               *bumpP = 0;
               return true;
             }
           }
         }
+
+        /* Bug 186: Wrong-nargs during early boot.
+           Format 0 (nullary) with reg=1 means the function was called with
+           wrong number of args.  The inline pattern is:
+             CMP x5, #expected_nargs   ; at PC-8
+             B.EQ .+8                   ; at PC-4
+             HLT #8                     ; at PC
+           Read expected nargs from the CMP, adjust arg registers to keep
+           the FIRST N args, fix nargs, and skip the HLT. */
+        if (fmt == hlt_code_nullary && HLT_REG(imm16) == 1) {
+          natural actual_nargs = xpGPR(xp, nargs);
+          natural expected_nargs = 0;
+
+          /* Read CMP x5, #imm12 at PC-8.
+             Encoding: 0xF10000BF | (imm12 << 10) for CMP x5, #imm12 */
+          unsigned int *hlt_pc = (unsigned int *)xpPC(xp);
+          unsigned int cmp_insn = *(hlt_pc - 2);
+          if ((cmp_insn & 0xFFC003FF) == 0xF10000BF) {
+            expected_nargs = (cmp_insn >> 10) & 0xFFF;
+          } else {
+            /* n=0 case uses CBNZ x5, :bad — expected 0 args */
+            expected_nargs = 0;
+          }
+
+          if (expected_nargs > 0 && actual_nargs > expected_nargs) {
+            /* Too many args — shift registers to keep first N args.
+               ARM64 CCL convention:
+                 1 arg:  arg_z (x15)
+                 2 args: arg_y (x14), arg_z (x15)
+                 3 args: arg_x (x13), arg_y (x14), arg_z (x15) */
+            natural actual_count = actual_nargs / node_size;
+            natural expected_count = expected_nargs / node_size;
+
+            if (expected_count == 1) {
+              if (actual_count == 2) {
+                xpGPR(xp, arg_z) = xpGPR(xp, arg_y);
+              } else if (actual_count >= 3) {
+                xpGPR(xp, arg_z) = xpGPR(xp, arg_x);
+              }
+            } else if (expected_count == 2 && actual_count >= 3) {
+              LispObj tmp = xpGPR(xp, arg_y);
+              xpGPR(xp, arg_y) = xpGPR(xp, arg_x);
+              xpGPR(xp, arg_z) = tmp;
+            }
+            xpGPR(xp, nargs) = expected_nargs;
+
+            fprintf(dbgout, "Bug186: wrong-nargs fixup: expected=%lu actual=%lu PC=%016lx SP=%016lx FP=%016lx\n",
+                    (unsigned long)expected_nargs, (unsigned long)actual_nargs,
+                    (unsigned long)(natural)xpPC(xp),
+                    (unsigned long)(natural)xpSP(xp),
+                    (unsigned long)xpGPR(xp, 29));
+            fflush(dbgout);
+
+            /* Bug 186b: The cross-compiled validate-function-name is missing
+               its symbolp check.  We cannot let the function run because
+               the eval/apply tail-call chain leaves an extra frame between
+               SP and $FASL-EVAL's frame.  Return directly, adjusting SP
+               to skip the extra frame so $FASL-EVAL reads its own frame. */
+            if (expected_count == 1) {
+              LispObj adjusted_arg = xpGPR(xp, arg_z);
+              if ((adjusted_arg >> 56) == tag_symbol) {
+                natural old_sp = (natural)xpSP(xp);
+                natural old_fp = xpGPR(xp, 29);
+                /* Skip the extra 32-byte frame from eval/apply tail-call chain */
+                xpPC(xp) = (pc)(natural)xpGPR(xp, 30);
+                xpGPR(xp, arg_z) = adjusted_arg;
+                xpGPR(xp, nargs) = node_size;
+                xpSP(xp) = old_sp + 32;
+                xpGPR(xp, 29) = old_fp + 32; /* FP tracks SP */
+                *bumpP = 0;
+                early_err_count--;
+                fprintf(dbgout, "Bug186b: returning symbol %016lx, SP %016lx→%016lx\n",
+                        (unsigned long)adjusted_arg,
+                        (unsigned long)old_sp, (unsigned long)(old_sp + 32));
+                fflush(dbgout);
+                return true;
+              }
+            }
+          } else if (actual_nargs < expected_nargs) {
+            /* Too few args — fill missing with NIL */
+            xpGPR(xp, nargs) = expected_nargs;
+            fprintf(dbgout, "Bug186: wrong-nargs (too few): expected=%lu actual=%lu PC=%016lx\n",
+                    (unsigned long)expected_nargs, (unsigned long)actual_nargs,
+                    (unsigned long)(natural)xpPC(xp));
+            fflush(dbgout);
+          }
+
+          *bumpP = 4;
+          early_err_count--;  /* don't count recovered nargs errors */
+          return true;
+        }
+
         /* Other UUO errors: skip HLT and continue */
         *bumpP = 4;
         return true;
