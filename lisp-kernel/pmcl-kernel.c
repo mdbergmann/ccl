@@ -2603,6 +2603,28 @@ main
   }
 #endif
   /* Bug 173 patching now happens before code heap copy (see above) */
+  /* Bug 188: Set up write-protect on the target page to catch corruption.
+     The cons cell at absolute address 0x3020002128a8 gets corrupted.
+     mprotect the page to PROT_READ so writes will fault. */
+  {
+    extern int bug188_watch_active;
+    /* Target: absolute address 0x3020002128a8 (cons car slot) */
+    natural target_addr = 0x3020002128a8ULL;
+    natural target_page = target_addr & ~0x3FFFULL; /* 16KB page align = 0x302000210000 */
+    area *dyn188 = active_dynamic_area;
+    natural dhigh = dyn188 ? (natural)dyn188->high : 0;
+    fprintf(dbgout, "Bug188: target=0x%lx page=0x%lx high=0x%lx\n",
+            (unsigned long)target_addr, (unsigned long)target_page, (unsigned long)dhigh);
+    if (target_page + 0x4000 <= dhigh) {
+      int ret = mprotect((void *)target_page, 0x4000, PROT_READ);
+      fprintf(dbgout, "Bug188: mprotect(%lx, 16K, PROT_READ) = %d %s\n",
+              (unsigned long)target_page, ret, ret ? strerror(errno) : "OK");
+      if (ret == 0) {
+        bug188_watch_active = 1;
+      }
+      fflush(dbgout);
+    }
+  }
   start_lisp(TCR_TO_TSD(tcr), 0);
   _exit(0);
 }

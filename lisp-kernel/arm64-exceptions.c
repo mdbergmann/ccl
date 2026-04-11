@@ -99,6 +99,11 @@ typedef struct {
 sp_breadcrumb_t sp_breadcrumb = {0, 0, 0, 0};
 unsigned int sp_entry_threshold = 0;  /* disabled */
 natural nthrow_saved_lr = 0;  /* Bug 167: save lr across nthrow processing */
+/* Bug 188: watchpoint for corruption at dynamic_area + 0x2128a0..0x2128c0 */
+static natural bug188_last_val_a0 = 0;
+static natural bug188_last_val_a8 = 0;
+static natural bug188_last_val_b8 = 0;
+int bug188_watch_active = 0;
 natural nthrow_unwind_sp = 0; /* Bug 168: save sp across unwind-protect cleanup calls */
 /* MAP_JIT W^X toggle tracking */
 static int g_wx_count = 0;
@@ -445,7 +450,9 @@ handle_alloc_trap(ExceptionInformation *xp, TCR *tcr, Boolean *notify)
 
   {
     static int alloc_dbg = 0;
-    if (alloc_dbg < 20) {
+    static int alloc_total = 0;
+    alloc_total++;
+    if (alloc_dbg < 20 || disp == 0) {
       alloc_dbg++;
       area *da = active_dynamic_area;
       fprintf(dbgout, "alloc-trap[%d]: allocptr=0x%lx allocbase=0x%lx disp=%ld (0x%lx)\n",
@@ -467,6 +474,8 @@ handle_alloc_trap(ExceptionInformation *xp, TCR *tcr, Boolean *notify)
   }
 
   if (disp == 0) {
+    fprintf(dbgout, "alloc-trap: disp=0, returning false! pc=0x%lx\n", (unsigned long)(natural)xpPC(xp));
+    fflush(dbgout);
     return false;
   }
 
@@ -479,6 +488,34 @@ handle_alloc_trap(ExceptionInformation *xp, TCR *tcr, Boolean *notify)
     if (notify && *notify) {
       pc_luser_xp(xp, tcr, NULL);
       callback_for_gc_notification(xp, tcr);
+    }
+    /* Bug 188: Track heap growth and watch for corruption */
+    {
+      static int alloc188_count = 0;
+      if (alloc188_count == 0) {
+        fprintf(dbgout, "Bug188: FIRST allocate_object success!\n");
+        fflush(dbgout);
+      }
+      natural dbase188 = (natural)((struct area *)((struct area *)all_areas)->succ)->low;
+      natural dact188 = (natural)((struct area *)((struct area *)all_areas)->succ)->active;
+      natural offset188 = dact188 - dbase188;
+      alloc188_count++;
+      /* Log alloc traps near our target region */
+      if (alloc188_count <= 5 || offset188 > 0x200000) {
+        fprintf(dbgout, "Bug188-AT[%d]: dactive_off=0x%lx allocptr=0x%lx\n",
+                alloc188_count, (unsigned long)offset188,
+                (unsigned long)xpGPR(xp, allocptr));
+        if (offset188 > 0x212900) {
+          natural v_a0 = *(natural *)(dbase188 + 0x2128a0);
+          natural v_a8 = *(natural *)(dbase188 + 0x2128a8);
+          natural v_b8 = *(natural *)(dbase188 + 0x2128b8);
+          fprintf(dbgout, "  @a0=%016lx @a8=%016lx @b8=%016lx%s\n",
+                  (unsigned long)v_a0, (unsigned long)v_a8, (unsigned long)v_b8,
+                  ((v_a0 & 0xFFFFFFFF) == 0xFFFFFFFF || (v_a8 & 0xFFFFFFFF) == 0xFFFFFFFF)
+                    ? " ***CORRUPT***" : "");
+        }
+        fflush(dbgout);
+      }
     }
     return true;
   }
@@ -915,6 +952,116 @@ handle_protection_violation(ExceptionInformation *xp, siginfo_t *info,
     }
     /* Code area (MAP_JIT) is always RX; dynamic area is always RW.
        Protection faults outside the static area are genuine bugs. */
+
+    /* Bug 188: Catch writes to protected watchpoint page by emulating them.
+       Unprotect, perform the write manually, re-protect, skip instruction. */
+    {
+      natural target_page188 = 0x302000210000ULL;
+      static int bug188_trap_count = 0;
+      if (bug188_watch_active && addr_raw >= target_page188 && addr_raw < target_page188 + 0x4000) {
+        uint32_t insn188;
+        natural write_addr, write_val;
+        unsigned rt188, rn188;
+        bug188_trap_count++;
+        insn188 = *(uint32_t *)(natural)xpPC(xp);
+
+        /* Decode the store instruction to get values and addresses */
+        rt188 = insn188 & 0x1F;
+        write_val = xpGPR(xp, rt188);
+        write_addr = addr_raw;
+
+        /* Temporarily unprotect, perform the write(s), re-protect */
+        mprotect((void *)target_page188, 0x4000, PROT_READ | PROT_WRITE);
+
+        /* Check if STP (Store Pair): bits[31:22] = 10 101 0 0xx 0 */
+        if ((insn188 & 0xFFC00000) == 0xA9000000 ||  /* STP Xt, Xt2, signed offset */
+            (insn188 & 0xFFC00000) == 0xA9800000 ||  /* STP Xt, Xt2, pre-index */
+            (insn188 & 0xFFC00000) == 0xA8800000) {  /* STP Xt, Xt2, post-index */
+          /* STP: two registers stored. Rt at [addr], Rt2 at [addr+8] */
+          unsigned rt2_188 = (insn188 >> 10) & 0x1F;
+          natural write_val2 = xpGPR(xp, rt2_188);
+          rn188 = (insn188 >> 5) & 0x1F;
+          int imm7 = (insn188 >> 15) & 0x7F;
+          if (imm7 & 0x40) imm7 |= ~0x7F; /* sign extend */
+          natural base = xpGPR(xp, rn188);
+          natural eff_addr = base + (imm7 * 8);
+          *(natural *)eff_addr = write_val;
+          *(natural *)(eff_addr + 8) = write_val2;
+          write_addr = eff_addr;
+          /* Handle pre-index: update base register */
+          if ((insn188 & 0xFFC00000) == 0xA9800000) {
+            xpGPR(xp, rn188) = eff_addr;
+          }
+        } else {
+          /* Simple STR: one register stored */
+          *(natural *)write_addr = write_val;
+          /* Handle pre-index STR */
+          if ((insn188 & 0x3B200C00) == 0x38000C00) {
+            rn188 = (insn188 >> 5) & 0x1F;
+            xpGPR(xp, rn188) = write_addr;
+          }
+        }
+
+        mprotect((void *)target_page188, 0x4000, PROT_READ);
+
+        /* Advance PC past the store instruction */
+        xpPC(xp) = (pc)((natural)xpPC(xp) + 4);
+
+        /* Log writes near target address (0x3020002128a0-0x3020002128c0) */
+        if (write_addr >= 0x302000212880ULL && write_addr < 0x3020002128c0ULL) {
+          fprintf(dbgout, "Bug188-TRAP[%d]: write @0x%lx val=0x%lx pc=0x%lx nfn=0x%lx insn=%08x",
+                  bug188_trap_count, (unsigned long)write_addr,
+                  (unsigned long)write_val,
+                  (unsigned long)(natural)xpPC(xp), (unsigned long)xpGPR(xp, 10), insn188);
+          /* If STP, show second value too */
+          if ((insn188 & 0xFFC00000) == 0xA9000000) {
+            unsigned rt2_log = (insn188 >> 10) & 0x1F;
+            fprintf(dbgout, " val2(x%u)=0x%lx", rt2_log, (unsigned long)xpGPR(xp, rt2_log));
+          }
+          fprintf(dbgout, "\n");
+          fprintf(dbgout, "  @a0=%016lx @a8=%016lx @b0=%016lx @b8=%016lx\n",
+                  (unsigned long)*(natural *)0x3020002128a0ULL,
+                  (unsigned long)*(natural *)0x3020002128a8ULL,
+                  (unsigned long)*(natural *)0x3020002128b0ULL,
+                  (unsigned long)*(natural *)0x3020002128b8ULL);
+          fflush(dbgout);
+        }
+
+        /* Check if target is NOW corrupted */
+        if ((*(natural *)0x3020002128a8ULL & 0xFFFFFFFF) == 0xFFFFFFFF &&
+            *(natural *)0x3020002128a8ULL != 0) {
+          fprintf(dbgout, "Bug188-TRAP: *** CORRUPTION! trap#%d @0x%lx val=0x%lx pc=0x%lx nfn=0x%lx ***\n",
+                  bug188_trap_count, (unsigned long)write_addr,
+                  (unsigned long)write_val,
+                  (unsigned long)(natural)xpPC(xp), (unsigned long)xpGPR(xp, 10));
+          fprintf(dbgout, "  @a0=%016lx @a8=%016lx @b0=%016lx @b8=%016lx\n",
+                  (unsigned long)*(natural *)0x3020002128a0ULL,
+                  (unsigned long)*(natural *)0x3020002128a8ULL,
+                  (unsigned long)*(natural *)0x3020002128b0ULL,
+                  (unsigned long)*(natural *)0x3020002128b8ULL);
+          /* Dump all relevant registers for bitvec overlap analysis */
+          fprintf(dbgout, "  x0=0x%lx x2=0x%lx x13=0x%lx x26(allocptr)=0x%lx\n",
+                  (unsigned long)xpGPR(xp, 0), (unsigned long)xpGPR(xp, 2),
+                  (unsigned long)xpGPR(xp, 13), (unsigned long)xpGPR(xp, 26));
+          fprintf(dbgout, "  bitvec_base(x13)=0x%lx + x0=0x%lx = 0x%lx\n",
+                  (unsigned long)xpGPR(xp, 13), (unsigned long)xpGPR(xp, 0),
+                  (unsigned long)(xpGPR(xp, 13) + xpGPR(xp, 0)));
+          /* Check bitvec header at x13-8 */
+          if (xpGPR(xp, 13) > 0x302000000000ULL) {
+            natural bvhdr = *(natural *)(xpGPR(xp, 13) - 8);
+            natural bvcount = bvhdr & 0x00FFFFFFFFFFFFFFULL;
+            natural bvsubtag = (bvhdr >> 56) & 0xFF;
+            fprintf(dbgout, "  bitvec_hdr=0x%lx subtag=0x%lx count=%lu data_bytes=%lu\n",
+                    (unsigned long)bvhdr, (unsigned long)bvsubtag,
+                    (unsigned long)bvcount,
+                    (unsigned long)((bvcount + 7) / 8));
+          }
+          fflush(dbgout);
+          bug188_watch_active = 0; /* stop watching */
+        }
+        return true;
+      }
+    }
   }
 #endif
 
@@ -926,6 +1073,256 @@ handle_protection_violation(ExceptionInformation *xp, siginfo_t *info,
             tcr->vs_area ? (void*)tcr->vs_area->low : NULL,
             tcr->vs_area ? (void*)tcr->vs_area->high : NULL,
             (unsigned long)xpGPR(xp, 25));
+    /* Bug 188: Dump register state and instructions for protection faults */
+    {
+      pc faulting_pc = xpPC(xp);
+      fprintf(dbgout, "  PROT-FAULT: pc=0x%lx lr=0x%lx sp=0x%lx fp=0x%lx addr=%p\n"
+              "  x0=0x%lx x1=0x%lx x2=0x%lx x9=0x%lx x10=0x%lx x12=0x%lx\n"
+              "  x13=0x%lx x14=0x%lx x15=0x%lx x25=0x%lx\n",
+              (unsigned long)(natural)faulting_pc, (unsigned long)xpGPR(xp, 30),
+              (unsigned long)xpSP(xp), (unsigned long)xpFP(xp), addr,
+              (unsigned long)xpGPR(xp, 0), (unsigned long)xpGPR(xp, 1),
+              (unsigned long)xpGPR(xp, 2), (unsigned long)xpGPR(xp, 9),
+              (unsigned long)xpGPR(xp, 10), (unsigned long)xpGPR(xp, 12),
+              (unsigned long)xpGPR(xp, 13), (unsigned long)xpGPR(xp, 14),
+              (unsigned long)xpGPR(xp, 15), (unsigned long)xpGPR(xp, 25));
+      if ((natural)faulting_pc > 0x100000000ULL && (natural)faulting_pc < 0x800000000000ULL) {
+        opcode *insns = (opcode *)faulting_pc;
+        fprintf(dbgout, "  insns: [-8]=%08x [-4]=%08x [0]=%08x [+4]=%08x [+8]=%08x\n",
+                insns[-2], insns[-1], insns[0], insns[1], insns[2]);
+        /* Bug 188: Dump wider instruction window */
+        fprintf(dbgout, "  wide-insns:");
+        for (int wi = -16; wi <= 8; wi++)
+          fprintf(dbgout, " [%+3d]%08x", wi*4, insns[wi]);
+        fprintf(dbgout, "\n");
+      }
+      /* Walk FP chain for Lisp backtrace */
+      {
+        LispObj fp = xpFP(xp);
+        int bt_count = 0;
+        while (fp > 0x100000000LL && fp < 0x800000000000LL && bt_count < 10) {
+          LispObj *frame = (LispObj *)fp;
+          LispObj savelr = frame[1];
+          LispObj savefn = frame[2];
+          LispObj savefp = frame[3];
+          /* Try to extract function name */
+          char fnname[64] = {0};
+          natural fn_raw = untag(savefn);
+          if (fn_raw > 0x100000000LL && fn_raw < 0x400000000000LL) {
+            LispObj fn_hdr = ((LispObj *)fn_raw)[-1];
+            if (header_subtag(fn_hdr) == subtag_function) {
+              natural nslots = header_element_count(fn_hdr);
+              if (nslots >= 2) {
+                LispObj name_slot = ((LispObj *)fn_raw)[nslots - 2]; /* name is penultimate slot */
+                natural nm_raw = untag(name_slot);
+                if (nm_raw > 0x100000000LL && nm_raw < 0x400000000000LL) {
+                  LispObj pn = ((LispObj *)nm_raw)[0]; /* pname of symbol */
+                  natural pn_raw = untag(pn);
+                  if (pn_raw > 0x100000000LL && pn_raw < 0x400000000000LL) {
+                    LispObj pn_hdr = ((LispObj *)pn_raw)[-1];
+                    natural pn_len = header_element_count(pn_hdr);
+                    int cs = ((header_subtag(pn_hdr) & 0x7F) == 7) ? 4 : 1;
+                    if (pn_len > 0 && pn_len < 60) {
+                      for (natural i = 0; i < pn_len; i++)
+                        fnname[i] = ((char *)pn_raw)[i * cs];
+                      fnname[pn_len] = 0;
+                    }
+                  }
+                }
+              }
+            }
+          }
+          fprintf(dbgout, "  pf-bt[%d] lr=%016lx fn=%016lx \"%s\"\n",
+                  bt_count, (unsigned long)savelr, (unsigned long)savefn,
+                  fnname[0] ? fnname : "???");
+          fp = savefp;
+          bt_count++;
+          if (fp == 0 || fp == (LispObj)savefp) break;
+        }
+      }
+      /* Dump vstack around vsp */
+      {
+        LispObj pf_vsp = xpGPR(xp, 25);
+        if (pf_vsp > 0x100000000LL && pf_vsp < 0x800000000000LL) {
+          LispObj *vs = (LispObj *)pf_vsp;
+          fprintf(dbgout, "  pf-vsp=%016lx:\n", (unsigned long)pf_vsp);
+          for (int vi = 0; vi < 16; vi++) {
+            LispObj val = vs[vi];
+            fprintf(dbgout, "    vs[%d]=%016lx", vi, (unsigned long)val);
+            /* If it's a symbol, try to print name */
+            if ((val >> 56) == 0x63 || (val >> 56) == tag_symbol) {
+              natural sr = untag(val);
+              if (sr > 0x100000000LL && sr < 0x400000000000LL) {
+                LispObj pn = ((LispObj *)sr)[0];
+                natural pr = untag(pn);
+                if (pr > 0x100000000LL && pr < 0x400000000000LL) {
+                  LispObj ph = ((LispObj *)pr)[-1];
+                  natural pl = header_element_count(ph);
+                  int cs = ((header_subtag(ph) & 0x7F) == 7) ? 4 : 1;
+                  if (pl > 0 && pl < 40) {
+                    fprintf(dbgout, " \"");
+                    for (natural i = 0; i < pl; i++)
+                      fprintf(dbgout, "%c", ((char *)pr)[i * cs]);
+                    fprintf(dbgout, "\"");
+                  }
+                }
+              }
+            }
+            fprintf(dbgout, "\n");
+          }
+        }
+        /* Also dump nfn (x10) function slots with symbol name decoding */
+        {
+        LispObj pf_nfn;
+        natural nfn_raw, dyn_lo, dyn_hi;
+        pf_nfn = xpGPR(xp, 10);
+        nfn_raw = untag(pf_nfn);
+        /* Get dynamic area bounds for safe pointer access */
+        dyn_lo = (natural)((struct area *)((struct area *)all_areas)->succ)->low;
+        dyn_hi = (natural)((struct area *)((struct area *)all_areas)->succ)->active;
+        #define SAFE_PTR(p) (((p) >= dyn_lo && (p) < dyn_hi) || \
+                             ((p) >= 0x300000000000ULL && (p) < 0x300000100000ULL) || \
+                             ((p) >= 0x300010000ULL && (p) < 0x300020000ULL))
+        fprintf(dbgout, "  dyn_range: %016lx-%016lx\n",
+                (unsigned long)dyn_lo, (unsigned long)dyn_hi);
+        if (nfn_raw > 0x100000000LL && nfn_raw < 0x400000000000LL && SAFE_PTR(nfn_raw)) {
+          LispObj fn_hdr = ((LispObj *)nfn_raw)[-1];
+          if (header_subtag(fn_hdr) == subtag_function) {
+            natural ns = header_element_count(fn_hdr);
+            fprintf(dbgout, "  pf-nfn=%016lx slots=%lu hdr=%016lx:\n",
+                    (unsigned long)pf_nfn, (unsigned long)ns, (unsigned long)fn_hdr);
+            for (natural si = 0; si < ns && si < 20; si++) {
+              LispObj sv = ((LispObj *)nfn_raw)[si];
+              fprintf(dbgout, "    fn[%lu]=%016lx", (unsigned long)si, (unsigned long)sv);
+              /* Decode symbol names (with bounds check) */
+              natural sv_tag = sv >> 56;
+              if (sv_tag == 0x63) { /* symbol tag */
+                natural sym_raw = untag(sv);
+                if (SAFE_PTR(sym_raw)) {
+                  LispObj pn = ((LispObj *)sym_raw)[0];
+                  natural pn_raw = untag(pn);
+                  if (SAFE_PTR(pn_raw)) {
+                    LispObj ph = ((LispObj *)pn_raw)[-1];
+                    natural pl = header_element_count(ph);
+                    int cs = ((header_subtag(ph) & 0x7F) == 7) ? 4 : 1;
+                    if (pl > 0 && pl < 60) {
+                      fprintf(dbgout, " \"");
+                      for (natural i = 0; i < pl; i++)
+                        fprintf(dbgout, "%c", ((char *)pn_raw)[i * cs]);
+                      fprintf(dbgout, "\"");
+                    }
+                  } else {
+                    fprintf(dbgout, " <pname-oob:%016lx>", (unsigned long)pn);
+                  }
+                } else {
+                  fprintf(dbgout, " <sym-oob:%016lx>", (unsigned long)sym_raw);
+                }
+              }
+              /* Decode cons cells — print car and cdr (with bounds check) */
+              if (sv_tag == 0x03) {
+                natural cons_raw = untag(sv);
+                if (SAFE_PTR(cons_raw) && SAFE_PTR(cons_raw - 8)) {
+                  LispObj car = ((LispObj *)cons_raw)[0];
+                  LispObj cdr = ((LispObj *)(cons_raw - 8))[0];
+                  fprintf(dbgout, " (car=%016lx cdr=%016lx)", (unsigned long)car, (unsigned long)cdr);
+                } else {
+                  fprintf(dbgout, " <cons-oob>");
+                }
+              }
+              fprintf(dbgout, "\n");
+            }
+            /* Print function entrypoint offset from code area */
+            LispObj ep = ((LispObj *)nfn_raw)[0];
+            LispObj cv = ((LispObj *)nfn_raw)[1];
+            fprintf(dbgout, "    entrypoint=%016lx code-vector=%016lx\n",
+                    (unsigned long)ep, (unsigned long)cv);
+          }
+        }
+        /* Bug 188: Trace the source of the bad cons 0xFFFFFFFF */
+        if ((untag(xpGPR(xp, 15)) & 0xFFFFFFFF) == 0xFFFFFFFF) {
+          fprintf(dbgout, "  Bug188: BAD CONS x15=%016lx (0xFFFFFFFF offset)\n",
+                  (unsigned long)xpGPR(xp, 15));
+          /* Walk the list that contained this bad cons - look at vstack */
+          LispObj pf_vsp = xpGPR(xp, 25);
+          /* The cons that had this as car was the original arg_z.
+             Look at x15 after the car load - the original arg_z might be
+             recoverable from surrounding context. */
+          /* Check the caller function's constant slots for alist references */
+          LispObj pf_fp = xpFP(xp);
+          if (pf_fp > 0x100000000LL && pf_fp < 0x800000000000LL) {
+            LispObj *frame = (LispObj *)pf_fp;
+            LispObj caller_lr = frame[1];
+            LispObj caller_fn = frame[2];
+            natural cfn_raw = untag(caller_fn);
+            fprintf(dbgout, "  Bug188: caller fn=%016lx lr=%016lx\n",
+                    (unsigned long)caller_fn, (unsigned long)caller_lr);
+            if (SAFE_PTR(cfn_raw)) {
+              LispObj cfn_hdr = ((LispObj *)cfn_raw)[-1];
+              if (header_subtag(cfn_hdr) == subtag_function) {
+                natural cns = header_element_count(cfn_hdr);
+                fprintf(dbgout, "  Bug188: caller slots=%lu\n", (unsigned long)cns);
+                /* Try to get caller name */
+                if (cns >= 2) {
+                  LispObj cname = ((LispObj *)cfn_raw)[cns - 2];
+                  natural cn_raw = untag(cname);
+                  if (SAFE_PTR(cn_raw)) {
+                    LispObj cpn = ((LispObj *)cn_raw)[0];
+                    natural cpn_raw = untag(cpn);
+                    if (SAFE_PTR(cpn_raw)) {
+                      LispObj cph = ((LispObj *)cpn_raw)[-1];
+                      natural cpl = header_element_count(cph);
+                      int ccs = ((header_subtag(cph) & 0x7F) == 7) ? 4 : 1;
+                      if (cpl > 0 && cpl < 60) {
+                        fprintf(dbgout, "  Bug188: caller name=\"");
+                        for (natural i = 0; i < cpl; i++)
+                          fprintf(dbgout, "%c", ((char *)cpn_raw)[i * ccs]);
+                        fprintf(dbgout, "\"\n");
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+          /* Scan the nfn's cons constant slots for the cell containing the bad value */
+          if (SAFE_PTR(nfn_raw)) {
+            LispObj fn_hdr2 = ((LispObj *)nfn_raw)[-1];
+            if (header_subtag(fn_hdr2) == subtag_function) {
+              natural ns2 = header_element_count(fn_hdr2);
+              for (natural si = 0; si < ns2; si++) {
+                LispObj sv2 = ((LispObj *)nfn_raw)[si];
+                if ((sv2 >> 56) == 0x03) { /* cons */
+                  /* Walk the cons chain looking for 0xFFFFFFFF */
+                  natural craw = untag(sv2);
+                  int depth = 0;
+                  while (SAFE_PTR(craw) && depth < 50) {
+                    LispObj car = ((LispObj *)craw)[0];
+                    LispObj cdr = ((LispObj *)(craw - 8))[0];
+                    if ((untag(car) & 0xFFFFFFFF) == 0xFFFFFFFF) {
+                      fprintf(dbgout, "  Bug188: fn[%lu] cons chain depth %d: car=%016lx (BAD!) cdr=%016lx\n",
+                              (unsigned long)si, depth, (unsigned long)car, (unsigned long)cdr);
+                      /* Print the parent cons and neighbors */
+                      fprintf(dbgout, "  Bug188: this cons at %016lx\n", (unsigned long)(craw | 0x0300000000000000ULL));
+                      break;
+                    }
+                    /* Follow cdr */
+                    if ((cdr >> 56) == 0x03) {
+                      craw = untag(cdr);
+                      depth++;
+                    } else {
+                      break;
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        #undef SAFE_PTR
+        } /* end Bug 188 diagnostics block */
+      }
+      fflush(dbgout);
+    }
     if ((natural)addr == 0xFFFFFFFFFFFFFFF8ULL) {
       fprintf(dbgout, "  FAULT@-8: pc=0x%lx lr=0x%lx sp=0x%lx fp=0x%lx\n"
               "  x6=0x%lx x7=0x%lx x9=0x%lx x10=0x%lx x15=0x%lx x25=0x%lx\n",
@@ -1325,6 +1722,200 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
         /* Return the symbol (arg_y) as return value in arg_z */
         xpPC(xp) = (pc)(natural)xpGPR(xp, 30);
         xpGPR(xp, 15) = sym_tagged;
+        xpGPR(xp, 5) = node_size;
+        *bumpP = 0;
+        return true;
+      }
+
+      /* Bug 187: TYPEP is undefined during early boot (defined in sysutils.lisp,
+         loaded as #24 in level-1 sequence). Implement minimal type checking
+         for common CL types so l1-init and other early FASLs can proceed.
+         Args: arg_y (x14) = object, arg_z (x15) = type-name symbol. */
+      if (strcmp(fn_name, "TYPEP") == 0) {
+        static int typep_count = 0;
+        typep_count++;
+        LispObj obj = xpGPR(xp, 14);  /* arg_y = object */
+        LispObj type_sym = xpGPR(xp, 15);  /* arg_z = type symbol */
+        LispObj result = lisp_nil;
+
+        /* Extract type name string from the symbol's pname */
+        natural type_raw = untag(type_sym);
+        char tname[64] = {0};
+        if (type_raw > 0x100000000LL && type_raw < 0x400000000000LL) {
+          LispObj *tsym = (LispObj *)type_raw;
+          LispObj pn = tsym[0]; /* symbol.pname */
+          natural pn_raw = untag(pn);
+          if (pn_raw > 0x100000000LL && pn_raw < 0x400000000000LL) {
+            LispObj pn_hdr = ((LispObj *)pn_raw)[-1];
+            natural pn_len = header_element_count(pn_hdr);
+            int cs = ((header_subtag(pn_hdr) & 0x7F) == 7) ? 4 : 1;
+            if (pn_len > 0 && pn_len < 60) {
+              for (natural i = 0; i < pn_len; i++)
+                tname[i] = ((char *)pn_raw)[i * cs];
+              tname[pn_len] = 0;
+            }
+          }
+        }
+
+        unsigned int obj_tag = tag_of(obj);
+
+        if (strcmp(tname, "CONS") == 0) {
+          result = (obj_tag == tag_cons) ? t_value : lisp_nil;
+        } else if (strcmp(tname, "LIST") == 0) {
+          result = (obj_tag == tag_cons || obj == lisp_nil) ? t_value : lisp_nil;
+        } else if (strcmp(tname, "NULL") == 0) {
+          result = (obj == lisp_nil) ? t_value : lisp_nil;
+        } else if (strcmp(tname, "SYMBOL") == 0) {
+          result = (obj_tag == tag_symbol || obj == lisp_nil) ? t_value : lisp_nil;
+        } else if (strcmp(tname, "FUNCTION") == 0) {
+          result = (obj_tag == tag_function) ? t_value : lisp_nil;
+        } else if (strcmp(tname, "FIXNUM") == 0) {
+          result = (obj_tag == tag_positive_fixnum || obj_tag == tag_negative_fixnum) ? t_value : lisp_nil;
+        } else if (strcmp(tname, "CHARACTER") == 0) {
+          result = (obj_tag == tag_character) ? t_value : lisp_nil;
+        } else if (strcmp(tname, "SINGLE-FLOAT") == 0 || strcmp(tname, "SHORT-FLOAT") == 0) {
+          result = (obj_tag == tag_single_float) ? t_value : lisp_nil;
+        } else if (strcmp(tname, "DOUBLE-FLOAT") == 0 || strcmp(tname, "LONG-FLOAT") == 0) {
+          if (is_uvector_ref(obj_tag)) {
+            natural obj_raw = untag(obj);
+            if (obj_raw > 0x100000000LL && obj_raw < 0x400000000000LL) {
+              LispObj hdr = ((LispObj *)obj_raw)[-1];
+              if (header_subtag(hdr) == subtag_double_float) result = t_value;
+            }
+          }
+        } else if (strcmp(tname, "FLOAT") == 0) {
+          if (obj_tag == tag_single_float) {
+            result = t_value;
+          } else if (is_uvector_ref(obj_tag)) {
+            natural obj_raw = untag(obj);
+            if (obj_raw > 0x100000000LL && obj_raw < 0x400000000000LL) {
+              LispObj hdr = ((LispObj *)obj_raw)[-1];
+              if (header_subtag(hdr) == subtag_double_float) result = t_value;
+            }
+          }
+        } else if (strcmp(tname, "INTEGER") == 0) {
+          if (obj_tag == tag_positive_fixnum || obj_tag == tag_negative_fixnum) {
+            result = t_value;
+          } else if (is_uvector_ref(obj_tag)) {
+            natural obj_raw = untag(obj);
+            if (obj_raw > 0x100000000LL && obj_raw < 0x400000000000LL) {
+              LispObj hdr = ((LispObj *)obj_raw)[-1];
+              if (header_subtag(hdr) == subtag_bignum) result = t_value;
+            }
+          }
+        } else if (strcmp(tname, "RATIONAL") == 0) {
+          if (obj_tag == tag_positive_fixnum || obj_tag == tag_negative_fixnum) {
+            result = t_value;
+          } else if (is_uvector_ref(obj_tag)) {
+            natural obj_raw = untag(obj);
+            if (obj_raw > 0x100000000LL && obj_raw < 0x400000000000LL) {
+              LispObj hdr = ((LispObj *)obj_raw)[-1];
+              unsigned char st = header_subtag(hdr);
+              if (st == subtag_bignum || st == subtag_ratio) result = t_value;
+            }
+          }
+        } else if (strcmp(tname, "REAL") == 0 || strcmp(tname, "NUMBER") == 0) {
+          if (obj_tag == tag_positive_fixnum || obj_tag == tag_negative_fixnum ||
+              obj_tag == tag_single_float) {
+            result = t_value;
+          } else if (is_uvector_ref(obj_tag)) {
+            natural obj_raw = untag(obj);
+            if (obj_raw > 0x100000000LL && obj_raw < 0x400000000000LL) {
+              LispObj hdr = ((LispObj *)obj_raw)[-1];
+              unsigned char st = header_subtag(hdr);
+              if (st == subtag_bignum || st == subtag_double_float ||
+                  st == subtag_ratio || st == subtag_complex ||
+                  st == subtag_complex_single_float || st == subtag_complex_double_float)
+                result = t_value;
+            }
+          }
+        } else if (strcmp(tname, "ATOM") == 0) {
+          result = (obj_tag != tag_cons) ? t_value : lisp_nil;
+        } else if (strcmp(tname, "SIMPLE-BASE-STRING") == 0 || strcmp(tname, "SIMPLE-STRING") == 0) {
+          if (is_uvector_ref(obj_tag)) {
+            natural obj_raw = untag(obj);
+            if (obj_raw > 0x100000000LL && obj_raw < 0x400000000000LL) {
+              LispObj hdr = ((LispObj *)obj_raw)[-1];
+              if (header_subtag(hdr) == subtag_simple_base_string) result = t_value;
+            }
+          }
+        } else if (strcmp(tname, "STRING") == 0 || strcmp(tname, "BASE-STRING") == 0) {
+          if (is_uvector_ref(obj_tag)) {
+            natural obj_raw = untag(obj);
+            if (obj_raw > 0x100000000LL && obj_raw < 0x400000000000LL) {
+              LispObj hdr = ((LispObj *)obj_raw)[-1];
+              unsigned char st = header_subtag(hdr);
+              if (st == subtag_simple_base_string || st == subtag_vectorH) result = t_value;
+            }
+          }
+        } else if (strcmp(tname, "SIMPLE-VECTOR") == 0) {
+          if (is_uvector_ref(obj_tag)) {
+            natural obj_raw = untag(obj);
+            if (obj_raw > 0x100000000LL && obj_raw < 0x400000000000LL) {
+              LispObj hdr = ((LispObj *)obj_raw)[-1];
+              if (header_subtag(hdr) == subtag_simple_vector) result = t_value;
+            }
+          }
+        } else if (strcmp(tname, "MACPTR") == 0) {
+          if (is_uvector_ref(obj_tag)) {
+            natural obj_raw = untag(obj);
+            if (obj_raw > 0x100000000LL && obj_raw < 0x400000000000LL) {
+              LispObj hdr = ((LispObj *)obj_raw)[-1];
+              if (header_subtag(hdr) == subtag_macptr) result = t_value;
+            }
+          }
+        } else if (strcmp(tname, "UNSIGNED-BYTE") == 0) {
+          /* (typep x 'unsigned-byte) = (typep x '(integer 0 *)) */
+          if (obj_tag == tag_positive_fixnum) {
+            result = (((signed_natural)obj) >= 0) ? t_value : lisp_nil;
+          } else if (is_uvector_ref(obj_tag)) {
+            natural obj_raw = untag(obj);
+            if (obj_raw > 0x100000000LL && obj_raw < 0x400000000000LL) {
+              LispObj hdr = ((LispObj *)obj_raw)[-1];
+              if (header_subtag(hdr) == subtag_bignum) {
+                /* Check sign: MSB of last digit */
+                natural count = header_element_count(hdr);
+                if (count > 0) {
+                  uint32_t *digits = (uint32_t *)obj_raw;
+                  result = ((digits[count-1] & 0x80000000) == 0) ? t_value : lisp_nil;
+                }
+              }
+            }
+          }
+        } else if (strcmp(tname, "HASH-TABLE") == 0) {
+          /* Hash tables are istructs with type HASH-TABLE */
+          if (is_uvector_ref(obj_tag)) {
+            natural obj_raw = untag(obj);
+            if (obj_raw > 0x100000000LL && obj_raw < 0x400000000000LL) {
+              LispObj hdr = ((LispObj *)obj_raw)[-1];
+              if (header_subtag(hdr) == subtag_hash_vector) result = t_value;
+            }
+          }
+        } else if (strcmp(tname, "PACKAGE") == 0) {
+          if (is_uvector_ref(obj_tag)) {
+            natural obj_raw = untag(obj);
+            if (obj_raw > 0x100000000LL && obj_raw < 0x400000000000LL) {
+              LispObj hdr = ((LispObj *)obj_raw)[-1];
+              if (header_subtag(hdr) == subtag_package) result = t_value;
+            }
+          }
+        } else {
+          /* Unknown type — log and return NIL */
+          if (typep_count <= 50)
+            fprintf(dbgout, "Bug187: TYPEP unhandled type '%s' obj=%016lx tag=0x%02x #%d\n",
+                    tname, (unsigned long)obj, obj_tag, typep_count);
+        }
+
+        if (typep_count <= 20) {
+          fprintf(dbgout, "Bug187: TYPEP(%016lx, '%s') → %s #%d LR=%016lx\n",
+                  (unsigned long)obj, tname,
+                  (result == lisp_nil) ? "NIL" : "T", typep_count,
+                  (unsigned long)xpGPR(xp, 30));
+          fflush(dbgout);
+        }
+
+        xpPC(xp) = (pc)(natural)xpGPR(xp, 30);
+        xpGPR(xp, 15) = result;
         xpGPR(xp, 5) = node_size;
         *bumpP = 0;
         return true;
@@ -2159,61 +2750,45 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
             }
 
             if (restart_type == 157) { /* $xwrongtype */
-              /* Type mismatch — log details and return NIL.
-                 Note: returning the object as-is causes infinite loops
-                 because the caller retries the type check. */
+              /* Type mismatch — return the object (arg_y) back to caller.
+                 This is safe for report-bad-arg / %badarg which doesn't
+                 retry. For require-type loops (which retry), a same-object
+                 counter prevents infinite loops. */
               static int xwt_count = 0;
+              static LispObj last_xwt_obj = 0;
+              static int same_obj_count = 0;
               xwt_count++;
               LispObj obj = xpGPR(xp, 14); /* arg_y = the mistyped object */
               LispObj expected = xpGPR(xp, 15); /* arg_z = expected type */
+              if (obj == last_xwt_obj) {
+                same_obj_count++;
+              } else {
+                same_obj_count = 1;
+                last_xwt_obj = obj;
+              }
               if (xwt_count <= 10) {
                 fprintf(dbgout, "  $xwrongtype #%d: obj=%016lx expected=%016lx LR=%016lx\n",
                         xwt_count, (unsigned long)obj, (unsigned long)expected,
                         (unsigned long)xpGPR(xp, 30));
-                /* Try to print expected type name if it's a symbol */
-                natural exp_raw = untag(expected);
-                if ((expected >> 56) == 0x63 && exp_raw > 0x100000000LL && exp_raw < 0x400000000000LL) {
-                  LispObj pn = ((LispObj *)exp_raw)[0]; /* pname */
-                  natural pn_raw = untag(pn);
-                  if (pn_raw > 0x100000000LL && pn_raw < 0x400000000000LL) {
-                    LispObj pn_hdr = ((LispObj *)pn_raw)[-1];
-                    natural pn_len = header_element_count(pn_hdr);
-                    int cs = ((header_subtag(pn_hdr) & 0x7F) == 7) ? 4 : 1;
-                    if (pn_len > 0 && pn_len < 256) {
-                      fprintf(dbgout, "    expected type: \"");
-                      for (natural i = 0; i < pn_len; i++)
-                        fprintf(dbgout, "%c", ((char *)pn_raw)[i * cs]);
-                      fprintf(dbgout, "\"\n");
-                    }
-                  }
-                }
                 fflush(dbgout);
               }
-              if (xwt_count > 1000) {
+              if (xwt_count > 5000) {
                 fprintf(dbgout, "  $xwrongtype: too many (%d), aborting\n", xwt_count);
                 fflush(dbgout);
                 _exit(1);
               }
-              /* Return a type-appropriate default value */
               {
-                LispObj retval = lisp_nil;
-                /* Check expected type name to return something appropriate */
-                natural exp_raw2 = untag(expected);
-                if ((expected >> 56) == 0x63 && exp_raw2 > 0x100000000LL && exp_raw2 < 0x400000000000LL) {
-                  LispObj pn2 = ((LispObj *)exp_raw2)[0];
-                  natural pn2_raw = untag(pn2);
-                  if (pn2_raw > 0x100000000LL && pn2_raw < 0x400000000000LL) {
-                    LispObj pn2_hdr = ((LispObj *)pn2_raw)[-1];
-                    natural pn2_len = header_element_count(pn2_hdr);
-                    int cs2 = ((header_subtag(pn2_hdr) & 0x7F) == 7) ? 4 : 1;
-                    char *pd2 = (char *)pn2_raw;
-                    /* NUMBER/INTEGER/FIXNUM/REAL → return 0 */
-                    if ((pn2_len >= 6 && pd2[0*cs2]=='N' && pd2[1*cs2]=='U' && pd2[2*cs2]=='M') ||
-                        (pn2_len >= 4 && pd2[0*cs2]=='R' && pd2[1*cs2]=='E' && pd2[2*cs2]=='A' && pd2[3*cs2]=='L') ||
-                        (pn2_len >= 7 && pd2[0*cs2]=='I' && pd2[1*cs2]=='N' && pd2[2*cs2]=='T') ||
-                        (pn2_len >= 6 && pd2[0*cs2]=='F' && pd2[1*cs2]=='I' && pd2[2*cs2]=='X'))
-                      retval = 0;
-                  }
+                LispObj retval;
+                if (same_obj_count > 3) {
+                  /* Same object looping — return NIL to break the cycle */
+                  retval = lisp_nil;
+                  same_obj_count = 0;
+                } else {
+                  /* Return the object itself. For report-bad-arg callers
+                     like validate-function-name this is correct behavior
+                     (the object IS valid, just the type check is too strict
+                     in the cross-compiled code). */
+                  retval = obj;
                 }
                 xpPC(xp) = (pc)(natural)xpGPR(xp, 30);
                 xpGPR(xp, 15) = retval;
@@ -2425,26 +3000,26 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
             fflush(dbgout);
 
             /* Bug 186b: The cross-compiled validate-function-name is missing
-               its symbolp check.  We cannot let the function run because
-               the eval/apply tail-call chain leaves an extra frame between
-               SP and $FASL-EVAL's frame.  Return directly, adjusting SP
-               to skip the extra frame so $FASL-EVAL reads its own frame. */
+               its symbolp check. When arg is a symbol, return it directly.
+               Restore nfn from the frame at FP so reload-self works. */
             if (expected_count == 1) {
               LispObj adjusted_arg = xpGPR(xp, arg_z);
               if ((adjusted_arg >> 56) == tag_symbol) {
-                natural old_sp = (natural)xpSP(xp);
-                natural old_fp = xpGPR(xp, 29);
-                /* Skip the extra 32-byte frame from eval/apply tail-call chain */
+                /* Restore nfn from caller's saved frame */
+                natural fp = xpGPR(xp, 29);
+                if (fp > 0x100000000LL && fp < 0x800000000000LL) {
+                  LispObj *frame = (LispObj *)fp;
+                  LispObj savefn = frame[2]; /* savefn at fp+16 */
+                  if ((savefn >> 56) == (tag_function >> 0))
+                    xpGPR(xp, 10) = savefn;
+                }
                 xpPC(xp) = (pc)(natural)xpGPR(xp, 30);
                 xpGPR(xp, arg_z) = adjusted_arg;
                 xpGPR(xp, nargs) = node_size;
-                xpSP(xp) = old_sp + 32;
-                xpGPR(xp, 29) = old_fp + 32; /* FP tracks SP */
                 *bumpP = 0;
                 early_err_count--;
-                fprintf(dbgout, "Bug186b: returning symbol %016lx, SP %016lx→%016lx\n",
-                        (unsigned long)adjusted_arg,
-                        (unsigned long)old_sp, (unsigned long)(old_sp + 32));
+                fprintf(dbgout, "Bug186b: returning symbol %016lx nfn=%016lx\n",
+                        (unsigned long)adjusted_arg, (unsigned long)xpGPR(xp, 10));
                 fflush(dbgout);
                 return true;
               }
@@ -4173,6 +4748,18 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
       fflush(dbgout);
     }
   }
+  /* Bug 188: Check target memory on every Mach exception.
+     Don't re-protect — that causes infinite loops with the signal handler. */
+  if (bug188_watch_active) {
+    natural va8_m = *(natural *)0x3020002128a8ULL;
+    if ((va8_m & 0xFFFFFFFF) == 0xFFFFFFFF && va8_m != 0) {
+      native_thread_state_t *mts = (native_thread_state_t *)in_state;
+      fprintf(dbgout, "Bug188-MACH: CORRUPTION DETECTED! @a8=%016lx pc=0x%lx nfn=0x%lx\n",
+              (unsigned long)va8_m, (unsigned long)mts->__pc, (unsigned long)mts->__x[10]);
+      fflush(dbgout);
+      bug188_watch_active = 0;
+    }
+  }
   /* Bug 181: Log first N exceptions for diagnostics */
   {
     static int all_exc_count = 0;
@@ -4228,6 +4815,59 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
         }
       }
       fflush(dbgout);
+    }
+  }
+  /* Bug 188: watchpoint for corruption at dynamic+0x2128a0..0x2128b8 */
+  {
+    natural dbase = (natural)((struct area *)((struct area *)all_areas)->succ)->low;
+    natural dactive = (natural)((struct area *)((struct area *)all_areas)->succ)->active;
+    /* Log when the area first grows past our target */
+    if (dbase != 0 && dactive > dbase + 0x212900 && !bug188_watch_active) {
+      bug188_watch_active = 1;
+      fprintf(dbgout, "Bug188-WATCH: area now covers target offsets, dactive=0x%lx\n",
+              (unsigned long)dactive);
+      fflush(dbgout);
+    }
+    if (bug188_watch_active) {
+      natural *watch_a0 = (natural *)(dbase + 0x2128a0);
+      natural *watch_a8 = (natural *)(dbase + 0x2128a8);
+      natural *watch_b8 = (natural *)(dbase + 0x2128b8);
+      natural va0 = *watch_a0;
+      natural va8 = *watch_a8;
+      natural vb8 = *watch_b8;
+      if (va0 != bug188_last_val_a0 || va8 != bug188_last_val_a8 || vb8 != bug188_last_val_b8) {
+        native_thread_state_t *w_ts = (native_thread_state_t *)in_state;
+        fprintf(dbgout, "Bug188-WATCH: a0=%016lx→%016lx a8=%016lx→%016lx b8=%016lx→%016lx pc=0x%lx nfn=0x%lx\n",
+                (unsigned long)bug188_last_val_a0, (unsigned long)va0,
+                (unsigned long)bug188_last_val_a8, (unsigned long)va8,
+                (unsigned long)bug188_last_val_b8, (unsigned long)vb8,
+                (unsigned long)w_ts->__pc, (unsigned long)w_ts->__x[10]);
+        bug188_last_val_a0 = va0;
+        bug188_last_val_a8 = va8;
+        bug188_last_val_b8 = vb8;
+        /* If we just saw 0xFFFFFFFF appear, dump extra context */
+        if ((va0 & 0xFFFFFFFF) == 0xFFFFFFFF || (va8 & 0xFFFFFFFF) == 0xFFFFFFFF ||
+            (vb8 & 0xFFFFFFFF) == 0xFFFFFFFF) {
+          fprintf(dbgout, "Bug188-WATCH: *** 0xFFFFFFFF DETECTED! ***\n");
+          fprintf(dbgout, "  pc=0x%lx lr=0x%lx sp=0x%lx nfn=0x%lx fn=0x%lx\n",
+                  (unsigned long)w_ts->__pc, (unsigned long)w_ts->__lr,
+                  (unsigned long)w_ts->__sp, (unsigned long)w_ts->__x[10],
+                  (unsigned long)w_ts->__x[9]);
+          fprintf(dbgout, "  x0=0x%lx x1=0x%lx x2=0x%lx x3=0x%lx x15=0x%lx\n",
+                  (unsigned long)w_ts->__x[0], (unsigned long)w_ts->__x[1],
+                  (unsigned long)w_ts->__x[2], (unsigned long)w_ts->__x[3],
+                  (unsigned long)w_ts->__x[15]);
+          /* Also dump memory surrounding the watchpoint */
+          fprintf(dbgout, "  mem@+2128[0-7]:");
+          for (int mi = 0; mi < 8; mi++)
+            fprintf(dbgout, " %016lx", (unsigned long)((natural *)(dbase + 0x212880))[mi]);
+          fprintf(dbgout, "\n  mem@+2128[8-15]:");
+          for (int mi = 0; mi < 8; mi++)
+            fprintf(dbgout, " %016lx", (unsigned long)((natural *)(dbase + 0x2128c0))[mi]);
+          fprintf(dbgout, "\n");
+        }
+        fflush(dbgout);
+      }
     }
   }
   /* Bug 173: stale hardcoded slot[11] diagnostics removed (Bug 176) */
