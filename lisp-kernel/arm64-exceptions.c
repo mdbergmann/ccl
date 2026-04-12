@@ -448,27 +448,24 @@ handle_alloc_trap(ExceptionInformation *xp, TCR *tcr, Boolean *notify)
   cur_allocptr = xpGPR(xp, allocptr);
   disp = allocptr_displacement(xp);
 
+  /* Bug 188: Log every alloc trap with full context */
   {
-    static int alloc_dbg = 0;
-    static int alloc_total = 0;
-    alloc_total++;
-    if (alloc_dbg < 20 || disp == 0) {
-      alloc_dbg++;
-      area *da = active_dynamic_area;
-      fprintf(dbgout, "alloc-trap[%d]: allocptr=0x%lx allocbase=0x%lx disp=%ld (0x%lx)\n",
-              alloc_dbg, (unsigned long)cur_allocptr,
-              (unsigned long)xpGPR(xp, allocbase), (long)disp, (unsigned long)disp);
-      fprintf(dbgout, "  regs: x0=0x%lx x1=0x%lx x2=0x%lx x3=0x%lx x14=0x%lx x15=0x%lx\n",
-              (unsigned long)xpGPR(xp, 0), (unsigned long)xpGPR(xp, 1),
-              (unsigned long)xpGPR(xp, 2), (unsigned long)xpGPR(xp, 3),
-              (unsigned long)xpGPR(xp, 14), (unsigned long)xpGPR(xp, 15));
-      if (da) {
-        fprintf(dbgout, "  dynarea: low=0x%lx active=0x%lx high=0x%lx\n",
-                (unsigned long)(natural)da->low, (unsigned long)(natural)da->active,
-                (unsigned long)(natural)da->high);
-      } else {
-        fprintf(dbgout, "  *** active_dynamic_area is NULL! ***\n");
-      }
+    static int alloc_trap_count = 0;
+    alloc_trap_count++;
+    area *da = active_dynamic_area;
+    natural dbase = da ? (natural)da->low : 0;
+    natural dactive = da ? (natural)da->active : 0;
+    /* Log first 30 traps, then every 100th, plus any with disp==0 */
+    if (alloc_trap_count <= 30 || (alloc_trap_count % 100) == 0 || disp == 0) {
+      fprintf(dbgout, "AT[%d]: aptr=0x%lx abase=0x%lx disp=%ld need=%ld\n",
+              alloc_trap_count,
+              (unsigned long)cur_allocptr,
+              (unsigned long)xpGPR(xp, allocbase),
+              (long)disp, (long)(disp ? (-disp) + node_size : 0));
+      fprintf(dbgout, "  da: low=0x%lx active=0x%lx (off=0x%lx) high=0x%lx\n",
+              (unsigned long)dbase, (unsigned long)dactive,
+              (unsigned long)(dactive - dbase),
+              da ? (unsigned long)(natural)da->high : 0UL);
       fflush(dbgout);
     }
   }
@@ -489,31 +486,59 @@ handle_alloc_trap(ExceptionInformation *xp, TCR *tcr, Boolean *notify)
       pc_luser_xp(xp, tcr, NULL);
       callback_for_gc_notification(xp, tcr);
     }
-    /* Bug 188: Track heap growth and watch for corruption */
+    /* Bug 188: Verify the newly allocated range doesn't overlap with
+       previously allocated objects.  After handle_alloc_trap adjusts
+       allocptr, the object will occupy [allocptr-8, allocptr-8+bytes_needed).
+       Everything below old a->active should be untouched. */
     {
       static int alloc188_count = 0;
-      if (alloc188_count == 0) {
-        fprintf(dbgout, "Bug188: FIRST allocate_object success!\n");
+      alloc188_count++;
+      area *da = active_dynamic_area;
+      natural new_allocptr = xpGPR(xp, allocptr);
+      natural new_allocbase = xpGPR(xp, allocbase);
+      natural obj_base = new_allocptr - node_size;  /* header location */
+      natural obj_top = obj_base + bytes_needed;     /* end of object */
+      natural dbase = da ? (natural)da->low : 0;
+      natural dactive = da ? (natural)da->active : 0;
+
+      /* Log this allocation's placement */
+      if (alloc188_count <= 30 || (alloc188_count % 100) == 0) {
+        fprintf(dbgout, "  AT-result[%d]: obj=[0x%lx,0x%lx) aptr=0x%lx abase=0x%lx\n",
+                alloc188_count,
+                (unsigned long)(obj_base - dbase),
+                (unsigned long)(obj_top - dbase),
+                (unsigned long)(new_allocptr - dbase),
+                (unsigned long)(new_allocbase - dbase));
         fflush(dbgout);
       }
-      natural dbase188 = (natural)((struct area *)((struct area *)all_areas)->succ)->low;
-      natural dact188 = (natural)((struct area *)((struct area *)all_areas)->succ)->active;
-      natural offset188 = dact188 - dbase188;
-      alloc188_count++;
-      /* Log alloc traps near our target region */
-      if (alloc188_count <= 5 || offset188 > 0x200000) {
-        fprintf(dbgout, "Bug188-AT[%d]: dactive_off=0x%lx allocptr=0x%lx\n",
-                alloc188_count, (unsigned long)offset188,
-                (unsigned long)xpGPR(xp, allocptr));
-        if (offset188 > 0x212900) {
-          natural v_a0 = *(natural *)(dbase188 + 0x2128a0);
-          natural v_a8 = *(natural *)(dbase188 + 0x2128a8);
-          natural v_b8 = *(natural *)(dbase188 + 0x2128b8);
-          fprintf(dbgout, "  @a0=%016lx @a8=%016lx @b8=%016lx%s\n",
-                  (unsigned long)v_a0, (unsigned long)v_a8, (unsigned long)v_b8,
-                  ((v_a0 & 0xFFFFFFFF) == 0xFFFFFFFF || (v_a8 & 0xFFFFFFFF) == 0xFFFFFFFF)
-                    ? " ***CORRUPT***" : "");
-        }
+
+      /* OVERLAP CHECK: If the object's top extends above new_allocbase but
+         new_allocbase < obj_top, that means the object extends below the
+         nursery boundary into old allocated space.  This should never happen. */
+      if (obj_base < new_allocbase) {
+        fprintf(dbgout, "*** BUG188 OVERLAP: obj_base=0x%lx < allocbase=0x%lx! ***\n",
+                (unsigned long)(obj_base - dbase),
+                (unsigned long)(new_allocbase - dbase));
+        fprintf(dbgout, "  obj=[0x%lx,0x%lx) bytes_needed=%lu allocbase_off=0x%lx\n",
+                (unsigned long)(obj_base - dbase),
+                (unsigned long)(obj_top - dbase),
+                (unsigned long)bytes_needed,
+                (unsigned long)(new_allocbase - dbase));
+        fflush(dbgout);
+      }
+
+      /* Watch the specific cons cell offset from session 66 */
+      natural target_offset = 0x2128a8;
+      if ((obj_base - dbase) <= target_offset && target_offset < (obj_top - dbase)) {
+        fprintf(dbgout, "*** BUG188 HIT: alloc covers offset 0x%lx! obj=[0x%lx,0x%lx) sz=%lu ***\n",
+                (unsigned long)target_offset,
+                (unsigned long)(obj_base - dbase),
+                (unsigned long)(obj_top - dbase),
+                (unsigned long)bytes_needed);
+        fprintf(dbgout, "  allocptr_off=0x%lx allocbase_off=0x%lx dactive_off=0x%lx\n",
+                (unsigned long)(new_allocptr - dbase),
+                (unsigned long)(new_allocbase - dbase),
+                (unsigned long)(dactive - dbase));
         fflush(dbgout);
       }
     }
@@ -3135,6 +3160,9 @@ callback_to_lisp(LispObj callback_macptr, ExceptionInformation *xp,
   tcr->save_allocptr = (void *)ptr_from_lispobj(xpGPR(xp, allocptr));
   tcr->save_vsp = (LispObj *) ptr_from_lispobj(xpGPR(xp, vsp));
 
+  /* Bug 188: Log allocptr save/restore to diagnose allocptr regression */
+  natural bug188_saved_allocptr = (natural)tcr->save_allocptr;
+
   /* Call back to Lisp.  Lisp will handle trampolining through some
      code that will push lr/fn & pc/nfn stack frames for backtrace. */
   callback_ptr = deref(callback_macptr, 1);  /* macptr.address */
@@ -3186,6 +3214,23 @@ callback_to_lisp(LispObj callback_macptr, ExceptionInformation *xp,
 
   /* Copy GC registers back into exception frame */
   xpGPR(xp, allocptr) = (LispObj) ptr_to_lispobj(tcr->save_allocptr);
+
+  /* Bug 188: Log every callback's allocptr save/restore */
+  {
+    natural restored = (natural)tcr->save_allocptr;
+    long delta = (long)restored - (long)bug188_saved_allocptr;
+    static int cbk_log_count = 0;
+    cbk_log_count++;
+    /* Log the first 50 callbacks, plus any where restored > saved (backwards!) */
+    if (cbk_log_count <= 50 || restored > bug188_saved_allocptr) {
+      fprintf(dbgout, "BUG188-CBK[%d]: save=0x%lx post=0x%lx delta=%+ld %s\n",
+              cbk_log_count,
+              (unsigned long)bug188_saved_allocptr,
+              (unsigned long)restored, delta,
+              restored > bug188_saved_allocptr ? "***BACKWARDS***" : "");
+      fflush(dbgout);
+    }
+  }
   return true;
 }
 
@@ -4602,6 +4647,23 @@ do_pseudo_sigreturn(mach_port_t thread, TCR *tcr, native_thread_state_t *out)
             (unsigned long)mc->__ss.__lr, (unsigned long)mc->__ss.__fp,
             (unsigned long)mc->__ss.__x[0], (unsigned long)mc->__ss.__x[9]);
     fflush(dbgout);
+    /* Bug 188: Log when pseudo_sigreturn restores x26 to value higher than
+       tcr->save_allocptr (indicating allocptr will go backwards) */
+    {
+      natural restore_x26 = (natural)mc->__ss.__x[26];
+      natural sap = (natural)tcr->save_allocptr;
+      if (sap != (natural)VOID_ALLOCPTR && restore_x26 > sap && restore_x26 < 0x400000000000ULL) {
+        static int psr_log = 0;
+        psr_log++;
+        if (psr_log <= 50) {
+          fprintf(dbgout, "BUG188-PSR[%d]: restoring x26=0x%lx (was saved 0x%lx, DELTA=%+ld)\n",
+                  psr_log, (unsigned long)restore_x26,
+                  (unsigned long)sap,
+                  (long)restore_x26 - (long)sap);
+          fflush(dbgout);
+        }
+      }
+    }
     tcr->pending_exception_context = NULL;
     tcr->valence = TCR_STATE_LISP;
     restore_mach_thread_state(thread, xp, out);
@@ -7474,6 +7536,46 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
               out_ts->__x[allocbase] = (LispObj)oldlimit;
               tcr->save_allocbase = (void *)oldlimit;
               out_ts->__pc = ts->__pc + 4;
+              /* Bug 188: Log every inline alloc trap (Mach path) */
+              {
+                natural new_aptr = (LispObj)newlimit + disp;
+                natural obj_base = new_aptr;   /* object starts at allocptr */
+                natural obj_top = obj_base + bytes_needed;
+                natural dbase = (natural)a->low;
+                natural dlow = (natural)a->low;
+                /* Log all events so we can see the corruption site */
+                if (alloc_trap_count <= 30 ||
+                    (alloc_trap_count % 500) == 0 ||
+                    /* log anything near/covering target offset */
+                    ((obj_base - dlow) <= 0x2128a8 &&
+                     0x2128a8 < (obj_top - dlow))) {
+                  fprintf(dbgout, "MAT[%d]: need=%lu raw_old=0x%lx raw_new=0x%lx raw_obj=[0x%lx,0x%lx) raw_aptr=0x%lx dlow=0x%lx aq=%lu\n",
+                          alloc_trap_count,
+                          (unsigned long)bytes_needed,
+                          (unsigned long)oldlimit,
+                          (unsigned long)newlimit,
+                          (unsigned long)obj_base,
+                          (unsigned long)obj_top,
+                          (unsigned long)new_aptr,
+                          (unsigned long)dlow,
+                          (unsigned long)log2_aq);
+                  fflush(dbgout);
+                }
+                /* Overlap check: any object that covers the target
+                   cons offset 0x2128a8 (Bug 188 corruption site) */
+                if ((obj_base - dlow) <= 0x2128a8 &&
+                    0x2128a8 < (obj_top - dlow)) {
+                  fprintf(dbgout, "*** MAT-BUG188 HIT #%d: obj [0x%lx,0x%lx) covers 0x2128a8! "
+                          "need=%lu hdr_at=0x%lx pc=0x%lx ***\n",
+                          alloc_trap_count,
+                          (unsigned long)(obj_base - dlow),
+                          (unsigned long)(obj_top - dlow),
+                          (unsigned long)bytes_needed,
+                          (unsigned long)(obj_base - dlow),
+                          (unsigned long)(natural)ts->__pc);
+                  fflush(dbgout);
+                }
+              }
               kret = KERN_SUCCESS;
               goto done;
             }

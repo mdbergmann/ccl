@@ -2038,6 +2038,22 @@ new_heap_segment(ExceptionInformation *xp, natural need, Boolean extend, TCR *tc
     }
   }
   a->active = (BytePtr) newlimit;
+  /* Bug 188: Log every nursery creation */
+  {
+    static int nhs_count = 0;
+    nhs_count++;
+    natural dbase = (natural)a->low;
+    if (nhs_count <= 30 || (nhs_count % 100) == 0) {
+      fprintf(dbgout, "NHS[%d]: nursery=[0x%lx,0x%lx) size=0x%lx need=0x%lx quantum=%lu\n",
+              nhs_count,
+              (unsigned long)(oldlimit - dbase),
+              (unsigned long)(newlimit - dbase),
+              (unsigned long)(newlimit - oldlimit),
+              (unsigned long)need,
+              (unsigned long)log2_allocation_quantum);
+      fflush(dbgout);
+    }
+  }
   platform_new_heap_segment(xp, tcr, (BytePtr)oldlimit, (BytePtr)newlimit);
   if ((BytePtr)oldlimit < heap_dirty_limit) {
     if ((BytePtr)newlimit < heap_dirty_limit) {

@@ -51,11 +51,58 @@
 #define addr_of(w) (w)
 #endif
 
+/* Bug 189: Relocate static area references.
+   When STATIC_BASE_ADDRESS shifts differently than the dynamic area,
+   the main relocator (which uses dynamic bias) misses pointers to the
+   static area.  This function does a second pass to fix those.
+
+   old_static_low/high: old static area address range (pre-relocation)
+   static_bias: amount to add to pointers in that range */
+void
+relocate_static_refs(area *a, natural old_static_low, natural old_static_high,
+                     LispObj static_bias)
+{
+  LispObj
+    *start = (LispObj *)(a->low),
+    *end = (LispObj *)(a->active),
+    w;
+  int fixed = 0;
+
+  while (start < end) {
+    w = *start;
+    if (immheader_tag_p(fulltag_of(w))) {
+      start = (LispObj *)skip_over_ivector((natural)start, w);
+    } else {
+      /* Check each word in the pair */
+      natural raw = addr_of(w);
+      if (raw >= old_static_low && raw < old_static_high &&
+          is_relocatable_tag(fulltag_of(w))) {
+        *start = w + static_bias;
+        fixed++;
+      }
+      start++;
+      w = *start;
+      raw = addr_of(w);
+      if (raw >= old_static_low && raw < old_static_high &&
+          is_relocatable_tag(fulltag_of(w))) {
+        *start = w + static_bias;
+        fixed++;
+      }
+      start++;
+    }
+  }
+  if (fixed > 0) {
+    fprintf(dbgout, "  static-ref fixup: %d pointers in area [0x%lx,0x%lx)\n",
+            fixed, (unsigned long)(natural)a->low, (unsigned long)(natural)a->active);
+  }
+}
+
+
 void
 relocate_area_contents(area *a, LispObj bias)
 {
-  LispObj 
-    *start = (LispObj *)(a->low), 
+  LispObj
+    *start = (LispObj *)(a->low),
     *end = (LispObj *)(a->active),
     low = (LispObj)image_base - bias,
     high = ptr_to_lispobj(active_dynamic_area->active) - bias,
@@ -589,6 +636,54 @@ load_openmcl_image(int fd, openmcl_image_file_header *h)
 	break;
       }
     }
+#ifdef ARM64
+    /* Bug 189: Second relocation pass for static area references.
+       The main relocator uses bias = image_base - ACTUAL_IMAGE_BASE, which
+       only covers dynamic/readonly area pointers.  The static area shifted
+       by a DIFFERENT amount (0x200010000 → 0x300010000 = +0x100000000).
+       Pointers to the old static area (0x200010000-0x200012000) were missed
+       because they're below ACTUAL_IMAGE_BASE (= low bound of main relocation).
+
+       We do a second pass to fix these references in all areas. */
+    if (bias && static_space_start) {
+      /* Compute old and new static area bounds.
+         ACTUAL_IMAGE_BASE sits right after the static area in the image layout.
+         old_static = [ACTUAL_IMAGE_BASE - gap, ACTUAL_IMAGE_BASE)
+         The gap is page-aligned and covers the static section. */
+      natural actual_image_base = (natural)image_base - (natural)bias;
+      natural new_static_start = (natural)static_space_start;
+      /* The static area sits immediately below ACTUAL_IMAGE_BASE in the
+         image layout.  On ARM64:
+           STATIC_BASE = nil_base_address - 0x1000
+           ACTUAL_IMAGE_BASE = STATIC_BASE + 0x2000
+         So the old STATIC_BASE = ACTUAL_IMAGE_BASE - 0x2000.
+         This 0x2000 gap is the old page-aligned static section size
+         (6224 bytes padded to 8KB on 4KB-page systems). */
+      natural old_static_start = actual_image_base - 0x2000;
+      natural old_static_end = actual_image_base;
+      LispObj static_bias = (LispObj)(new_static_start - old_static_start);
+
+      fprintf(dbgout, "  Static-ref fixup: old_static=[0x%lx,0x%lx) new=0x%lx bias=0x%lx\n",
+              (unsigned long)old_static_start, (unsigned long)old_static_end,
+              (unsigned long)new_static_start, (unsigned long)static_bias);
+
+      if (static_bias != 0) {
+        /* Fix static area itself */
+        {
+          area static_area_struct;
+          static_area_struct.low = (BytePtr)new_static_start;
+          static_area_struct.active = (BytePtr)((natural)static_space_active);
+          relocate_static_refs(&static_area_struct, old_static_start, old_static_end, static_bias);
+        }
+        /* Fix readonly area */
+        if (readonly_area && readonly_area->low < readonly_area->active) {
+          relocate_static_refs(readonly_area, old_static_start, old_static_end, static_bias);
+        }
+        /* Fix dynamic area */
+        relocate_static_refs(active_dynamic_area, old_static_start, old_static_end, static_bias);
+      }
+    }
+#endif
 #ifdef ARM64
     /* Relocate code-vector pointers in function objects.
        When code vectors live in AREA_CODE, the code area address changes

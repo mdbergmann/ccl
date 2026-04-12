@@ -2296,14 +2296,23 @@ main
     lisp_global(CODE_HEAP_LIMIT) = (LispObj)code_area->high;
   }
 #endif
-  /* Fix function entrypoints: slot 0 = untagged code vector address.
-     On all platforms: strip TBI tag from code vector (slot 1) to get entrypoint.
-     With MAP_JIT: code is already at its birth address, no copying needed. */
+  /* Fix function entrypoints: slot 0 = entrypoint, slot 1 = code vector.
+     Function layout (ARM64 TBI): [header | entrypoint | code-vector | ...]
+     where header is at index -1 (node_bias), entrypoint at index 0, code-vector at 1.
+
+     Code vectors may be in:
+     (a) The code area (RW, dual-mapped with RX mirror) — convert to RX via bias
+     (b) The readonly area (RW now, mprotected to RX later) — use address directly
+     Only apply code_rw_to_rx for case (a). */
   {
     BytePtr heap_start = (BytePtr)(natural)lisp_global(HEAP_START);
     LispObj *start = (LispObj *)heap_start;
     LispObj *end = (LispObj *)active_dynamic_area->active;
-    int fixed = 0;
+    int fixed = 0, fixed_code = 0, fixed_ro = 0;
+
+    /* Determine code area bounds for the RW→RX check */
+    natural ca_low = code_area ? (natural)code_area->low : 0;
+    natural ca_high = code_area ? (natural)code_area->high : 0;
 
     while (start < end) {
       LispObj w0 = *start;
@@ -2314,8 +2323,16 @@ main
       } else if (nodeheader_tag_p(subtag)) {
         natural count = header_element_count(w0);
         if (subtag == subtag_function && count >= 2) {
-          /* Entrypoint = untagged code vector, converted to RX address */
-          start[1] = code_rw_to_rx(untag(start[2]));
+          natural cv_raw = untag(start[2]);
+          if (ca_low && cv_raw >= ca_low && cv_raw < ca_high) {
+            /* Code vector in code area — convert RW → RX */
+            start[1] = code_rw_to_rx(cv_raw);
+            fixed_code++;
+          } else {
+            /* Code vector in readonly or other area — use address directly */
+            start[1] = cv_raw;
+            fixed_ro++;
+          }
           fixed++;
         }
         start += 1 + count;
@@ -2327,7 +2344,7 @@ main
       }
     }
 
-    /* Also fix readonly area */
+    /* Also fix readonly area functions (if any are there) */
     {
       area *ro = readonly_area;
       if (ro && ro->low < ro->active) {
@@ -2341,7 +2358,14 @@ main
           } else if (nodeheader_tag_p(subtag)) {
             natural count = header_element_count(w0);
             if (subtag == subtag_function && count >= 2) {
-              rostart[1] = code_rw_to_rx(untag(rostart[2]));
+              natural cv_raw = untag(rostart[2]);
+              if (ca_low && cv_raw >= ca_low && cv_raw < ca_high) {
+                rostart[1] = code_rw_to_rx(cv_raw);
+                fixed_code++;
+              } else {
+                rostart[1] = cv_raw;
+                fixed_ro++;
+              }
               fixed++;
             }
             rostart += 1 + count;
@@ -2352,7 +2376,8 @@ main
         }
       }
     }
-    fprintf(dbgout, "Entrypoint fixup: %d functions\n", fixed);
+    fprintf(dbgout, "Entrypoint fixup: %d functions (%d code-area→RX, %d readonly/direct)\n",
+            fixed, fixed_code, fixed_ro);
   }
 #endif
 #if defined(DARWIN) && defined(ARM64)
