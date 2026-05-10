@@ -1032,6 +1032,89 @@ handle_protection_violation(ExceptionInformation *xp, siginfo_t *info,
         /* Advance PC past the store instruction */
         xpPC(xp) = (pc)((natural)xpPC(xp) + 4);
 
+        /* Bug 188: Track allocptr (x26) trajectory across traps.
+           Log every x26 change with trap# / pc / nfn for full trajectory. */
+        {
+          static natural prev_x26 = 0;
+          static int x26_change_count = 0;
+          natural cur_x26 = (natural)xpGPR(xp, 26);
+          if (cur_x26 != prev_x26) {
+            x26_change_count++;
+            /* Always log; flag jumps (UP) prominently */
+            const char *flag = (prev_x26 != 0 && cur_x26 > prev_x26) ? " UP" : "";
+            if (x26_change_count <= 200 ||
+                (prev_x26 != 0 && cur_x26 > prev_x26)) {
+              fprintf(dbgout, "Bug188-X26[%d/trap%d]: %lx -> %lx (delta=%+ld)%s pc=0x%lx nfn=0x%lx addr=0x%lx\n",
+                      x26_change_count, bug188_trap_count,
+                      (unsigned long)prev_x26, (unsigned long)cur_x26,
+                      (long)((long long)cur_x26 - (long long)prev_x26),
+                      flag,
+                      (unsigned long)(natural)xpPC(xp), (unsigned long)xpGPR(xp, 10),
+                      (unsigned long)write_addr);
+              fflush(dbgout);
+            }
+            prev_x26 = cur_x26;
+          }
+        }
+
+        /* Bug 188: Log writes that look like uvector/ivector header stores
+           (high byte = subtag, low bytes = element count). Catches bitvec
+           header allocation moment. */
+        {
+          unsigned high_byte = (unsigned)((write_val >> 56) & 0xFF);
+          natural body = write_val & 0x00FFFFFFFFFFFFFFULL;
+          /* Header pattern: high byte is uvector subtag (>= 0x80), body
+             is element count (small enough to be plausible). Filter to
+             uvector subtags: 0x80..0xFF range with count < 1M. */
+          if (high_byte >= 0x80 && body < 0x100000ULL && body > 0 &&
+              write_addr >= 0x302000211000ULL && write_addr < 0x302000220000ULL) {
+            natural pc_post = (natural)xpPC(xp);
+            natural pc_writer = pc_post - 4;
+            fprintf(dbgout, "Bug188-HDR[trap%d]: HEADER-LIKE store @0x%lx val=0x%lx (subtag=0x%x count=%lu) pc=0x%lx nfn=0x%lx x26=0x%lx insn=%08x\n",
+                    bug188_trap_count,
+                    (unsigned long)write_addr, (unsigned long)write_val,
+                    high_byte, (unsigned long)body,
+                    (unsigned long)pc_post, (unsigned long)xpGPR(xp, 10),
+                    (unsigned long)xpGPR(xp, 26), insn188);
+            /* Dump instructions around the header store to find the SUB allocptr */
+            fprintf(dbgout, "  Bug188-HDR-disasm: ");
+            for (int di = -8; di <= 4; di++) {
+              uint32_t insn_d = *(uint32_t *)(pc_writer + di * 4);
+              fprintf(dbgout, "[%+d]=%08x ", di * 4, insn_d);
+            }
+            fprintf(dbgout, "\n");
+            /* Subtag 0x9f = subtag_bit_vector — dump full register state for bitvec! */
+            if (high_byte == 0x9f) {
+              fprintf(dbgout, "  Bug188-HDR-BITVEC: x0..x15:\n");
+              for (int ri = 0; ri < 16; ri++)
+                fprintf(dbgout, "    x%d=0x%lx", ri, (unsigned long)xpGPR(xp, ri));
+              fprintf(dbgout, "\n");
+              fprintf(dbgout, "  Bug188-HDR-BITVEC: x16..x30:\n");
+              for (int ri = 16; ri < 31; ri++)
+                fprintf(dbgout, "    x%d=0x%lx", ri, (unsigned long)xpGPR(xp, ri));
+              fprintf(dbgout, "\n");
+              /* Look back further to capture the SUB allocptr instruction */
+              fprintf(dbgout, "  Bug188-HDR-BITVEC-disasm-extended: ");
+              for (int di = -32; di <= 8; di++) {
+                uint32_t insn_d = *(uint32_t *)(pc_writer + di * 4);
+                fprintf(dbgout, "[%+d]=%08x ", di * 4, insn_d);
+              }
+              fprintf(dbgout, "\n");
+            }
+            fflush(dbgout);
+          }
+        }
+
+        /* Bug 188: Log first 50 trap events for allocation phase visibility */
+        if (bug188_trap_count <= 50) {
+          fprintf(dbgout, "Bug188-EARLY[%d]: @0x%lx val=0x%lx pc=0x%lx nfn=0x%lx x26=0x%lx insn=%08x\n",
+                  bug188_trap_count,
+                  (unsigned long)write_addr, (unsigned long)write_val,
+                  (unsigned long)(natural)xpPC(xp), (unsigned long)xpGPR(xp, 10),
+                  (unsigned long)xpGPR(xp, 26), insn188);
+          fflush(dbgout);
+        }
+
         /* Log writes near target address (0x3020002128a0-0x3020002128c0) */
         if (write_addr >= 0x302000212880ULL && write_addr < 0x3020002128c0ULL) {
           fprintf(dbgout, "Bug188-TRAP[%d]: write @0x%lx val=0x%lx pc=0x%lx nfn=0x%lx insn=%08x",

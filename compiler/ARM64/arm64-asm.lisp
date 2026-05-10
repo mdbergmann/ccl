@@ -1595,10 +1595,21 @@
                     (if (is-imm src)
                       ;; CMP/CMN rn, #imm — addsub-imm with rd=xzr
                       (let ((imm (imm-val src)))
-                        (logior (if is-sub #xf1000000 #xb1000000)
-                                (ash (logand imm #xfff) 10)
-                                (ash (gpr rn) 5)
-                                31))  ; Rd = XZR(31)
+                        ;; Bug 188 fix: handle LSL #12 shift for positive high imm
+                        (multiple-value-bind (imm12 sh)
+                            (cond ((and (>= imm 0) (<= imm #xfff))
+                                   (values imm 0))
+                                  ((and (> imm #xfff)
+                                        (zerop (logand imm #xfff))
+                                        (zerop (logand imm (lognot #xfff000))))
+                                   (values (ash imm -12) 1))
+                                  (t
+                                   (values (logand imm #xfff) 0)))
+                          (logior (if is-sub #xf1000000 #xb1000000)
+                                  (ash sh 22)
+                                  (ash (logand imm12 #xfff) 10)
+                                  (ash (gpr rn) 5)
+                                  31)))  ; Rd = XZR(31)
                       ;; CMP/CMN rn, rm — addsub-shift with rd=xzr
                       (logior (if is-sub #xeb000000 #xab000000)
                               (ash (gpr src) 16)
@@ -1621,13 +1632,27 @@
                       ;; Immediate form
                       ((is-imm src2)
                        (let ((imm (imm-val src2)))
-                         (logior (cond ((and is-sub sets-flags) #xf1000000)
-                                       (is-sub                  #xd1000000)
-                                       (sets-flags              #xb1000000)
-                                       (t                       #x91000000))
-                                 (ash (logand imm #xfff) 10)
-                                 (ash (gpr rn) 5)
-                                 (gpr rd))))
+                         ;; Bug 188 fix: ADD/SUB IMM has 12-bit imm with optional
+                         ;; LSL #12. For positive imm > 0xfff with low bits zero,
+                         ;; use sh=1 with imm>>12. Otherwise fall back to legacy
+                         ;; truncating behavior (preserves negative-imm/sentinel uses).
+                         (multiple-value-bind (imm12 sh)
+                             (cond ((and (>= imm 0) (<= imm #xfff))
+                                    (values imm 0))
+                                   ((and (> imm #xfff)
+                                         (zerop (logand imm #xfff))
+                                         (zerop (logand imm (lognot #xfff000))))
+                                    (values (ash imm -12) 1))
+                                   (t
+                                    (values (logand imm #xfff) 0)))
+                           (logior (cond ((and is-sub sets-flags) #xf1000000)
+                                         (is-sub                  #xd1000000)
+                                         (sets-flags              #xb1000000)
+                                         (t                       #x91000000))
+                                   (ash sh 22)
+                                   (ash (logand imm12 #xfff) 10)
+                                   (ash (gpr rn) 5)
+                                   (gpr rd)))))
                       ;; Register with optional shift: rm or (:lsl rm amt)
                       ((is-shift src2 :lsl)
                        (let ((rm (cadr src2))

@@ -21,14 +21,14 @@
 ;;; The entrypoint must be an UNTAGGED code address because ARM64
 ;;; TBI only applies to data accesses (ldr/str), NOT to instruction
 ;;; fetches (br/blr).  Strip the TBI tag byte before storing.
+;;;
+;;; Bug 184: this 4-instruction body is RUNTIME-PATCHED by pmcl-kernel.c
+;;; into a 6-instruction sequence that adds code_rw_rx_bias to convert
+;;; RW→RX.  The C kernel scans for the exact 4-instruction byte pattern
+;;; emitted here, so do not change these instructions.
 (defarm64lapfunction %fix-fn-entrypoint ((func arg_z))
   (ldr temp0 (:@ func (:$ arm64::node-size)))    ; element 1 = code vector (tagged, RW)
   (and temp0 temp0 (:$ #x00FFFFFFFFFFFFFF))      ; strip TBI tag → RW address
-  ;; Convert RW → RX for dual-mapped code area.  The bias (rx-rw) is
-  ;; stored in the C global code_rw_rx_bias.  If 0, no conversion needed.
-  (adrp imm0 (:external "_code_rw_rx_bias"))
-  (ldr imm0 (:@ imm0 (:external "_code_rw_rx_bias")))
-  (add temp0 temp0 imm0)                         ; RW + bias = RX address
   (str temp0 (:@ func (:$ arm64::function.entrypoint)))
   (ret))
 
