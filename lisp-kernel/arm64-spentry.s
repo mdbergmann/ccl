@@ -1152,7 +1152,13 @@ C(stkconslist_star):
         __(mov imm0,#tag_simple_vector)
         __(stack_allocate_zeroed_vector(imm0,imm1,temp2,imm0))
         __(add imm1,sp,#dnode_size+node_size)
-        __(orr imm1,imm1,#tag_cons)
+        /* Bug 193: ARM64 TBI puts tags in the HIGH byte (bits 56-63),
+           not the low bits. Old code did `orr imm1,imm1,#tag_cons`
+           which ORed 3 into the LOW bits — wrong addressing of the
+           first cons.car/cdr AND the resulting tagged pointer had
+           lisptag = 0 (fixnum) instead of tag_cons. Use proper TBI
+           tag placement. */
+        __(orr imm1,imm1,#(fulltag_cons << tag_shift))
         __(cmp nargs,#0)
         __(b 4f)
 1:      __(vpop1(temp0))
