@@ -7462,13 +7462,50 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
     }
     /* Not an ff-call or null-deref — dispatch as SIGBUS */
     fprintf(dbgout, "KERN_INVALID_ADDRESS→SIGBUS: pc=0x%lx lr=0x%lx addr=0x%llx sp=0x%lx fp=0x%lx\n"
-            "  x6=0x%lx x9=0x%lx x10=0x%lx x15=0x%lx x25=0x%lx valence=%d\n",
+            "  x2=0x%lx x6=0x%lx x9=0x%lx x10=0x%lx x15=0x%lx x25=0x%lx x28=0x%lx valence=%d\n",
             (unsigned long)ts->__pc, (unsigned long)ts->__lr,
             (long long)code[1],
             (unsigned long)ts->__sp, (unsigned long)ts->__fp,
+            (unsigned long)ts->__x[2],
             (unsigned long)ts->__x[6], (unsigned long)ts->__x[9],
             (unsigned long)ts->__x[10], (unsigned long)ts->__x[15],
-            (unsigned long)ts->__x[25], tcr->valence);
+            (unsigned long)ts->__x[25], (unsigned long)ts->__x[28],
+            tcr->valence);
+    /* Bug 195 INTERCEPT (NOT a fix): if PC=x10[0] (BR'd to slot[0] of an
+       istruct), the BLR x2 to SPfuncall went sideways.  Two recovery shapes:
+       (a) x2 was loaded from [x28, #576] (SPfuncall via sptab) but the BR
+       went to the istruct's slot[0] instead of SPfuncall's entry.  Either
+       x28 was clobbered or sptab[24] was corrupted.  (b) Some upstream path
+       loaded x2=istruct[0] directly.  Either way, treat (funcall <istruct>)
+       as returning NIL: PC=lr, x15=NIL.  Logs the situation so we keep
+       enough evidence to chase the real cause later. */
+    {
+      natural pcv = (natural)ts->__pc;
+      natural x10v = ts->__x[10];
+      natural x10t = x10v >> 56;
+      natural x10r = x10v & 0x00FFFFFFFFFFFFFFULL;
+      if (x10t == 0x6e && x10r > 0x100000000ULL && x10r < 0x400000000000ULL) {
+        natural obj0 = ((LispObj *)x10r)[0];
+        if (pcv == obj0) {
+          static int bug195_count = 0;
+          bug195_count++;
+          fprintf(dbgout, "Bug195-INTERCEPT[%d]: BLR went to istruct[0]; returning NIL from funcall\n",
+                  bug195_count);
+          fflush(dbgout);
+          if (bug195_count > 50) {
+            fprintf(dbgout, "Bug195: too many intercepts (%d), aborting\n", bug195_count);
+            fflush(dbgout);
+            _exit(1);
+          }
+          *out_ts = *ts;
+          out_ts->__pc = ts->__lr;
+          out_ts->__x[15] = lisp_nil;       /* arg_z = NIL */
+          out_ts->__x[5]  = node_size;      /* nargs = 1 result */
+          kret = KERN_SUCCESS;
+          goto done;
+        }
+      }
+    }
     /* Bug 181: When nfn has wrong tag, we branched to a non-function's slot[0].
        Dump the object at nfn, the instruction at lr-4 (the BLR), and the calling
        function's constant slots to identify which symbol has a bad fcell. */
@@ -7481,16 +7518,33 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
         /* Dump header and slots of the non-function object */
         LispObj *obj = (LispObj *)nfn_raw;
         LispObj hdr = obj[-1];
-        natural hdr_subtag = hdr & 0xFF;
-        natural hdr_count = hdr >> 8;
         natural hdr_subtag_hi = hdr >> 56;
         natural hdr_count_lo = hdr & 0x00FFFFFFFFFFFFFFULL;
         fprintf(dbgout, "  BUG181: obj hdr=0x%lx subtag_hi=0x%02lx count_lo=%lu\n",
                 (unsigned long)hdr, (unsigned long)hdr_subtag_hi, (unsigned long)hdr_count_lo);
-        for (int si = 0; si < (int)hdr_count && si < 12; si++) {
+        /* ARM64 TBI: count is in low 56 bits, subtag in high byte. */
+        natural dump_count = hdr_count_lo;
+        if (dump_count > 20) dump_count = 20;
+        for (natural si = 0; si < dump_count; si++) {
           LispObj sv = obj[si];
-          fprintf(dbgout, "  BUG181: obj[%d]=0x%lx (tag=0x%02lx)\n",
-                  si, (unsigned long)sv, (unsigned long)(sv >> 56));
+          natural sv_tag = sv >> 56;
+          natural sv_raw = sv & 0x00FFFFFFFFFFFFFFULL;
+          char nbuf[80] = {0};
+          if (sv_tag == 0x63 && sv_raw > 0x100000000ULL && sv_raw < 0x400000000000ULL) {
+            LispObj *sym = (LispObj *)sv_raw;
+            LispObj pn = sym[0];
+            natural pn_raw = pn & 0x00FFFFFFFFFFFFFFULL;
+            if (pn_raw > 0x100000000ULL && pn_raw < 0x400000000000ULL) {
+              LispObj ph = ((LispObj *)pn_raw)[-1];
+              natural plen = ph & 0x00FFFFFFFFFFFFFFULL;
+              unsigned int *chars = (unsigned int *)pn_raw;
+              natural pi;
+              for (pi = 0; pi < plen && pi < 70; pi++)
+                nbuf[pi] = (char)(chars[pi] & 0x7F);
+            }
+          }
+          fprintf(dbgout, "  BUG181: obj[%lu]=0x%lx (tag=0x%02lx) %s\n",
+                  (unsigned long)si, (unsigned long)sv, (unsigned long)sv_tag, nbuf);
         }
         /* Dump instruction at lr-4 (the BLR that called the non-function) */
         natural lr_val = (natural)ts->__lr;
