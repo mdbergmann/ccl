@@ -2839,6 +2839,50 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
         unsigned imm16 = HLT_IMM16(arg2);
         unsigned fmt = imm16 & 7;
         unsigned info = (imm16 >> 8) & 0xFF;
+        /* Bug 192: uuo_error_unbound (fmt=5 info=3) — a special variable
+           lookup hit an unbound value during early boot (typically
+           SPspecrefcheck at PC inside the subprim).  The default
+           fall-through merely bumps past the HLT, which leaves
+           unbound_marker in arg_z (x15) and causes a cascade of downstream
+           crashes (caller treats marker as a value).  Recover by setting
+           arg_z = NIL and returning from the subprim. */
+        if (fmt == 5 && info == 3) {
+          static int b192_unbound_count = 0;
+          b192_unbound_count++;
+          if (b192_unbound_count <= 10) {
+            LispObj sym_tagged = xpGPR(xp, (imm16 >> 3) & 0x1F);
+            natural sym_raw = untag(sym_tagged);
+            char sname[64] = {0};
+            if (sym_raw > 0x100000000LL && sym_raw < 0x400000000000LL) {
+              LispObj *sym = (LispObj *)sym_raw;
+              LispObj pn = sym[0];
+              natural pn_raw = untag(pn);
+              if (pn_raw > 0x100000000LL && pn_raw < 0x400000000000LL) {
+                LispObj pn_hdr = ((LispObj *)pn_raw)[-1];
+                natural pn_len = pn_hdr & 0x00FFFFFFFFFFFFFFLL;
+                int cs = ((header_subtag(pn_hdr) & 0x7F) == 7) ? 4 : 1;
+                if (pn_len > 0 && pn_len < 60) {
+                  for (natural i = 0; i < pn_len; i++)
+                    sname[i] = ((char *)pn_raw)[i * cs];
+                  sname[pn_len] = 0;
+                }
+              }
+            }
+            fprintf(dbgout,
+                    "Bug192-UNBOUND[#%d]: special variable %s unbound, returning NIL "
+                    "(PC=%016lx LR=%016lx)\n",
+                    b192_unbound_count, sname[0] ? sname : "???",
+                    (unsigned long)(natural)xpPC(xp),
+                    (unsigned long)xpGPR(xp, 30));
+            fflush(dbgout);
+          }
+          xpGPR(xp, 15) = lisp_nil;
+          xpPC(xp) = (pc)(natural)xpGPR(xp, 30);
+          xpGPR(xp, 5) = node_size;
+          *bumpP = 0;
+          early_err_count--;
+          return true;
+        }
         /* hlt_code_unary_misc=5, uuo_misc_not_callable info=0 (from arm64-uuo.s) */
         if (fmt == 5 && info == 0) {
           /* Check if this is %kernel-restart being called */

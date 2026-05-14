@@ -606,7 +606,7 @@
    real use (for one thing, it's known to break gf tracing), but may be helpful for
    profiling")
 
-(let* ((class-wrapper-random-state (make-random-state))
+(let* ((class-wrapper-random-state (initial-random-state))
        (class-wrapper-random-state-lock (make-lock)))
 
   (defun  new-class-wrapper-hash-index ()
