@@ -1745,6 +1745,62 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
                   error_count, (unsigned long)nargs_val,
                   (unsigned long)this_lr, (unsigned long)xpGPR(xp, 15),
                   same_lr_count);
+          /* Bug 194: decode arg_y/arg_z symbol pnames so we know what ERROR
+             is actually being asked to signal. Each ERROR call has different
+             args; identifying them tells us what's failing underneath. */
+          {
+            int ai;
+            for (ai = 0; ai < 2; ai++) {
+              int reg = (ai == 0) ? 14 /*arg_y*/ : 15 /*arg_z*/;
+              LispObj v = xpGPR(xp, reg);
+              natural vtag = v >> 56;
+              natural vraw = v & 0x00FFFFFFFFFFFFFFULL;
+              char nbuf[80] = {0};
+              const char *kind = "?";
+              if (vtag == 0x63 && vraw > 0x100000000ULL && vraw < 0x400000000000ULL) {
+                LispObj *sym = (LispObj *)vraw;
+                LispObj pn = sym[0];
+                natural pn_raw = pn & 0x00FFFFFFFFFFFFFFULL;
+                if (pn_raw > 0x100000000ULL && pn_raw < 0x400000000000ULL) {
+                  LispObj ph = ((LispObj *)pn_raw)[-1];
+                  natural plen = ph & 0x00FFFFFFFFFFFFFFULL;
+                  unsigned int *chars = (unsigned int *)pn_raw;
+                  natural pi;
+                  for (pi = 0; pi < plen && pi < 70; pi++)
+                    nbuf[pi] = (char)(chars[pi] & 0x7F);
+                }
+                kind = "sym";
+              } else if (vtag == 0x40 || vtag == 0x60 || vtag == 0x41) {
+                /* uvector — if it's a simple-string (subtag 0x87), print its
+                   contents.  Otherwise just print the header. */
+                LispObj *obj = (LispObj *)vraw;
+                LispObj hdr = obj[-1];
+                natural hdr_subtag = hdr >> 56;
+                natural hdr_count = hdr & 0x00FFFFFFFFFFFFFFULL;
+                if (hdr_subtag == 0x87 && hdr_count > 0 && hdr_count < 70) {
+                  unsigned int *chars = (unsigned int *)vraw;
+                  natural ci;
+                  natural off = 0;
+                  for (ci = 0; ci < hdr_count && off < sizeof(nbuf) - 1; ci++) {
+                    char c = (char)(chars[ci] & 0x7F);
+                    nbuf[off++] = (c >= 32 && c < 127) ? c : '.';
+                  }
+                  nbuf[off] = 0;
+                } else {
+                  snprintf(nbuf, sizeof(nbuf), "uvec hdr=0x%lx", (unsigned long)hdr);
+                }
+                kind = "uvec";
+              } else if (v == lisp_nil) {
+                snprintf(nbuf, sizeof(nbuf), "NIL");
+                kind = "nil";
+              } else {
+                kind = "raw";
+              }
+              fprintf(dbgout, "  Bug194: arg_%c=0x%lx (tag=0x%02lx, %s) \"%s\"\n",
+                      (ai == 0) ? 'y' : 'z',
+                      (unsigned long)v, (unsigned long)vtag, kind, nbuf);
+            }
+          }
           fflush(dbgout);
         }
         if (same_lr_count >= 3) {
@@ -1777,6 +1833,101 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
           fprintf(dbgout, "Bug171: too many ERROR calls (%d), aborting\n", error_count);
           fflush(dbgout);
           _exit(1);
+        }
+        /* Bug 194: bootstrap eval in level-0/nfasload.lisp can't handle
+           non-list forms and signals (error "Can't eval yet: ~s" form).
+           When that happens during l1-clos-boot, intercept and return a
+           sensible value for the form:
+             - symbol: symbol-value if bound, else fcell if fbound, else NIL
+             - self-evaluating literal (number/character/string): the form itself
+             - other: NIL
+           Detection: arg_y is a simple-string (subtag 0x87, count 18) whose
+           bytes spell "Can't eval yet: ~s". */
+        {
+          LispObj ay = xpGPR(xp, 14);   /* arg_y = format string */
+          LispObj az = xpGPR(xp, 15);   /* arg_z = form */
+          natural ay_tag = ay >> 56;
+          natural ay_raw = ay & 0x00FFFFFFFFFFFFFFULL;
+          int is_cant_eval = 0;
+          if ((ay_tag == 0x40 || ay_tag == 0x60 || ay_tag == 0x41) &&
+              ay_raw > 0x100000000ULL && ay_raw < 0x400000000000ULL) {
+            LispObj *obj = (LispObj *)ay_raw;
+            LispObj hdr = obj[-1];
+            natural hdr_subtag = hdr >> 56;
+            natural hdr_count = hdr & 0x00FFFFFFFFFFFFFFULL;
+            if (hdr_subtag == 0x87 && hdr_count == 18) {
+              static const char prefix[] = "Can't eval yet: ~s";
+              unsigned int *chars = (unsigned int *)ay_raw;
+              int i, ok = 1;
+              for (i = 0; i < 18; i++) {
+                if ((char)(chars[i] & 0x7F) != prefix[i]) { ok = 0; break; }
+              }
+              is_cant_eval = ok;
+            }
+          }
+          if (is_cant_eval) {
+            static int cant_eval_count = 0;
+            LispObj result = lisp_nil;
+            natural az_tag = az >> 56;
+            natural az_raw = az & 0x00FFFFFFFFFFFFFFULL;
+            const char *how = "NIL";
+            if (az_tag == 0x63 && az_raw > 0x100000000ULL && az_raw < 0x400000000000ULL) {
+              LispObj *sym = (LispObj *)az_raw;
+              LispObj vcell = sym[1];
+              LispObj fcell = sym[2];
+              /* Detect UDF stub: it's the "undefined function" trampoline,
+                 always at a very low offset in the dynamic area. Treat as
+                 "unbound" to avoid calling it (which would re-trap). */
+              natural fc_raw = fcell & 0x00FFFFFFFFFFFFFFULL;
+              int fc_is_udf = ((fcell >> 56) == 0x62) && (fc_raw <= 0x302000001000ULL);
+              if (vcell != unbound_marker) {
+                result = vcell;
+                how = "symbol-value";
+              } else if ((fcell >> 56) == 0x62 && !fc_is_udf) {
+                result = fcell;
+                how = "symbol-function";
+              } else {
+                result = lisp_nil;
+                how = fc_is_udf ? "NIL (UDF stub)" : "NIL (unbound)";
+              }
+            } else if (az == lisp_nil) {
+              result = lisp_nil;
+              how = "NIL form";
+            } else if ((az_tag & 0x10) || az_tag == 0 || az_tag == 0xff) {
+              /* immediate (single-float/char/etc) or fixnum — self-evaluating */
+              result = az;
+              how = "self-evaluating";
+            }
+            cant_eval_count++;
+            if (cant_eval_count <= 30 || (cant_eval_count % 200) == 0) {
+              char nbuf[64] = {0};
+              if (az_tag == 0x63 && az_raw > 0x100000000ULL && az_raw < 0x400000000000ULL) {
+                LispObj *sym = (LispObj *)az_raw;
+                LispObj pn = sym[0];
+                natural pn_raw = pn & 0x00FFFFFFFFFFFFFFULL;
+                if (pn_raw > 0x100000000ULL && pn_raw < 0x400000000000ULL) {
+                  LispObj ph = ((LispObj *)pn_raw)[-1];
+                  natural plen = ph & 0x00FFFFFFFFFFFFFFULL;
+                  unsigned int *chars = (unsigned int *)pn_raw;
+                  natural pi;
+                  for (pi = 0; pi < plen && pi < 60; pi++)
+                    nbuf[pi] = (char)(chars[pi] & 0x7F);
+                }
+              }
+              fprintf(dbgout, "Bug194-INTERCEPT[%d]: form=\"%s\" → %s = 0x%lx\n",
+                      cant_eval_count, nbuf, how, (unsigned long)result);
+              fflush(dbgout);
+            }
+            xpPC(xp) = (pc)(natural)this_lr;
+            xpGPR(xp, 15) = result;   /* arg_z return slot */
+            xpGPR(xp, 5) = node_size;
+            *bumpP = 0;
+            /* Reset the cascade detector so this intercept doesn't count
+               toward loop-break threshold. */
+            same_lr_count = 0;
+            last_error_lr = 0;
+            return true;
+          }
         }
         /* First occurrence: return arg_z to caller.
            Bug 186b: returning arg_z instead of NIL helps when ERROR is called
