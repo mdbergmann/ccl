@@ -2060,6 +2060,64 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
               }
             }
           }
+          /* Bug 191 diagnostic: dump caller function header + constant slots
+             to identify where the wrong nfn value came from. The caller's
+             nfn is at savefn slot of its lisp-frame (fp + 16). */
+          {
+            natural fp = xpGPR(xp, 29);
+            natural lr = xpGPR(xp, 30);
+            natural nfn_at_trap = xpGPR(xp, 10);
+            natural vsp_val = xpGPR(xp, 25);
+            fprintf(dbgout, "  Bug191: trap nfn(x10)=%016lx fname(x9)=%016lx\n",
+                    (unsigned long)nfn_at_trap, (unsigned long)xpGPR(xp, 9));
+            if (fp >= 0x100000000LL && fp < 0x800000000LL) {
+              LispObj savefn = ((LispObj *)fp)[2]; /* fp+16 */
+              fprintf(dbgout, "  Bug191: fp=%016lx lr=%016lx savefn=%016lx vsp=%016lx\n",
+                      (unsigned long)fp, (unsigned long)lr,
+                      (unsigned long)savefn, (unsigned long)vsp_val);
+              if ((savefn >> 56) == 0x62) {
+                natural caller_raw = savefn & 0x00FFFFFFFFFFFFFFLL;
+                if (caller_raw > 0x100000000LL && caller_raw < 0x400000000000LL) {
+                  LispObj *cf = (LispObj *)caller_raw;
+                  LispObj cf_hdr = cf[-1];
+                  natural cf_count = cf_hdr & 0x00FFFFFFFFFFFFFFLL;
+                  fprintf(dbgout, "  Bug191: caller fn raw=%016lx hdr=%016lx count=%lu\n",
+                          (unsigned long)caller_raw, (unsigned long)cf_hdr,
+                          (unsigned long)cf_count);
+                  /* Dump function slots: [0]=entrypoint, [1]=code-vector,
+                     [2..count-1] = name + constants */
+                  natural max_slots = cf_count > 40 ? 40 : cf_count;
+                  natural i;
+                  for (i = 0; i < max_slots; i++) {
+                    LispObj slot_val = cf[i];
+                    fprintf(dbgout, "    fn[%lu]=%016lx", (unsigned long)i,
+                            (unsigned long)slot_val);
+                    /* Annotate suspicious values */
+                    if (slot_val == nfn_at_trap)
+                      fprintf(dbgout, "  <-- MATCHES bad nfn!");
+                    if (slot_val == xpGPR(xp, 9))
+                      fprintf(dbgout, "  <-- fname (symbol)");
+                    fprintf(dbgout, "\n");
+                  }
+                }
+              }
+              /* Also dump vstack[0..15] to show context around the call */
+              if (vsp_val >= 0x100000000LL && vsp_val < 0x800000000LL) {
+                fprintf(dbgout, "  Bug191: vstack[0..15] from vsp=%016lx:\n",
+                        (unsigned long)vsp_val);
+                LispObj *vs = (LispObj *)vsp_val;
+                natural i;
+                for (i = 0; i < 16; i++) {
+                  LispObj v = vs[i];
+                  fprintf(dbgout, "    vs[%lu]=%016lx", (unsigned long)i,
+                          (unsigned long)v);
+                  if (v == nfn_at_trap)
+                    fprintf(dbgout, "  <-- MATCHES bad nfn!");
+                  fprintf(dbgout, "\n");
+                }
+              }
+            }
+          }
         } else
           undef_suppressed++;
         if (undef_count > 50000) {

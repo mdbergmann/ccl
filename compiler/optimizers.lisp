@@ -1892,11 +1892,21 @@
                            (1- (ash 1 (arch::target-nlisptagbits arch)))))
          (nil-tag  (arch::target-null-tag arch))
          (symbol-tag (arch::target-symbol-tag arch)))
-    (if (= nil-tag symbol-tag)
-      (let* ((nvar (gensym)))
-        `(let* ((,nvar ,n))
-          (if ,nvar (consp ,nvar) t)))
-      `(eql (lisptag ,n) ,list-tag))))
+    (cond ((= nil-tag symbol-tag)
+           ;; NIL is tagged as a symbol (x86/ppc): consp or null check.
+           (let* ((nvar (gensym)))
+             `(let* ((,nvar ,n))
+                (if ,nvar (consp ,nvar) t))))
+          ((= nil-tag list-tag)
+           ;; NIL and cons share a lisptag — single tag-compare suffices.
+           `(eql (lisptag ,n) ,list-tag))
+          (t
+           ;; Bug 191: ARM64 TBI tagging has tag-nil (#x02), tag-cons (#x03)
+           ;; and tag-symbol (#x63) all distinct, so the simple lisptag
+           ;; compare misses NIL.  Fall back to explicit null+consp.
+           (let* ((nvar (gensym)))
+             `(let* ((,nvar ,n))
+                (or (null ,nvar) (consp ,nvar))))))))
 
 (define-compiler-macro consp (&whole call n)
   (let* ((arch (backend-target-arch *target-backend*))
