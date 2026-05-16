@@ -3399,7 +3399,33 @@ handle_error(ExceptionInformation *xp, unsigned arg1, unsigned arg2, int *bumpP)
           return true;
         }
 
-        /* Other UUO errors: skip HLT and continue */
+        /* Other UUO errors: skip HLT and continue.
+           Bug 196 diagnostic: dump x13/x14/x15 + faslstate slots so we can
+           see which faslstate slot is bad when a non-fmt=4 trap fires inside
+           %EPUSHVAL (fmt=1 / fmt=6 fixnum and bounds checks). */
+        {
+          static int b196_uuo = 0;
+          b196_uuo++;
+          if (b196_uuo <= 20) {
+            unsigned imm16d = HLT_IMM16(arg2);
+            unsigned b_fmt = imm16d & 7;
+            unsigned b_reg = (imm16d >> 3) & 0x1F;
+            unsigned b_info = (imm16d >> 8) & 0xFF;
+            natural x13v = xpGPR(xp, 13), x14v = xpGPR(xp, 14), x15v = xpGPR(xp, 15);
+            fprintf(dbgout, "  Bug196[%d]: skip-HLT fmt=%u reg=x%u info=%u x13=0x%lx x14=0x%lx x15=0x%lx\n",
+                    b196_uuo, b_fmt, b_reg, b_info,
+                    (unsigned long)x13v, (unsigned long)x14v, (unsigned long)x15v);
+            natural x15r = x15v & 0x00FFFFFFFFFFFFFFULL;
+            if (x15r > 0x100000000ULL && x15r < 0x400000000000ULL) {
+              LispObj *o = (LispObj *)x15r;
+              fprintf(dbgout, "  Bug196[%d]: x15 hdr=0x%lx slots [2]=0x%lx [3]=0x%lx [5]=0x%lx [12]=0x%lx\n",
+                      b196_uuo, (unsigned long)o[-1],
+                      (unsigned long)o[2], (unsigned long)o[3],
+                      (unsigned long)o[5], (unsigned long)o[12]);
+            }
+            fflush(dbgout);
+          }
+        }
         *bumpP = 4;
         return true;
       }
@@ -6219,12 +6245,469 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
           kret = KERN_SUCCESS;
           goto done;
         }
+        /* Bug 196 INTERCEPT: when EARLY-XTYPE fires inside %EPUSHVAL with
+           fmt=4 info=0xbf reg=x13 (faslevec subtag check failed), the caller
+           passed the wrong arg_y (a function instead of the faslstate). The
+           upstream root cause is unsolved; this intercept early-returns from
+           %EPUSHVAL with val (= vsp[+0]) and pops the frame, so boot can
+           continue past l1-clos-boot's defvar-init forms that trigger this.
+
+           Identification: trap fmt=4 info=0xbf reg=x13 AND the current
+           lisp-frame's savefn (at fp+16) is a function whose slot[3] is the
+           symbol with pname "%EPUSHVAL".
+
+           Frame layout (lisp-frame on ARM64, 32 bytes):
+             [fp+0]=savevsp(x25), [fp+8]=savelr(x30),
+             [fp+16]=savefn(x10), [fp+24]=savefp(x29).
+           %EPUSHVAL's prologue does `mov x29, sp` so fp==sp. */
+        if (b_info == 0xbf && ((imm16 >> 3) & 0x1F) == 13) {
+          natural fp = ts->__fp;
+          if (fp > 0x100000000ULL && fp < 0x400000000000ULL) {
+            LispObj savefn = ((LispObj *)fp)[2];
+            if ((savefn >> 56) == 0x62) {
+              natural fn_raw = savefn & 0x00FFFFFFFFFFFFFFULL;
+              if (fn_raw > 0x100000000ULL && fn_raw < 0x400000000000ULL) {
+                LispObj name_sym = ((LispObj *)fn_raw)[3];
+                if ((name_sym >> 56) == 0x63) {
+                  natural sym_raw = name_sym & 0x00FFFFFFFFFFFFFFULL;
+                  if (sym_raw > 0x100000000ULL && sym_raw < 0x400000000000ULL) {
+                    LispObj pname = ((LispObj *)sym_raw)[0];
+                    natural pn_raw = pname & 0x00FFFFFFFFFFFFFFULL;
+                    if (pn_raw > 0x100000000ULL && pn_raw < 0x400000000000ULL) {
+                      LispObj ph = ((LispObj *)pn_raw)[-1];
+                      natural plen = ph & 0x00FFFFFFFFFFFFFFULL;
+                      natural psubtag = ph >> 56;
+                      int is_epushval = 0;
+                      if (plen == 9) {
+                        /* Check if pname is "%EPUSHVAL" (9 chars).
+                           subtag 0x87 = simple-base-string (32-bit chars);
+                           subtag 0x86 = simple-string (8-bit). */
+                        const char *want = "%EPUSHVAL";
+                        int match = 1;
+                        if (psubtag == 0x87) {
+                          unsigned *cp = (unsigned *)pn_raw;
+                          for (int i = 0; i < 9; i++)
+                            if (cp[i] != (unsigned char)want[i]) { match = 0; break; }
+                        } else {
+                          char *cp = (char *)pn_raw;
+                          for (int i = 0; i < 9; i++)
+                            if (cp[i] != want[i]) { match = 0; break; }
+                        }
+                        is_epushval = match;
+                      }
+                      if (is_epushval) {
+                        static int b196_intercept = 0;
+                        b196_intercept++;
+                        /* Pop %EPUSHVAL's frame and return val to caller.
+                           current x25 has [val, s_passed_to_epushval] pushed.
+                           val is at [x25+0]. After return, x25 should be the
+                           caller's vsp (= saved at fp+0). */
+                        natural cur_vsp = ts->__x[25];
+                        LispObj val = lisp_nil;
+                        if (cur_vsp > 0x100000000ULL && cur_vsp < 0x400000000000ULL) {
+                          val = ((LispObj *)cur_vsp)[0];
+                        }
+                        natural saved_vsp = ((LispObj *)fp)[0];
+                        natural saved_lr  = ((LispObj *)fp)[1];
+                        natural saved_fp  = ((LispObj *)fp)[3];
+                        *out_ts = *ts;
+                        out_ts->__x[15] = val;
+                        out_ts->__x[25] = saved_vsp;
+                        out_ts->__lr    = saved_lr;
+                        out_ts->__fp    = saved_fp;
+                        out_ts->__sp    = ts->__sp + 32;   /* pop 32-byte frame */
+                        out_ts->__pc    = saved_lr;
+                        out_ts->__x[5]  = node_size;        /* 1 return value */
+                        if (b196_intercept <= 50)
+                          fprintf(dbgout,
+                                  "Bug196-INTERCEPT[%d]: early-return %%EPUSHVAL val=0x%lx; caller vsp=0x%lx lr=0x%lx fp=0x%lx\n",
+                                  b196_intercept, (unsigned long)val,
+                                  (unsigned long)saved_vsp,
+                                  (unsigned long)saved_lr,
+                                  (unsigned long)saved_fp);
+                        fflush(dbgout);
+                        if (b196_intercept > 2000) {
+                          fprintf(dbgout, "Bug196: too many intercepts (%d), aborting\n", b196_intercept);
+                          fflush(dbgout);
+                          _exit(1);
+                        }
+                        kret = KERN_SUCCESS;
+                        goto done;
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
         static int early_xtype = 0;
         early_xtype++;
-        if (early_xtype <= 5) {
+        if (early_xtype <= 20) {
           unsigned b_reg = (imm16 >> 3) & 0x1F;
           fprintf(dbgout, "EARLY-XTYPE[%d]: skip HLT pc=0x%lx fmt=%u info=0x%02x reg=x%u\n",
                   early_xtype, (unsigned long)pc, b_fmt, b_info, b_reg);
+          /* Bug 196 diagnostic: dump x13/x14/x15 + the faslstate that's
+             pushed on the vsp at [x25+8] (inside %EPUSHVAL, x15 has been
+             reloaded to val=arg_z by the time the type check fires, so the
+             faslstate must be fetched from the vsp). */
+          natural x13v = ts->__x[13], x14v = ts->__x[14], x15v = ts->__x[15];
+          natural x25v = ts->__x[25];
+          natural lr_v = ts->__lr;
+          natural fp_v = ts->__fp;   /* x29 */
+          natural sp_v = ts->__sp;
+          natural x10v = ts->__x[10];
+          fprintf(dbgout, "  Bug196: x13=0x%lx x14=0x%lx x15=0x%lx x25=0x%lx\n",
+                  (unsigned long)x13v, (unsigned long)x14v,
+                  (unsigned long)x15v, (unsigned long)x25v);
+          fprintf(dbgout, "  Bug196: x10(nfn)=0x%lx lr=0x%lx fp=0x%lx sp=0x%lx\n",
+                  (unsigned long)x10v, (unsigned long)lr_v,
+                  (unsigned long)fp_v, (unsigned long)sp_v);
+          /* Walk the lisp frame chain to find %EPUSHVAL's caller and
+             that caller's caller. Lisp frame on ARM64 (32 bytes):
+             [fp+0]=savevsp, [fp+8]=savelr, [fp+16]=savefn, [fp+24]=savefp. */
+          if (fp_v > 0x100000000ULL && fp_v < 0x400000000000ULL) {
+            LispObj *f0 = (LispObj *)fp_v;
+            fprintf(dbgout, "  Bug196: frame0 vsp=0x%lx lr=0x%lx fn=0x%lx prev_fp=0x%lx\n",
+                    (unsigned long)f0[0], (unsigned long)f0[1],
+                    (unsigned long)f0[2], (unsigned long)f0[3]);
+            /* Dump instructions before frame0.lr — that's the address in
+               %FASL-EXPR right AFTER the call that led here. Show 8 insns
+               before and 4 after. */
+            natural lr0 = f0[1];
+            if (lr0 > 0x100000000ULL && lr0 < 0x400000000000ULL) {
+              unsigned *insns = (unsigned *)(lr0 - 32);  /* 8 insns before */
+              fprintf(dbgout,
+                      "  Bug196: code-around-lr0(%lx): %08x %08x %08x %08x %08x %08x %08x %08x | %08x %08x %08x %08x\n",
+                      (unsigned long)lr0,
+                      insns[0], insns[1], insns[2], insns[3],
+                      insns[4], insns[5], insns[6], insns[7],
+                      insns[8], insns[9], insns[10], insns[11]);
+            }
+            /* Dump vsp content (more entries) — saved values for s, op, etc. */
+            if (x25v > 0x100000000ULL && x25v < 0x400000000000ULL) {
+              LispObj *v = (LispObj *)x25v;
+              fprintf(dbgout,
+                      "  Bug196: vsp[0..7]: %lx %lx %lx %lx %lx %lx %lx %lx\n",
+                      (unsigned long)v[0], (unsigned long)v[1],
+                      (unsigned long)v[2], (unsigned long)v[3],
+                      (unsigned long)v[4], (unsigned long)v[5],
+                      (unsigned long)v[6], (unsigned long)v[7]);
+              /* vsp[16] should be the real faslstate (stack-allocated istruct).
+                 Walk slot 14 (fasldispatch) and dump pname/code for $fasl-nil,
+                 $fasl-eval, $fasl-symfn. */
+              LispObj fst = v[2];  /* offset 16 = the real s */
+              natural fst_raw = fst & 0x00FFFFFFFFFFFFFFULL;
+              natural fst_tag = fst >> 56;
+              fprintf(dbgout, "  Bug196: real-s tag=0x%02lx addr=0x%lx\n",
+                      (unsigned long)fst_tag, (unsigned long)fst_raw);
+              if (fst_raw > 0x100000000ULL && fst_raw < 0x400001000000ULL) {
+                LispObj *fst_p = (LispObj *)fst_raw;
+                /* slot 14 from base (istruct: slot 0 = type, slot 14 = fasldispatch) */
+                LispObj disp_vec = fst_p[14];
+                natural disp_raw = disp_vec & 0x00FFFFFFFFFFFFFFULL;
+                fprintf(dbgout, "  Bug196: real-s slot14(fasldispatch)=0x%lx\n",
+                        (unsigned long)disp_vec);
+                if (disp_raw > 0x100000000ULL && disp_raw < 0x400000000000ULL) {
+                  LispObj *disp = (LispObj *)disp_raw;
+                  /* Dump the raw values at all candidate indices first */
+                  fprintf(dbgout, "  Bug196: disp raw entries:\n");
+                  for (int di = 0; di <= 45; di++) {
+                    fprintf(dbgout, "    [%d]=0x%lx", di, (unsigned long)disp[di]);
+                    if ((di % 4) == 3) fprintf(dbgout, "\n");
+                  }
+                  fprintf(dbgout, "\n");
+                  /* Try the candidate ops */
+                  int ops[] = {18, 27, 28, 3, 4, 41, 35};  /* nil, symfn, eval, clfun, lfuncall, defvar-init, defun */
+                  const char *names[] = {"$fasl-nil", "$fasl-symfn", "$fasl-eval", "$fasl-clfun", "$fasl-lfuncall", "$fasl-defvar-init", "$fasl-defun"};
+                  for (size_t oi = 0; oi < sizeof(ops)/sizeof(ops[0]); oi++) {
+                    LispObj handler = disp[ops[oi]];
+                    natural h_raw = handler & 0x00FFFFFFFFFFFFFFULL;
+                    if ((handler >> 56) == 0x62 &&
+                        h_raw > 0x100000000ULL && h_raw < 0x400000000000ULL) {
+                      LispObj *hp = (LispObj *)h_raw;
+                      LispObj cv = hp[1];
+                      natural cv_raw = cv & 0x00FFFFFFFFFFFFFFULL;
+                      if (cv_raw > 0x100000000ULL && cv_raw < 0x400000000000ULL) {
+                        unsigned *cvi = (unsigned *)cv_raw;
+                        fprintf(dbgout,
+                                "  Bug196: %s [%d] @ fn=0x%lx cv=0x%lx code[0..15]:\n"
+                                "    %08x %08x %08x %08x %08x %08x %08x %08x\n"
+                                "    %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                                names[oi], ops[oi],
+                                (unsigned long)h_raw, (unsigned long)cv_raw,
+                                cvi[0], cvi[1], cvi[2], cvi[3],
+                                cvi[4], cvi[5], cvi[6], cvi[7],
+                                cvi[8], cvi[9], cvi[10], cvi[11],
+                                cvi[12], cvi[13], cvi[14], cvi[15]);
+                        fprintf(dbgout,
+                                "    code[16..31]: %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                                cvi[16], cvi[17], cvi[18], cvi[19],
+                                cvi[20], cvi[21], cvi[22], cvi[23],
+                                cvi[24], cvi[25], cvi[26], cvi[27],
+                                cvi[28], cvi[29], cvi[30], cvi[31]);
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            /* Walk %FASL-EXPR.fn[3] (the symbol whose fcell is the called
+               function — should be %FASL-DISPATCH) and dump its code body. */
+            natural fn1 = f0[2];  /* frame0.fn = %EPUSHVAL */
+            /* Actually walk frame1.fn (=%FASL-EXPR) and find its slot 3. */
+            natural pfp = f0[3];
+            if (pfp > 0x100000000ULL && pfp < 0x400000000000ULL) {
+              LispObj *f1 = (LispObj *)pfp;
+              LispObj fexpr_fn = f1[2];
+              natural fexpr_raw = fexpr_fn & 0x00FFFFFFFFFFFFFFULL;
+              if (fexpr_raw > 0x100000000ULL && fexpr_raw < 0x400000000000ULL) {
+                LispObj *fexpr = (LispObj *)fexpr_raw;
+                /* Dump first 12 constant slots of %FASL-EXPR */
+                fprintf(dbgout,
+                        "  Bug196: %%FASL-EXPR.consts: [2]=%lx [3]=%lx [4]=%lx [5]=%lx [6]=%lx\n",
+                        (unsigned long)fexpr[2], (unsigned long)fexpr[3],
+                        (unsigned long)fexpr[4], (unsigned long)fexpr[5],
+                        (unsigned long)fexpr[6]);
+                /* slot[3] should be the symbol %FASL-DISPATCH — follow fcell */
+                LispObj sym = fexpr[3];
+                natural sym_raw = sym & 0x00FFFFFFFFFFFFFFULL;
+                if ((sym >> 56) == 0x63 &&
+                    sym_raw > 0x100000000ULL && sym_raw < 0x400000000000ULL) {
+                  LispObj *symp = (LispObj *)sym_raw;
+                  LispObj fc = symp[2];   /* fcell typically at slot 2 (offset 16) */
+                  natural fc_raw = fc & 0x00FFFFFFFFFFFFFFULL;
+                  /* Dump pname of this symbol */
+                  {
+                    LispObj pn = symp[0];
+                    natural pn_raw = pn & 0x00FFFFFFFFFFFFFFULL;
+                    if (pn_raw > 0x100000000ULL && pn_raw < 0x400000000000ULL) {
+                      LispObj ph = ((LispObj *)pn_raw)[-1];
+                      natural plen = ph & 0x00FFFFFFFFFFFFFFULL;
+                      if (plen > 0 && plen < 60) {
+                        char nb[64] = {0};
+                        int cs = ((ph >> 56) == 0x87) ? 4 : 1;
+                        for (natural i = 0; i < plen; i++) nb[i] = ((char *)pn_raw)[i * cs];
+                        fprintf(dbgout,
+                                "  Bug196: %%FASL-EXPR.fn[3] symbol pname=\"%s\"\n", nb);
+                      }
+                    }
+                  }
+                  fprintf(dbgout,
+                          "  Bug196: %%FASL-EXPR.fn[3] sym=0x%lx fcell=0x%lx\n",
+                          (unsigned long)sym_raw, (unsigned long)fc);
+                  if ((fc >> 56) == 0x62 &&
+                      fc_raw > 0x100000000ULL && fc_raw < 0x400000000000ULL) {
+                    LispObj *fdisp = (LispObj *)fc_raw;
+                    LispObj cv = fdisp[1];
+                    natural cv_raw = cv & 0x00FFFFFFFFFFFFFFULL;
+                    if (cv_raw > 0x100000000ULL && cv_raw < 0x400000000000ULL) {
+                      unsigned *iv = (unsigned *)cv_raw;
+                      fprintf(dbgout, "  Bug196: dispatch-fn cv[RW]=0x%lx slots=%lu\n",
+                              (unsigned long)cv_raw,
+                              (unsigned long)(fdisp[-1] & 0x00FFFFFFFFFFFFFFULL));
+                      fprintf(dbgout,
+                              "  Bug196: dispatch-fn code[0..23]:\n"
+                              "    %08x %08x %08x %08x %08x %08x %08x %08x\n"
+                              "    %08x %08x %08x %08x %08x %08x %08x %08x\n"
+                              "    %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                              iv[0], iv[1], iv[2], iv[3], iv[4], iv[5], iv[6], iv[7],
+                              iv[8], iv[9], iv[10], iv[11], iv[12], iv[13], iv[14], iv[15],
+                              iv[16], iv[17], iv[18], iv[19], iv[20], iv[21], iv[22], iv[23]);
+                      /* Find the tail-call code at the end. Look for blr/br + ret pattern. */
+                      LispObj hdr = fdisp[-1];
+                      natural nslots = hdr & 0x00FFFFFFFFFFFFFFULL;
+                      /* Function size in elements = nslots; code starts at slot 0
+                         but slot 0 is entrypoint pointer; code-vector itself has
+                         instructions. The function body lives at cv[?..]. We just
+                         dump the first 24 instructions which should include the
+                         entry/prologue. Also dump 8 more from offset 24*4=96. */
+                      fprintf(dbgout,
+                              "  Bug196: dispatch-fn code[24..47]:\n"
+                              "    %08x %08x %08x %08x %08x %08x %08x %08x\n"
+                              "    %08x %08x %08x %08x %08x %08x %08x %08x\n"
+                              "    %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                              iv[24], iv[25], iv[26], iv[27], iv[28], iv[29], iv[30], iv[31],
+                              iv[32], iv[33], iv[34], iv[35], iv[36], iv[37], iv[38], iv[39],
+                              iv[40], iv[41], iv[42], iv[43], iv[44], iv[45], iv[46], iv[47]);
+                      fprintf(dbgout,
+                              "  Bug196: dispatch-fn code[48..71]:\n"
+                              "    %08x %08x %08x %08x %08x %08x %08x %08x\n"
+                              "    %08x %08x %08x %08x %08x %08x %08x %08x\n"
+                              "    %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                              iv[48], iv[49], iv[50], iv[51], iv[52], iv[53], iv[54], iv[55],
+                              iv[56], iv[57], iv[58], iv[59], iv[60], iv[61], iv[62], iv[63],
+                              iv[64], iv[65], iv[66], iv[67], iv[68], iv[69], iv[70], iv[71]);
+                      fprintf(dbgout,
+                              "  Bug196: dispatch-fn code[72..95]:\n"
+                              "    %08x %08x %08x %08x %08x %08x %08x %08x\n"
+                              "    %08x %08x %08x %08x %08x %08x %08x %08x\n"
+                              "    %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                              iv[72], iv[73], iv[74], iv[75], iv[76], iv[77], iv[78], iv[79],
+                              iv[80], iv[81], iv[82], iv[83], iv[84], iv[85], iv[86], iv[87],
+                              iv[88], iv[89], iv[90], iv[91], iv[92], iv[93], iv[94], iv[95]);
+                      /* Also dump constants of dispatch-fn */
+                      fprintf(dbgout,
+                              "  Bug196: dispatch-fn consts [2..7]: %lx %lx %lx %lx %lx %lx\n",
+                              (unsigned long)fdisp[2], (unsigned long)fdisp[3],
+                              (unsigned long)fdisp[4], (unsigned long)fdisp[5],
+                              (unsigned long)fdisp[6], (unsigned long)fdisp[7]);
+                      (void)nslots;
+                    }
+                  }
+                }
+              }
+            }
+            (void)fn1;
+            {
+            natural pfp = f0[3];
+            if (pfp > 0x100000000ULL && pfp < 0x400000000000ULL) {
+              LispObj *f1 = (LispObj *)pfp;
+              fprintf(dbgout, "  Bug196: frame1 vsp=0x%lx lr=0x%lx fn=0x%lx prev_fp=0x%lx\n",
+                      (unsigned long)f1[0], (unsigned long)f1[1],
+                      (unsigned long)f1[2], (unsigned long)f1[3]);
+              natural pfp2 = f1[3];
+              if (pfp2 > 0x100000000ULL && pfp2 < 0x400000000000ULL) {
+                LispObj *f2 = (LispObj *)pfp2;
+                fprintf(dbgout, "  Bug196: frame2 vsp=0x%lx lr=0x%lx fn=0x%lx prev_fp=0x%lx\n",
+                        (unsigned long)f2[0], (unsigned long)f2[1],
+                        (unsigned long)f2[2], (unsigned long)f2[3]);
+              }
+            }
+            }
+          }
+          /* For each fn in the chain, try to dump its name (slot at the
+             tail of constants is usually the function name symbol). */
+          {
+            natural fn_addrs[3] = {0, 0, 0};
+            if (fp_v > 0x100000000ULL && fp_v < 0x400000000000ULL) {
+              LispObj *f0 = (LispObj *)fp_v;
+              fn_addrs[0] = f0[2];
+              natural pfp = f0[3];
+              if (pfp > 0x100000000ULL && pfp < 0x400000000000ULL) {
+                LispObj *f1 = (LispObj *)pfp;
+                fn_addrs[1] = f1[2];
+                natural pfp2 = f1[3];
+                if (pfp2 > 0x100000000ULL && pfp2 < 0x400000000000ULL) {
+                  LispObj *f2 = (LispObj *)pfp2;
+                  fn_addrs[2] = f2[2];
+                }
+              }
+            }
+            for (int fi = 0; fi < 3; fi++) {
+              natural fn_raw = fn_addrs[fi] & 0x00FFFFFFFFFFFFFFULL;
+              if ((fn_addrs[fi] >> 56) == 0x62 &&
+                  fn_raw > 0x100000000ULL && fn_raw < 0x400000000000ULL) {
+                LispObj *fn = (LispObj *)fn_raw;
+                LispObj hdr = fn[-1];
+                natural nslots = hdr & 0x00FFFFFFFFFFFFFFULL;
+                if (nslots > 0 && nslots < 64) {
+                  /* Find the last symbol-tagged slot before lfun-bits.
+                     Function name is typically the last constant. */
+                  for (int si = (int)nslots - 1; si >= 2; si--) {
+                    LispObj v = fn[si];
+                    if ((v >> 56) == 0x63) {
+                      natural sr = v & 0x00FFFFFFFFFFFFFFULL;
+                      if (sr > 0x100000000ULL && sr < 0x400000000000ULL) {
+                        LispObj *sym = (LispObj *)sr;
+                        LispObj pn = sym[0];
+                        natural pn_raw = pn & 0x00FFFFFFFFFFFFFFULL;
+                        if (pn_raw > 0x100000000ULL && pn_raw < 0x400000000000ULL) {
+                          LispObj ph = ((LispObj *)pn_raw)[-1];
+                          natural plen = ph & 0x00FFFFFFFFFFFFFFULL;
+                          if (plen > 0 && plen < 60) {
+                            char nb[64] = {0};
+                            int cs = ((ph >> 56) == 0x87) ? 4 : 1;
+                            for (natural i = 0; i < plen; i++)
+                              nb[i] = ((char *)pn_raw)[i * cs];
+                            fprintf(dbgout,
+                                    "  Bug196: frame%d fn=0x%lx slot[%d] sym=\"%s\"\n",
+                                    fi, (unsigned long)fn_raw, si, nb);
+                            break;
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+          if (x25v > 0x100000000ULL && x25v < 0x400000000000ULL) {
+            LispObj sv = *(LispObj *)(x25v + 8);  /* s pushed first */
+            LispObj vv = *(LispObj *)(x25v + 0);  /* val pushed second */
+            fprintf(dbgout, "  Bug196: vsp[+8]=s=0x%lx  vsp[+0]=val=0x%lx\n",
+                    (unsigned long)sv, (unsigned long)vv);
+            natural sr = sv & 0x00FFFFFFFFFFFFFFULL;
+            natural st = sv >> 56;
+            if (sr > 0x100000000ULL && sr < 0x400000000000ULL) {
+              LispObj *s = (LispObj *)sr;
+              fprintf(dbgout,
+                      "  Bug196: s tag=0x%02lx hdr[-1]=0x%lx slots: "
+                      "[0]=0x%lx [1]=0x%lx [2]=0x%lx [3]=0x%lx [4]=0x%lx [5]=0x%lx [6]=0x%lx [12]=0x%lx\n",
+                      (unsigned long)st, (unsigned long)s[-1],
+                      (unsigned long)s[0], (unsigned long)s[1],
+                      (unsigned long)s[2], (unsigned long)s[3],
+                      (unsigned long)s[4], (unsigned long)s[5],
+                      (unsigned long)s[6], (unsigned long)s[12]);
+              /* Identify the deffaslop handler: dump pname of any symbol-tagged
+                 slot among [2]..[6], and walk the lfun-info if it's a vector
+                 of constants (last slot before lfun-bits typically holds name). */
+              for (int si = 2; si <= 6; si++) {
+                LispObj slot = s[si];
+                natural sym_raw = slot & 0x00FFFFFFFFFFFFFFULL;
+                if ((slot >> 56) == 0x63 &&
+                    sym_raw > 0x100000000ULL && sym_raw < 0x400000000000ULL) {
+                  LispObj *sym = (LispObj *)sym_raw;
+                  LispObj pn = sym[0];
+                  natural pn_raw = pn & 0x00FFFFFFFFFFFFFFULL;
+                  if (pn_raw > 0x100000000ULL && pn_raw < 0x400000000000ULL) {
+                    LispObj ph = ((LispObj *)pn_raw)[-1];
+                    natural plen = ph & 0x00FFFFFFFFFFFFFFULL;
+                    if (plen > 0 && plen < 60) {
+                      char nb[64] = {0};
+                      int cs = ((ph >> 56) == 0x87) ? 4 : 1;
+                      for (natural i = 0; i < plen; i++) nb[i] = ((char *)pn_raw)[i * cs];
+                      fprintf(dbgout, "  Bug196: s[%d] is symbol \"%s\"\n", si, nb);
+                    }
+                  }
+                }
+              }
+              /* If s looks like a function (tag_function=0x62), dump the first
+                 8 instructions of its code-vector (slot 1, RW address) so we
+                 can compare against what arm642/arm64-vinsns should emit. */
+              if (st == 0x62) {
+                LispObj cv = s[1];
+                natural cv_raw = cv & 0x00FFFFFFFFFFFFFFULL;
+                if (cv_raw > 0x100000000ULL && cv_raw < 0x400000000000ULL) {
+                  unsigned *insns = (unsigned *)cv_raw;
+                  fprintf(dbgout,
+                          "  Bug196: cv[RW]=0x%lx code: %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                          (unsigned long)cv_raw,
+                          insns[0], insns[1], insns[2], insns[3],
+                          insns[4], insns[5], insns[6], insns[7],
+                          insns[8], insns[9], insns[10], insns[11]);
+                }
+              }
+            }
+          }
+          natural x13r = x13v & 0x00FFFFFFFFFFFFFFULL;
+          if (x13r > 0x100000000ULL && x13r < 0x400000000000ULL && (x13v >> 56) == 0x63) {
+            LispObj *sym = (LispObj *)x13r;
+            LispObj pn = sym[0];
+            natural pn_raw = pn & 0x00FFFFFFFFFFFFFFULL;
+            if (pn_raw > 0x100000000ULL && pn_raw < 0x400000000000ULL) {
+              LispObj ph = ((LispObj *)pn_raw)[-1];
+              natural plen = ph & 0x00FFFFFFFFFFFFFFULL;
+              if (plen > 0 && plen < 60) {
+                char nb[64] = {0};
+                int cs = ((ph >> 56) == 0x87) ? 4 : 1;
+                for (natural i = 0; i < plen; i++) nb[i] = ((char *)pn_raw)[i * cs];
+                fprintf(dbgout, "  Bug196: x13 is symbol \"%s\"\n", nb);
+              }
+            }
+          }
+          fflush(dbgout);
         }
         *out_ts = *ts;
         out_ts->__pc = pc + 4;
@@ -7491,6 +7974,26 @@ catch_mach_exception_raise_state(mach_port_t exception_port,
           bug195_count++;
           fprintf(dbgout, "Bug195-INTERCEPT[%d]: BLR went to istruct[0]; returning NIL from funcall\n",
                   bug195_count);
+          /* Bug 196 follow-up: dump vsp content at this moment so we can
+             confirm what's at vsp[0] and vsp[8] right before the intercept
+             returns and $fasl-lfuncall reloads x14 from vsp[8]. */
+          {
+            natural x25v = ts->__x[25];
+            natural x14v = ts->__x[14];
+            natural lr_v = ts->__lr;
+            fprintf(dbgout,
+                    "  Bug196-trace: at-Bug195 x14=0x%lx lr=0x%lx vsp=0x%lx\n",
+                    (unsigned long)x14v, (unsigned long)lr_v, (unsigned long)x25v);
+            if (x25v > 0x100000000ULL && x25v < 0x400000000000ULL) {
+              LispObj *v = (LispObj *)x25v;
+              fprintf(dbgout,
+                      "  Bug196-trace: vsp[0..7]: %lx %lx %lx %lx %lx %lx %lx %lx\n",
+                      (unsigned long)v[0], (unsigned long)v[1],
+                      (unsigned long)v[2], (unsigned long)v[3],
+                      (unsigned long)v[4], (unsigned long)v[5],
+                      (unsigned long)v[6], (unsigned long)v[7]);
+            }
+          }
           fflush(dbgout);
           if (bug195_count > 50) {
             fprintf(dbgout, "Bug195: too many intercepts (%d), aborting\n", bug195_count);
